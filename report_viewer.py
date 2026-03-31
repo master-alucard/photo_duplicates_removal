@@ -49,6 +49,10 @@ _M_SOLO_TINT    = "#E1F5FE"   # Light Blue 50
 _M_SOLO_BORDER  = "#0288D1"   # Light Blue 700
 _M_BROKEN_TINT  = "#FCE4EC"   # Pink 50
 _M_BROKEN_BDR   = "#AD1457"   # Pink 800
+_M_MANUAL      = "#5C6BC0"   # Indigo 400
+_M_MANUAL_TINT = "#E8EAF6"   # Indigo 50
+_M_MANUAL_HDR  = "#EDE7F6"   # Purple 50
+_M_MANUAL_DARK = "#4527A0"   # Deep Purple 800
 
 _THUMB_SIZE = 156
 
@@ -211,9 +215,10 @@ class ReportViewer(tk.Toplevel):
 
         # Manual calibration groups (list of path lists, created by user in the review)
         self._manual_calib_groups: list[list[Path]] = []
-        self._manual_selected_paths: set[int] = set()   # indices into _all_orig_paths()
-        self._manual_tile_frames: list[tk.Frame] = []   # rebuilt each last-page render
-        self._manual_groups_frame: tk.Frame | None = None  # container for group entries
+        self._manual_group_vars: dict[int, tk.BooleanVar] = {}    # per-manual-group include checkbox
+        self._manual_used_paths: set[Path] = set()                 # paths assigned to manual groups
+        self._manual_selected_paths: set[Path] = set()             # currently selected tile paths
+        self._manual_tile_frames: dict[Path, tk.Frame] = {}        # path → tile frame
 
         # Pagination
         self._current_page: int = 0
@@ -450,6 +455,10 @@ class ReportViewer(tk.Toplevel):
     # ── solo & broken sections ────────────────────────────────────────────────
 
     def _build_solo_section(self) -> None:
+        visible = [r for r in self._solo_originals if r.path not in self._manual_used_paths]
+        if not visible:
+            return
+
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
@@ -465,27 +474,38 @@ class ReportViewer(tk.Toplevel):
         head.pack(fill=tk.X)
         tk.Label(
             head,
-            text=f"Unique images — no duplicates found  ({len(self._solo_originals)} files)",
+            text=f"Unique images — no duplicates found  ({len(visible)} files)",
             font=("Segoe UI", 9, "bold"), bg=_M_SOLO_TINT, fg=_M_SOLO_BORDER,
         ).pack(side=tk.LEFT, padx=12, pady=8)
         tk.Label(
             head, text="Check images to copy to results/",
             font=("Segoe UI", 8), bg=_M_SOLO_TINT, fg=_M_TEXT3,
         ).pack(side=tk.LEFT, padx=2)
-        _mat_btn(head, "None", lambda: [v.set(False) for v in self._solo_vars.values()],
+        # "All"/"None" acts only on the visible (non-manual-grouped) subset
+        visible_idxs = [i for i, r in enumerate(self._solo_originals)
+                        if r.path not in self._manual_used_paths]
+        _mat_btn(head, "None",
+                 lambda vi=visible_idxs: [self._solo_vars[i].set(False) for i in vi],
                  _M_SOLO_TINT, fg=_M_SOLO_BORDER, font_size=8
                  ).pack(side=tk.RIGHT, padx=(0, 8), pady=4)
-        _mat_btn(head, "All",  lambda: [v.set(True)  for v in self._solo_vars.values()],
+        _mat_btn(head, "All",
+                 lambda vi=visible_idxs: [self._solo_vars[i].set(True) for i in vi],
                  _M_SOLO_TINT, fg=_M_SOLO_BORDER, font_size=8
                  ).pack(side=tk.RIGHT, padx=4, pady=4)
 
         grid_frame = tk.Frame(card, bg=_M_SOLO_TINT, padx=10, pady=8)
         grid_frame.pack(fill=tk.X)
+        col = 0
+        row = 0
         for img_idx, rec in enumerate(self._solo_originals):
-            v = tk.BooleanVar(value=False)
-            self._solo_vars[img_idx] = v
-            self._build_image_tile(grid_frame, rec, v,
-                                   img_idx % 5, img_idx // 5, bg=_M_SOLO_TINT)
+            if rec.path in self._manual_used_paths:
+                continue
+            v = self._solo_vars[img_idx]
+            self._build_image_tile(grid_frame, rec, v, col, row, bg=_M_SOLO_TINT)
+            col += 1
+            if col >= 5:
+                col = 0
+                row += 1
 
     def _build_broken_section(self) -> None:
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
@@ -841,14 +861,21 @@ class ReportViewer(tk.Toplevel):
                 parent=self,
             )
 
-        # Add manually created calibration groups
+        # Add manually created calibration groups (only if their checkbox is checked)
         for gi, paths in enumerate(self._manual_calib_groups):
+            if not self._manual_group_vars.get(gi, tk.BooleanVar(value=True)).get():
+                continue
             if len(paths) < 2:
                 continue
             gdir = groups_dir / f"manual_{gi:04d}"
             gdir.mkdir(exist_ok=True)
             for p in paths:
                 _link(p, gdir / p.name)
+
+        # Solo originals checked in the solo section → include as calibration singles
+        for img_idx, rec in enumerate(self._solo_originals):
+            if self._solo_vars.get(img_idx, tk.BooleanVar(value=False)).get():
+                _link(rec.path, singles_dir / rec.path.name)
 
         # Check if we have anything useful
         n_groups = sum(1 for d in groups_dir.iterdir() if d.is_dir())
@@ -881,63 +908,133 @@ class ReportViewer(tk.Toplevel):
 
     # ── manual calibration groups section ────────────────────────────────────
 
+    def _build_manual_group_card(self, mg_idx: int) -> None:
+        """Render a proper group card for a manually-created calibration group."""
+        paths = self._manual_calib_groups[mg_idx]
+        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer.pack(fill=tk.X)
+
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
+                             highlightbackground=_M_MANUAL, highlightthickness=1)
+        card_wrap.pack(fill=tk.X)
+
+        tk.Frame(card_wrap, width=5, bg=_M_MANUAL).pack(side=tk.LEFT, fill=tk.Y)
+        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # Header
+        head = tk.Frame(card, bg=_M_MANUAL_TINT, pady=0)
+        head.pack(fill=tk.X)
+
+        g_var = self._manual_group_vars.get(mg_idx)
+        if g_var is None:
+            g_var = tk.BooleanVar(value=True)
+            self._manual_group_vars[mg_idx] = g_var
+
+        tk.Checkbutton(
+            head, variable=g_var, bg=_M_MANUAL_TINT,
+            activebackground=_M_MANUAL_TINT,
+        ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
+
+        tk.Label(
+            head,
+            text=f"Manual Group #{mg_idx + 1}  ·  {len(paths)} image{'s' if len(paths) != 1 else ''}",
+            font=("Segoe UI", 9, "bold"), bg=_M_MANUAL_TINT, fg=_M_MANUAL,
+        ).pack(side=tk.LEFT, padx=8, pady=8)
+
+        tk.Label(
+            head, text=" MANUAL ",
+            font=("Segoe UI", 8, "bold"), bg=_M_MANUAL, fg="#FFFFFF",
+            padx=6, pady=2,
+        ).pack(side=tk.LEFT, padx=4)
+
+        tk.Label(
+            head, text="↗ calibration only",
+            font=("Segoe UI", 8), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
+        ).pack(side=tk.LEFT, padx=4)
+
+        _mat_btn(
+            head, "✕  Remove Group",
+            lambda i=mg_idx: self._manual_remove_group(i),
+            bg=_M_ERROR_TINT, fg=_M_ERROR, font_size=8,
+        ).pack(side=tk.RIGHT, padx=8, pady=6)
+
+        # Image tiles
+        img_frame = tk.Frame(card, bg=_M_MANUAL_TINT, padx=10, pady=8)
+        img_frame.pack(fill=tk.X)
+
+        COLS = 4
+        for i, path in enumerate(paths):
+            rec = self._path_to_record(path)
+            if rec is not None:
+                dummy_var = tk.BooleanVar(value=True)
+                self._build_image_tile(img_frame, rec, dummy_var, i % COLS, i // COLS,
+                                       bg=_M_MANUAL_TINT)
+            else:
+                cell = tk.Frame(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
+                cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
+                lbl = tk.Label(cell, bg=_M_MANUAL_TINT)
+                lbl.pack()
+                self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
+                tk.Label(
+                    cell,
+                    text=(path.name[:15] + "…" if len(path.name) > 16 else path.name),
+                    font=("Segoe UI", 7), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
+                ).pack()
+
     def _all_orig_paths(self) -> list:
-        """Flat list of all original image paths (auto-detected originals + solo originals)."""
-        return (
-            [r.path for g in self._groups for r in g.originals]
-            + [r.path for r in self._solo_originals]
-        )
+        """Solo original image paths not yet assigned to a manual group."""
+        return [r.path for r in self._solo_originals if r.path not in self._manual_used_paths]
 
     def _build_manual_calib_section(self) -> None:
-        """Section at the bottom of the last page for creating manual calibration groups."""
+        """Section for creating new manual calibration groups from available solo originals."""
         all_paths = self._all_orig_paths()
         if not all_paths:
             return
 
-        # Reset per-render state (tile frames are rebuilt each render)
-        self._manual_tile_frames = []
-        self._manual_selected_paths = set()  # reset selection on re-render
+        # Rebuild tile frame dict (old frames were destroyed by _render_page)
+        self._manual_tile_frames = {}
 
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
         card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground="#5C6BC0", highlightthickness=1)
+                             highlightbackground=_M_MANUAL, highlightthickness=1)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg="#5C6BC0").pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=5, bg=_M_MANUAL).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── Header ────────────────────────────────────────────────────────────
-        head = tk.Frame(card, bg="#EDE7F6", pady=0)  # Purple 50
+        head = tk.Frame(card, bg=_M_MANUAL_HDR, pady=0)
         head.pack(fill=tk.X)
         tk.Label(
             head,
-            text=f"Create Manual Calibration Groups  ({len(all_paths)} originals available)",
-            font=("Segoe UI", 9, "bold"), bg="#EDE7F6", fg="#4527A0",
+            text=f"Create Manual Calibration Groups  ({len(all_paths)} unique images available)",
+            font=("Segoe UI", 9, "bold"), bg=_M_MANUAL_HDR, fg=_M_MANUAL_DARK,
         ).pack(side=tk.LEFT, padx=12, pady=8)
         tk.Label(
             head,
-            text="Select photos → Create Group → repeat → Calibrate from Review will include them",
-            font=("Segoe UI", 8), bg="#EDE7F6", fg=_M_TEXT2,
+            text="Select photos → Create Group → repeat → groups appear above with MANUAL badge",
+            font=("Segoe UI", 8), bg=_M_MANUAL_HDR, fg=_M_TEXT2,
         ).pack(side=tk.LEFT, padx=4)
 
-        # ── Thumbnail grid (all originals, selectable) ────────────────────────
-        grid_outer = tk.Frame(card, bg="#EDE7F6", padx=10, pady=8)
+        # ── Thumbnail grid (available solo originals, selectable) ─────────────
+        grid_outer = tk.Frame(card, bg=_M_MANUAL_HDR, padx=10, pady=8)
         grid_outer.pack(fill=tk.X)
 
         COLS = 6
         THUMB = 90
         for i, path in enumerate(all_paths):
             cell = tk.Frame(
-                grid_outer, bg="#EDE7F6", bd=3, relief="flat",
+                grid_outer, bg=_M_MANUAL_HDR, bd=3, relief="flat",
                 width=THUMB + 8, height=THUMB + 22,
             )
             cell.grid(row=i // COLS, column=i % COLS, padx=3, pady=3, sticky="n")
             cell.pack_propagate(False)
 
-            img_lbl = tk.Label(cell, bg="#EDE7F6", cursor="hand2")
+            img_lbl = tk.Label(cell, bg=_M_MANUAL_HDR, cursor="hand2")
             img_lbl.pack(pady=(2, 0))
             self._load_thumbnail_async(path, img_lbl, THUMB)
 
@@ -945,13 +1042,13 @@ class ReportViewer(tk.Toplevel):
             name_lbl = tk.Label(
                 cell,
                 text=(fname[:12] + "…" if len(fname) > 13 else fname),
-                font=("Segoe UI", 7), bg="#EDE7F6", fg=_M_TEXT2, cursor="hand2",
+                font=("Segoe UI", 7), bg=_M_MANUAL_HDR, fg=_M_TEXT2, cursor="hand2",
             )
             name_lbl.pack()
 
-            self._manual_tile_frames.append(cell)
+            self._manual_tile_frames[path] = cell
             for w in (cell, img_lbl, name_lbl):
-                w.bind("<Button-1>", lambda e, idx=i: self._manual_toggle(idx))
+                w.bind("<Button-1>", lambda e, p=path: self._manual_toggle(p))
 
         # ── Action bar ────────────────────────────────────────────────────────
         act = tk.Frame(card, bg=_M_SURFACE, pady=0,
@@ -966,30 +1063,29 @@ class ReportViewer(tk.Toplevel):
 
         _mat_btn(
             act, "+  Create Group from Selected",
-            self._manual_create_group, "#5C6BC0",
+            self._manual_create_group, _M_MANUAL,
         ).pack(side=tk.LEFT, padx=4, pady=6)
 
-        # ── Created groups list ────────────────────────────────────────────────
-        if self._manual_calib_groups:
-            sep = tk.Frame(card, bg=_M_DIVIDER, height=1)
-            sep.pack(fill=tk.X)
-
-        self._manual_groups_frame = tk.Frame(card, bg=_M_SURFACE)
-        self._manual_groups_frame.pack(fill=tk.X)
-        self._rebuild_manual_groups_list()
-
-    def _manual_toggle(self, idx: int) -> None:
-        cell = self._manual_tile_frames[idx]
-        if idx in self._manual_selected_paths:
-            self._manual_selected_paths.discard(idx)
-            cell.configure(bg="#EDE7F6")
+    def _manual_toggle(self, path: Path) -> None:
+        cell = self._manual_tile_frames.get(path)
+        if cell is None or not cell.winfo_exists():
+            return
+        if path in self._manual_selected_paths:
+            self._manual_selected_paths.discard(path)
+            cell.configure(bg=_M_MANUAL_HDR)
             for w in cell.winfo_children():
-                w.configure(bg="#EDE7F6")
+                try:
+                    w.configure(bg=_M_MANUAL_HDR)
+                except tk.TclError:
+                    pass
         else:
-            self._manual_selected_paths.add(idx)
+            self._manual_selected_paths.add(path)
             cell.configure(bg="#BBDEFB")
             for w in cell.winfo_children():
-                w.configure(bg="#BBDEFB")
+                try:
+                    w.configure(bg="#BBDEFB")
+                except tk.TclError:
+                    pass
         n = len(self._manual_selected_paths)
         if hasattr(self, "_manual_sel_lbl") and self._manual_sel_lbl.winfo_exists():
             self._manual_sel_lbl.configure(
@@ -998,60 +1094,28 @@ class ReportViewer(tk.Toplevel):
             )
 
     def _manual_create_group(self) -> None:
-        all_paths = self._all_orig_paths()
-        indices = sorted(self._manual_selected_paths)
-        if len(indices) < 2:
-            self._manual_sel_lbl.configure(
-                text="Select at least 2 images first", fg=_M_ERROR)
+        if len(self._manual_selected_paths) < 2:
+            if hasattr(self, "_manual_sel_lbl") and self._manual_sel_lbl.winfo_exists():
+                self._manual_sel_lbl.configure(
+                    text="Select at least 2 images first", fg=_M_ERROR)
             return
-        paths = [all_paths[i] for i in indices]
+        paths = list(self._manual_selected_paths)
         self._manual_calib_groups.append(paths)
-
-        # Clear selection
-        for idx in list(self._manual_selected_paths):
-            cell = self._manual_tile_frames[idx]
-            cell.configure(bg="#EDE7F6")
-            for w in cell.winfo_children():
-                w.configure(bg="#EDE7F6")
+        self._manual_used_paths.update(paths)
         self._manual_selected_paths.clear()
-        n = len(self._manual_calib_groups)
-        self._manual_sel_lbl.configure(
-            text=f"0 selected  ·  {n} group{'s' if n != 1 else ''} created", fg=_M_TEXT2)
-
-        self._rebuild_manual_groups_list()
+        self._reinit_manual_vars()
+        self._render_page(self._current_page)
 
     def _manual_remove_group(self, idx: int) -> None:
         if 0 <= idx < len(self._manual_calib_groups):
-            self._manual_calib_groups.pop(idx)
-            self._rebuild_manual_groups_list()
-            n = len(self._manual_calib_groups)
-            if hasattr(self, "_manual_sel_lbl") and self._manual_sel_lbl.winfo_exists():
-                self._manual_sel_lbl.configure(
-                    text=f"0 selected  ·  {n} group{'s' if n != 1 else ''} created",
-                    fg=_M_TEXT2,
-                )
-
-    def _rebuild_manual_groups_list(self) -> None:
-        if self._manual_groups_frame is None or not self._manual_groups_frame.winfo_exists():
-            return
-        for w in self._manual_groups_frame.winfo_children():
-            w.destroy()
-        for gi, paths in enumerate(self._manual_calib_groups):
-            row = tk.Frame(self._manual_groups_frame, bg=_M_SURFACE)
-            row.pack(fill=tk.X, padx=10, pady=2)
-            names = "  ·  ".join(p.name for p in paths[:4])
-            if len(paths) > 4:
-                names += f"  +{len(paths) - 4}"
-            tk.Label(
-                row, text=f"Group {gi + 1}:  {names}",
-                font=("Segoe UI", 8), bg=_M_SURFACE, fg=_M_TEXT1,
-                anchor=tk.W,
-            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
-            _mat_btn(
-                row, "✕ Remove",
-                lambda i=gi: self._manual_remove_group(i),
-                _M_ERROR, font_size=7,
-            ).pack(side=tk.RIGHT, padx=4)
+            paths = self._manual_calib_groups.pop(idx)
+            # Restore paths to solo section if not used in any remaining manual group
+            still_used = {p for g in self._manual_calib_groups for p in g}
+            for p in paths:
+                if p not in still_used:
+                    self._manual_used_paths.discard(p)
+            self._reinit_manual_vars()
+            self._render_page(self._current_page)
 
     # ── var initialisation (runs once, preserves state across page changes) ──────
 
@@ -1073,6 +1137,24 @@ class ReportViewer(tk.Toplevel):
         for img_idx in range(len(self._solo_originals)):
             if img_idx not in self._solo_vars:
                 self._solo_vars[img_idx] = tk.BooleanVar(value=False)
+
+    def _reinit_manual_vars(self) -> None:
+        """Rebuild per-manual-group BooleanVars after the group list changes."""
+        new_vars: dict[int, tk.BooleanVar] = {}
+        for i in range(len(self._manual_calib_groups)):
+            new_vars[i] = self._manual_group_vars.get(i, tk.BooleanVar(value=True))
+        self._manual_group_vars = new_vars
+
+    def _path_to_record(self, path: Path) -> Optional[ImageRecord]:
+        """Look up an ImageRecord by path from all groups + solo originals."""
+        for g in self._groups:
+            for r in g.originals + g.previews:
+                if r.path == path:
+                    return r
+        for r in self._solo_originals:
+            if r.path == path:
+                return r
+        return None
 
     # ── pagination ────────────────────────────────────────────────────────────
 
@@ -1104,6 +1186,8 @@ class ReportViewer(tk.Toplevel):
 
         # Solo / broken / manual-groups sections shown on last page
         if self._current_page >= self._total_pages() - 1:
+            for mg_idx in range(len(self._manual_calib_groups)):
+                self._build_manual_group_card(mg_idx)
             if self._solo_originals:
                 self._build_solo_section()
             if self._broken_files:

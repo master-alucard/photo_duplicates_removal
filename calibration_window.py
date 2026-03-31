@@ -145,16 +145,18 @@ class CalibrationWindow(tk.Toplevel):
         self.configure(bg=_BG)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
-        # Material: style the Notebook tab bar
+        # Use a custom style name to avoid polluting the global TNotebook style.
+        # White-selected + blue text is more reliable on Windows (vista theme
+        # can override foreground for "selected" tabs when using dark bg colours).
         style = ttk.Style(self)
         try:
-            style.configure("TNotebook", background=_BG)
-            style.configure("TNotebook.Tab",
+            style.configure("Calib.TNotebook", background=_BG)
+            style.configure("Calib.TNotebook.Tab",
                             font=("Segoe UI", 9, "bold"),
                             padding=[10, 4])
-            style.map("TNotebook.Tab",
-                      background=[("selected", _M_PRIMARY), ("!selected", "#E3F2FD")],
-                      foreground=[("selected", "white"), ("!selected", _M_TEXT2)])
+            style.map("Calib.TNotebook.Tab",
+                      background=[("selected", "#FFFFFF"), ("!selected", "#E3F2FD")],
+                      foreground=[("selected", _M_PRIMARY), ("!selected", _M_TEXT2)])
         except Exception:
             pass
 
@@ -163,7 +165,7 @@ class CalibrationWindow(tk.Toplevel):
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        self._nb = ttk.Notebook(self)
+        self._nb = ttk.Notebook(self, style="Calib.TNotebook")
         self._nb.pack(fill="both", expand=True, padx=10, pady=(10, 6))
 
         self._tab_instr   = ttk.Frame(self._nb)
