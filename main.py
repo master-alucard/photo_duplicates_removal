@@ -49,9 +49,77 @@ from report_viewer import ReportViewer
 SETTINGS_PATH = Path(__file__).parent / "settings.json"
 PHASE_NAMES = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
 
-_ACCENT = "#1a73e8"
-_BG = "#f0f2f5"
-_CARD_BG = "#ffffff"
+# Material Design colour palette (mirrors report_viewer.py)
+_ACCENT         = "#1565C0"   # Blue 800
+_ACCENT_DARK    = "#0D47A1"   # Blue 900
+_ACCENT_TINT    = "#E3F2FD"   # Blue 50
+_BG             = "#F5F5F5"   # Grey 100
+_CARD_BG        = "#FFFFFF"   # Surface white
+_M_SUCCESS      = "#2E7D32"   # Green 800
+_M_ERROR        = "#C62828"   # Red 800
+_M_WARNING      = "#E65100"   # Deep Orange 900
+_M_AMBER        = "#F57F17"   # Amber 900
+_M_DIVIDER      = "#E0E0E0"   # Grey 300
+_M_TEXT1        = "#212121"   # Grey 900
+_M_TEXT2        = "#616161"   # Grey 700
+
+
+def _darken_color(hex_color: str) -> str:
+    """Return a slightly darker shade of a hex color."""
+    try:
+        r = int(hex_color[1:3], 16)
+        g = int(hex_color[3:5], 16)
+        b = int(hex_color[5:7], 16)
+        factor = 0.85
+        r, g, b = int(r * factor), int(g * factor), int(b * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
+    except Exception:
+        return hex_color
+
+
+_MAT_DISABLED_BG = "#BDBDBD"  # Grey 400
+
+
+def _mat_btn(
+    parent: tk.Widget,
+    text: str,
+    command,
+    bg: str,
+    fg: str = "#FFFFFF",
+    font_size: int = 9,
+    **kw,
+) -> tk.Button:
+    """Flat Material-style button with hover feedback and proper disabled state."""
+    btn = tk.Button(
+        parent, text=text, command=command,
+        bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
+        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        font=("Segoe UI", font_size, "bold"),
+        cursor="hand2", **kw,
+    )
+    btn._mat_bg = bg  # remember active colour for re-enable
+
+    def _enter(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=_darken_color(btn._mat_bg))
+
+    def _leave(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=btn._mat_bg)
+
+    btn.bind("<Enter>", _enter)
+    btn.bind("<Leave>", _leave)
+    return btn
+
+
+def _mat_enable(btn: tk.Button) -> None:
+    """Enable a Material button and restore its active bg colour."""
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, cursor="hand2")
+
+
+def _mat_disable(btn: tk.Button) -> None:
+    """Disable a Material button and show the disabled colour."""
+    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED_BG, cursor="")
 
 
 # ── app icon ─────────────────────────────────────────────────────────────────
@@ -80,15 +148,19 @@ def show_info(parent: tk.Widget, key: str) -> None:
     title, text = INFO_TEXTS.get(key, ("Help", "No help available."))
     win = tk.Toplevel(parent)
     win.title(title)
-    win.geometry("460x280")
+    win.geometry("480x280")
     win.grab_set()
     win.resizable(False, False)
-    txt = tk.Text(win, wrap=tk.WORD, padx=12, pady=12, relief=tk.FLAT,
-                  bg=win.cget("bg"), font=("Segoe UI", 9))
+    win.configure(bg=_CARD_BG)
+    tk.Label(win, text=title, font=("Segoe UI", 11, "bold"),
+             bg=_CARD_BG, fg=_M_TEXT1).pack(anchor=tk.W, padx=16, pady=(14, 4))
+    tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=(0, 8))
+    txt = tk.Text(win, wrap=tk.WORD, padx=14, pady=8, relief=tk.FLAT,
+                  bg=_CARD_BG, fg=_M_TEXT2, font=("Segoe UI", 9))
     txt.insert("1.0", text)
     txt.config(state=tk.DISABLED)
-    txt.pack(fill=tk.BOTH, expand=True)
-    ttk.Button(win, text="Close", command=win.destroy).pack(pady=8)
+    txt.pack(fill=tk.BOTH, expand=True, padx=4)
+    _mat_btn(win, "Close", win.destroy, _ACCENT).pack(pady=10)
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -155,6 +227,8 @@ class App:
         self.report_path: Path | None = None
         self.scan_groups: list = []
         self.scan_records: list = []
+        self._broken_files: list = []
+        self._solo_originals: list = []   # saved solos for report viewer
         self._stop_flag: list[bool] = [False]
         self._pause_flag: list[bool] = [False]
         self._paused_state = None   # ScanState if paused mid-scan
@@ -165,9 +239,39 @@ class App:
 
         self._build_ui()
         self._check_resume_state()
+        self._check_last_results()
         self._schedule_estimate_update()
 
     # ── UI construction ───────────────────────────────────────────────────
+
+    # ── date format helpers ────────────────────────────────────────────────
+    _DATE_ORDER_TEMPLATES = [
+        "%Y{s}%m{s}%d",  # Year-Month-Day
+        "%d{s}%m{s}%Y",  # Day-Month-Year
+        "%m{s}%d{s}%Y",  # Month-Day-Year
+        "%Y{s}%m",        # Year-Month
+        "%Y",             # Year only
+    ]
+    _DATE_SEPARATORS = ["-", "/", ".", "_", " "]
+
+    def _date_labels(self, sep: str) -> list[str]:
+        vis = sep if sep != " " else "·"
+        result = []
+        for tmpl in self._DATE_ORDER_TEMPLATES:
+            lbl = (tmpl.replace("{s}", vis)
+                       .replace("%Y", "YYYY").replace("%m", "MM").replace("%d", "DD"))
+            result.append(lbl)
+        return result
+
+    def _fmt_from_order_sep(self, idx: int, sep: str) -> str:
+        return self._DATE_ORDER_TEMPLATES[idx].replace("{s}", sep)
+
+    def _guess_order_sep(self, fmt: str) -> tuple[int, str]:
+        for sep in self._DATE_SEPARATORS:
+            for i, tmpl in enumerate(self._DATE_ORDER_TEMPLATES):
+                if tmpl.replace("{s}", sep) == fmt:
+                    return i, sep
+        return 0, "-"
 
     def _build_ui(self) -> None:
         # Header
@@ -176,34 +280,68 @@ class App:
         tk.Label(
             hdr, text="Image Deduper v2",
             font=("Segoe UI", 15, "bold"), bg=_ACCENT, fg="white"
-        ).pack(side=tk.LEFT, padx=20, pady=11)
+        ).pack(side=tk.LEFT, padx=20, pady=12)
         tk.Label(
             hdr, text="Find & remove duplicate preview images",
-            font=("Segoe UI", 9), bg=_ACCENT, fg="#b3cfff"
+            font=("Segoe UI", 9), bg=_ACCENT, fg="#90CAF9"
         ).pack(side=tk.LEFT)
 
-        # Mode toggle
-        mode_bar = tk.Frame(self.root, bg="#e8eaed")
-        mode_bar.pack(fill=tk.X)
-        tk.Label(mode_bar, text="Mode:", bg="#e8eaed", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(12, 4), pady=6)
+        # Mode toggle — Material segmented control style
+        self._mode_bar = tk.Frame(self.root, bg=_ACCENT_TINT)
+        self._mode_bar.pack(fill=tk.X)
+        tk.Label(self._mode_bar, text="Mode:", bg=_ACCENT_TINT,
+                 fg=_M_TEXT2, font=("Segoe UI", 9)).pack(
+            side=tk.LEFT, padx=(12, 4), pady=6)
         self._mode_var = tk.StringVar(value=self.settings.mode)
         for mode_val, mode_lbl in (("quick", "Quick"), ("advanced", "Advanced")):
             rb = tk.Radiobutton(
-                mode_bar, text=mode_lbl, variable=self._mode_var, value=mode_val,
-                bg="#e8eaed", font=("Segoe UI", 9, "bold"),
-                indicatoron=False, width=10, relief=tk.GROOVE,
+                self._mode_bar, text=mode_lbl, variable=self._mode_var, value=mode_val,
+                bg=_ACCENT_TINT, font=("Segoe UI", 9, "bold"),
+                indicatoron=False, width=10, relief=tk.FLAT,
                 command=self._on_mode_change,
-                selectcolor=_ACCENT, fg="white" if self._mode_var.get() == mode_val else "#333",
+                selectcolor=_ACCENT, fg="white" if self._mode_var.get() == mode_val else _M_TEXT1,
             )
-            rb.pack(side=tk.LEFT, padx=2, pady=4)
-        self._mode_btns = mode_bar
+            rb.pack(side=tk.LEFT, padx=2, pady=5)
+        self._mode_btns = self._mode_bar  # backward-compat alias
+
+        # Bottom toolbar packed at BOTTOM first so progress panel can go above it
+        self._bottom_toolbar()
+
+        # Progress panel — outside the scrollable body (fixed, always visible during scan)
+        self._prog_frame = ttk.LabelFrame(self.root, text="Progress", padding=(8, 4, 8, 6))
+        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        self._phase_label_var = tk.StringVar(value="Ready.")
+        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+
+        self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
+        self._progress_bar.pack(fill=tk.X, pady=(4, 2))
+
+        self._eta_var = tk.StringVar(value="")
+        ttk.Label(self._prog_frame, textvariable=self._eta_var, foreground="#555",
+                  font=("Segoe UI", 8)).pack(anchor=tk.W)
+
+        self._details_var = tk.BooleanVar(value=self.settings.details_visible)
+        toggle_btn = ttk.Checkbutton(
+            self._prog_frame, text="Show phase details",
+            variable=self._details_var,
+            command=self._toggle_details
+        )
+        toggle_btn.pack(anchor=tk.W, pady=(2, 0))
+
+        self._detail_text = tk.Text(
+            self._prog_frame, height=7, state=tk.DISABLED,
+            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT
+        )
 
         # Scrollable body
-        scroll_container = tk.Frame(self.root)
-        scroll_container.pack(fill=tk.BOTH, expand=True)
+        self._scroll_container = tk.Frame(self.root)
+        self._scroll_container.pack(fill=tk.BOTH, expand=True)
 
-        self._body_canvas = tk.Canvas(scroll_container, bg=_BG, highlightthickness=0)
-        _sb = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL, command=self._body_canvas.yview)
+        self._body_canvas = tk.Canvas(self._scroll_container, bg=_BG, highlightthickness=0)
+        _sb = ttk.Scrollbar(self._scroll_container, orient=tk.VERTICAL,
+                            command=self._body_canvas.yview)
         self._body_canvas.configure(yscrollcommand=_sb.set)
         _sb.pack(side=tk.RIGHT, fill=tk.Y)
         self._body_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -214,23 +352,35 @@ class App:
             scrollregion=self._body_canvas.bbox("all")))
         self._body_canvas.bind("<Configure>", lambda e: self._body_canvas.itemconfig(
             self._body_window, width=e.width))
-        # Scroll anywhere on the page — bind_all catches wheel on every child widget
+
+        # Scroll only when mouse is over THIS canvas (not popups/calibration window)
         def _on_mousewheel(event):
             self._body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self._body_canvas.bind("<Enter>", lambda _: self._body_canvas.bind_all(
+            "<MouseWheel>", _on_mousewheel))
+        self._body_canvas.bind("<Leave>", lambda _: self._body_canvas.unbind_all("<MouseWheel>"))
 
         # ── Folders ──────────────────────────────────────────────────────
         folders = _section(self._body, "Folders")
         self.src_var = self._folder_row(folders, "Source folder:", "src_folder")
         self.out_var = self._folder_row(folders, "Output folder:", "out_folder")
 
-        # ── Advanced-only sections (hidden in quick mode) ─────────────────
+        # ── Container that holds either compact or full advanced sections ──
+        self._settings_container = tk.Frame(self._body, bg=_BG)
+        self._settings_container.pack(fill=tk.X)
+
+        # ── Advanced-only detail sections (hidden by default, shown with "Show all") ──
         self._advanced_frames: list[tk.Widget] = []
+        self._all_settings_visible = False
+
+        # ── All detailed sections go into _settings_container ─────────────
+        def _adv_section(title: str) -> ttk.LabelFrame:
+            f = ttk.LabelFrame(self._settings_container, text=title, padding=(10, 6, 10, 8))
+            self._advanced_frames.append(f)
+            return f
 
         # Detection
-        det = _section(self._body, "Detection")
-        self._advanced_frames.append(det)
+        det = _adv_section("Detection")
 
         self.thresh_var = tk.DoubleVar(value=self.settings.threshold)
         self._slider_row(det, "Similarity Threshold", self.thresh_var,
@@ -317,9 +467,16 @@ class App:
                          1.0, 3.0, 1.3, 2.0, 1.5, "ambiguous_threshold_factor", 0.1,
                          lambda v: f"{v:.1f}\u00d7")
 
+        # Disable series detection
+        r = _row(det)
+        self.disable_series_var = tk.BooleanVar(value=self.settings.disable_series_detection)
+        ttk.Checkbutton(r, text="Disable Series Detection", variable=self.disable_series_var).pack(side=tk.LEFT)
+        ttk.Label(r, text="Skip burst/series grouping — treat all same-size duplicates normally",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+        self.disable_series_var.trace_add("write", self._on_setting_change)
+
         # Keep Strategy
-        keep = _section(self._body, "Keep Strategy")
-        self._advanced_frames.append(keep)
+        keep = _adv_section("Keep Strategy")
 
         r = _row(keep)
         _label(r, "Prefer to keep:")
@@ -342,8 +499,7 @@ class App:
         self.prefer_meta_var.trace_add("write", self._on_setting_change)
 
         # Metadata
-        meta_sec = _section(self._body, "Metadata")
-        self._advanced_frames.append(meta_sec)
+        meta_sec = _adv_section("Metadata")
 
         r = _row(meta_sec)
         self.collect_meta_var = tk.BooleanVar(value=self.settings.collect_metadata)
@@ -376,8 +532,7 @@ class App:
         self.sort_exif_var.trace_add("write", self._on_setting_change)
 
         # RAW
-        raw_sec = _section(self._body, "RAW Files")
-        self._advanced_frames.append(raw_sec)
+        raw_sec = _adv_section("RAW Files")
 
         r = _row(raw_sec)
         self.rawpy_var = tk.BooleanVar(value=self.settings.use_rawpy)
@@ -395,8 +550,7 @@ class App:
         self.rawpy_var.trace_add("write", self._on_setting_change)
 
         # Filters
-        filt = _section(self._body, "Filters")
-        self._advanced_frames.append(filt)
+        filt = _adv_section("Filters")
 
         self.mindim_var = tk.DoubleVar(value=self.settings.min_dimension)
         self._slider_row(filt, "Minimum Dimension Filter (px)", self.mindim_var,
@@ -416,12 +570,57 @@ class App:
         _info_btn(r, "skip_names").pack(side=tk.LEFT, padx=2)
         self.skip_names_var.trace_add("write", self._on_setting_change)
 
-        # Actions (dry run + organize — visible in both modes)
+        # ── Compact "Key Settings" shown in advanced mode ──────────────────
+        # (built here so variables from detail sections above already exist)
+        self._compact_adv_frame = ttk.LabelFrame(
+            self._settings_container, text="Key Settings", padding=(10, 6, 10, 8))
+
+        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(3)]
+        for cr in _crows:
+            cr.pack(fill=tk.X, pady=2)
+
+        ttk.Checkbutton(_crows[0], text="Ambiguous Match Detection",
+                        variable=self.ambig_var).pack(side=tk.LEFT)
+        _info_btn(_crows[0], "ambiguous_detection").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_crows[0], text="  ", width=4).pack(side=tk.LEFT)
+        ttk.Checkbutton(_crows[0], text="Disable Series Detection",
+                        variable=self.disable_series_var).pack(side=tk.LEFT)
+
+        ttk.Checkbutton(_crows[1], text="Scan subfolders recursively",
+                        variable=self.recursive_var).pack(side=tk.LEFT)
+        _info_btn(_crows[1], "recursive").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_crows[1], text="  ", width=4).pack(side=tk.LEFT)
+        self._compact_rawpy_cb = ttk.Checkbutton(
+            _crows[1],
+            text="Use rawpy for RAW files",
+            variable=self.rawpy_var,
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
+        )
+        self._compact_rawpy_cb.pack(side=tk.LEFT)
+        if not _RAWPY_AVAILABLE:
+            ttk.Label(_crows[1], text="(not installed)", foreground="#e03",
+                      font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(_crows[2], text="Prefer to keep:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Radiobutton(_crows[2], text="Largest resolution",
+                        variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
+        ttk.Radiobutton(_crows[2], text="Oldest file date",
+                        variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
+        _info_btn(_crows[2], "keep_strategy").pack(side=tk.LEFT, padx=2)
+
+        # "Show all" toggle button
+        self._show_all_btn = ttk.Button(
+            self._settings_container,
+            text="▼  Show all settings",
+            command=self._toggle_show_all,
+        )
+
+        # ── Actions (dry run + organize — visible in both modes) ────────────
         act = _section(self._body, "Actions")
 
         r = _row(act)
         self.dry_var = tk.BooleanVar(value=self.settings.dry_run)
-        ttk.Checkbutton(r, text="Dry Run", variable=self.dry_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Dry Run (recommended)", variable=self.dry_var).pack(side=tk.LEFT)
         _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
         ttk.Label(r,
                   text="Scan & report only \u2014 no files moved. "
@@ -437,19 +636,31 @@ class App:
                   foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
         self.org_date_var.trace_add("write", self._on_setting_change)
 
+        # Date format: order + separator dropdowns
         r = _row(act)
-        ttk.Label(r, text="  Date format:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.date_fmt_var = tk.StringVar(value=self.settings.date_folder_format)
-        _FMT_CHOICES = ["%Y-%m", "%Y/%m", "%Y-%m-%d", "%Y"]
-        fmt_cb = ttk.Combobox(r, textvariable=self.date_fmt_var,
-                              values=_FMT_CHOICES, width=14, state="readonly")
-        fmt_cb.pack(side=tk.LEFT)
-        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=2)
+        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        init_order_idx, init_sep = self._guess_order_sep(self.settings.date_folder_format)
+        self._date_fmt_var_hidden = tk.StringVar(value=self.settings.date_folder_format)
+        self.date_fmt_var = self._date_fmt_var_hidden   # alias used by _collect_settings
+        self._date_order_var = tk.StringVar()
+        self._date_order_idx_val = init_order_idx
+        self._date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
+                                           width=14, state="readonly")
+        self._date_order_cb.pack(side=tk.LEFT)
+
+        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
+        self._date_sep_var = tk.StringVar(value=init_sep)
+        self._date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
+                                         values=self._DATE_SEPARATORS, width=4, state="readonly")
+        self._date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
+        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
         self._date_fmt_example = tk.StringVar()
         ttk.Label(r, textvariable=self._date_fmt_example,
                   foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
-        self.date_fmt_var.trace_add("write", self._on_date_fmt_change)
-        self._on_date_fmt_change()
+
+        self._date_sep_var.trace_add("write", self._on_date_sep_change)
+        self._date_order_var.trace_add("write", self._on_date_fmt_change)
+        self._refresh_date_order_choices(init_sep, init_order_idx)  # populate and set
 
         # Pre-scan estimate (always visible)
         self._estimate_frame = ttk.Frame(self._body)
@@ -470,90 +681,90 @@ class App:
         self._resume_btn = ttk.Button(self._resume_frame, text="Resume", command=self._resume_scan)
         self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
 
-        # Progress panel
-        self._prog_frame = ttk.LabelFrame(self._body, text="Progress", padding=(8, 4, 8, 6))
-        self._prog_frame.pack(fill=tk.X, pady=(4, 4))
-
-        self._phase_label_var = tk.StringVar(value="Ready.")
-        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
-
-        self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
-        self._progress_bar.pack(fill=tk.X, pady=(4, 2))
-
-        self._eta_var = tk.StringVar(value="")
-        ttk.Label(self._prog_frame, textvariable=self._eta_var, foreground="#555",
-                  font=("Segoe UI", 8)).pack(anchor=tk.W)
-
-        # Details toggle
-        self._details_var = tk.BooleanVar(value=self.settings.details_visible)
-        toggle_btn = ttk.Checkbutton(
-            self._prog_frame, text="Show phase details",
-            variable=self._details_var,
-            command=self._toggle_details
-        )
-        toggle_btn.pack(anchor=tk.W, pady=(2, 0))
-
-        self._detail_text = tk.Text(
-            self._prog_frame, height=7, state=tk.DISABLED,
-            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT
-        )
-
-        self._bottom_toolbar()
         self._apply_mode()
 
     def _bottom_toolbar(self) -> None:
         """Fixed bottom toolbar with all action buttons."""
-        bar = tk.Frame(self.root, bg="#e8eaed", pady=6)
+        bar = tk.Frame(self.root, bg=_ACCENT_TINT, pady=7)
         bar.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
-        # Left: reset defaults
-        ttk.Button(bar, text="Reset Defaults", command=self._reset_defaults).pack(side=tk.LEFT, padx=8)
+        _GR = "#757575"   # Grey 600 — for secondary/disabled-state buttons
+
+        # Left: reset defaults + calibrate + apply last calibration
+        _mat_btn(bar, "Reset Defaults", self._reset_defaults, _GR).pack(
+            side=tk.LEFT, padx=(8, 4))
+        _mat_btn(bar, "⚙ Calibrate…", self._open_calibration, _ACCENT).pack(
+            side=tk.LEFT, padx=4)
+
+        self._calib_apply_btn = _mat_btn(
+            bar, "↩ Last Calibration", self._apply_last_calibration, _ACCENT,
+        )
+        self._calib_apply_btn.pack(side=tk.LEFT, padx=4)
+        if self.settings.calibrated_threshold == 0:
+            _mat_disable(self._calib_apply_btn)
 
         # Right: scan controls
-        self.scan_btn = ttk.Button(bar, text="Start Scan", command=self._start_scan)
-        self.scan_btn.pack(side=tk.RIGHT, padx=4)
+        self.scan_btn = _mat_btn(bar, "▶  Start Scan", self._start_scan, _M_SUCCESS)
+        self.scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
 
-        self.pause_btn = ttk.Button(bar, text="Pause", command=self._pause_scan, state=tk.DISABLED)
+        self.pause_btn = _mat_btn(bar, "⏸ Pause", self._pause_scan, _M_AMBER)
         self.pause_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.pause_btn)
 
-        self.stop_btn = ttk.Button(bar, text="Stop", command=self._stop_scan, state=tk.DISABLED)
+        self.stop_btn = _mat_btn(bar, "■  Stop", self._stop_scan, _M_ERROR)
         self.stop_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.stop_btn)
 
-        # Post-scan buttons (initially hidden, enabled when scan completes)
-        self.accept_btn = ttk.Button(
-            bar, text="Accept & Move",
-            command=self._accept_and_move, state=tk.DISABLED
-        )
+        # Post-scan buttons (initially disabled, enabled when scan completes)
+        self.accept_btn = _mat_btn(bar, "✓ Accept & Move", self._accept_and_move, _M_SUCCESS)
         self.accept_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.accept_btn)
 
-        self.browser_report_btn = ttk.Button(
-            bar, text="Browser Report",
-            command=self._open_browser_report, state=tk.DISABLED
-        )
+        self.browser_report_btn = _mat_btn(bar, "Browser Report", self._open_browser_report, _GR)
         self.browser_report_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.browser_report_btn)
 
-        self.inapp_report_btn = ttk.Button(
-            bar, text="Review In-App",
-            command=self._open_inapp_report, state=tk.DISABLED
-        )
+        self.inapp_report_btn = _mat_btn(bar, "Review In-App", self._open_inapp_report, _ACCENT)
         self.inapp_report_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.inapp_report_btn)
 
-        self.revert_all_btn = ttk.Button(
-            bar, text="Revert All",
-            command=self._revert_all, state=tk.DISABLED
-        )
+        self.revert_all_btn = _mat_btn(bar, "Revert All", self._revert_all, _M_WARNING)
         self.revert_all_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self.revert_all_btn)
 
     # ── mode management ───────────────────────────────────────────────────
 
     def _apply_mode(self) -> None:
         mode = self._mode_var.get()
-        for frame in self._advanced_frames:
-            if mode == "advanced":
-                frame.pack(fill=tk.X, pady=(0, 6))
-            else:
+        if mode == "advanced":
+            self._settings_container.pack(fill=tk.X)
+            # Always start with compact view; hide all detail sections
+            for frame in self._advanced_frames:
                 frame.pack_forget()
+            self._compact_adv_frame.pack(fill=tk.X, pady=(0, 4))
+            self._show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._all_settings_visible = False
+            self._show_all_btn.configure(text="▼  Show all settings")
+        else:
+            self._settings_container.pack_forget()
+
+    def _toggle_show_all(self) -> None:
+        self._all_settings_visible = not self._all_settings_visible
+        if self._all_settings_visible:
+            self._compact_adv_frame.pack_forget()
+            self._show_all_btn.pack_forget()
+            for frame in self._advanced_frames:
+                frame.pack(fill=tk.X, pady=(0, 6))
+            self._show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._show_all_btn.configure(text="▲  Hide advanced settings")
+        else:
+            for frame in self._advanced_frames:
+                frame.pack_forget()
+            self._show_all_btn.pack_forget()
+            self._compact_adv_frame.pack(fill=tk.X, pady=(0, 4))
+            self._show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._show_all_btn.configure(text="▼  Show all settings")
 
     def _on_mode_change(self) -> None:
         self.settings.mode = self._mode_var.get()
@@ -732,15 +943,54 @@ class App:
 
     # ── settings persistence ──────────────────────────────────────────────
 
+    def _refresh_date_order_choices(self, sep: str, select_idx: int) -> None:
+        """Rebuild the order combobox labels for the given separator and select by index."""
+        labels = self._date_labels(sep)
+        self._date_order_cb["values"] = labels
+        if 0 <= select_idx < len(labels):
+            self._date_order_var.set(labels[select_idx])
+            self._date_order_idx_val = select_idx
+
+    def _on_date_sep_change(self, *_) -> None:
+        sep = self._date_sep_var.get()
+        labels = self._date_labels(sep)
+        # Find current order index by matching the current label
+        cur_label = self._date_order_var.get()
+        old_labels = self._date_labels("-" if sep != "-" else "/")  # any other sep
+        try:
+            idx = old_labels.index(cur_label)
+        except ValueError:
+            idx = self._date_order_idx_val
+        self._refresh_date_order_choices(sep, idx)
+        self._recompute_date_fmt()
+
     def _on_date_fmt_change(self, *_) -> None:
+        self._recompute_date_fmt()
+
+    def _recompute_date_fmt(self, *_) -> None:
         import datetime
-        fmt = self.date_fmt_var.get()
+        sep = self._date_sep_var.get()
+        labels = self._date_labels(sep)
+        cur_label = self._date_order_var.get()
+        try:
+            idx = labels.index(cur_label)
+        except ValueError:
+            idx = 0
+        self._date_order_idx_val = idx
+        fmt = self._fmt_from_order_sep(idx, sep)
+        self.date_fmt_var.set(fmt)
         try:
             example = datetime.datetime(2024, 3, 15).strftime(fmt)
             self._date_fmt_example.set(f"e.g. {example}/")
         except Exception:
-            self._date_fmt_example.set("(invalid format)")
+            self._date_fmt_example.set("(invalid)")
         self._on_setting_change()
+
+    def _apply_last_calibration(self) -> None:
+        if self.settings.calibrated_threshold > 0:
+            self.thresh_var.set(self.settings.calibrated_threshold)
+            self.ratio_var.set(self.settings.calibrated_preview_ratio)
+            self._on_setting_change()
 
     def _on_setting_change(self, *_) -> None:
         self._schedule_settings_save()
@@ -764,7 +1014,7 @@ class App:
         s.threshold = self._safe_int(self.thresh_var, 12)
         s.preview_ratio = self._safe_float(self.ratio_var, 0.90)
         s.series_tolerance_pct = self._safe_float(self.series_tol_var, 0.0)
-        s.series_threshold_factor = self._safe_float(self.series_thresh_var, 2.0)
+        s.series_threshold_factor = self._safe_float(self.series_thresh_var, 1.0)
         s.ar_tolerance_pct = self._safe_float(self.ar_tol_var, 5.0)
         s.dark_protection = self.dark_var.get()
         s.dark_threshold = self._safe_float(self.dark_thresh_var, 40.0)
@@ -775,6 +1025,7 @@ class App:
         s.brightness_max_diff = self._safe_float(self.brightness_diff_var, 60.0)
         s.ambiguous_detection = self.ambig_var.get()
         s.ambiguous_threshold_factor = self._safe_float(self.ambig_factor_var, 1.5)
+        s.disable_series_detection = self.disable_series_var.get()
         s.use_rawpy = self.rawpy_var.get()
         s.keep_strategy = self.strategy_var.get()
         s.keep_all_formats = self.all_formats_var.get()
@@ -789,7 +1040,7 @@ class App:
         s.skip_names = self.skip_names_var.get()
         s.dry_run = self.dry_var.get()
         s.organize_by_date = self.org_date_var.get()
-        s.date_folder_format = self.date_fmt_var.get() or "%Y-%m"
+        s.date_folder_format = self.date_fmt_var.get() or "%Y-%m-%d"
         s.details_visible = self._details_var.get()
 
     def _reset_defaults(self) -> None:
@@ -808,6 +1059,7 @@ class App:
         self.brightness_diff_var.set(d.brightness_max_diff)
         self.ambig_var.set(d.ambiguous_detection)
         self.ambig_factor_var.set(d.ambiguous_threshold_factor)
+        self.disable_series_var.set(d.disable_series_detection)
         self.rawpy_var.set(d.use_rawpy)
         self.strategy_var.set(d.keep_strategy)
         self.all_formats_var.set(d.keep_all_formats)
@@ -822,8 +1074,39 @@ class App:
         self.skip_names_var.set(d.skip_names)
         self.dry_var.set(d.dry_run)
         self.org_date_var.set(d.organize_by_date)
-        self.date_fmt_var.set(d.date_folder_format)
+        new_fmt = d.date_folder_format
+        idx, sep = self._guess_order_sep(new_fmt)
+        self._date_sep_var.set(sep)
+        self._refresh_date_order_choices(sep, idx)
+        self.date_fmt_var.set(new_fmt)
         self._schedule_settings_save()
+
+    def _open_calibration(self) -> None:
+        """Open the calibration wizard window."""
+        self._collect_settings()
+        from calibration_window import CalibrationWindow
+
+        def _apply(threshold: int, preview_ratio: float) -> None:
+            self.thresh_var.set(threshold)
+            self.ratio_var.set(preview_ratio)
+            self._on_setting_change()
+
+        def _folder_saved(folder: str) -> None:
+            self.settings.calib_folder = folder
+            self._schedule_settings_save()
+
+        def _calib_applied(threshold: int, preview_ratio: float) -> None:
+            self.settings.calibrated_threshold = threshold
+            self.settings.calibrated_preview_ratio = preview_ratio
+            _mat_enable(self._calib_apply_btn)
+            self._schedule_settings_save()
+
+        CalibrationWindow(
+            self.root, self.settings,
+            apply_cb=_apply,
+            folder_cb=_folder_saved,
+            calibration_applied_cb=_calib_applied,
+        )
 
     @staticmethod
     def _safe_int(var: tk.Variable, default: int) -> int:
@@ -942,6 +1225,54 @@ class App:
             if sp.exists():
                 sp.unlink()
 
+    # ── last-results restore ──────────────────────────────────────────────
+
+    def _check_last_results(self) -> None:
+        """On startup, restore the previous scan result if it was never applied."""
+        out = self.settings.out_folder.strip()
+        if not out:
+            return
+        from scan_state import load_results, results_path
+        rp = results_path(Path(out))
+        result = load_results(Path(out))
+        if result is None:
+            return
+
+        self.scan_groups       = result["groups"]
+        self._solo_originals   = result["solo_originals"]
+        self._broken_files     = result["broken_files"]
+        # Reconstruct scan_records (groups + solos) for solo-detection in report viewer
+        self.scan_records = (
+            [r for g in self.scan_groups for r in g.originals + g.previews]
+            + self._solo_originals
+        )
+
+        # Restore report path if the HTML file still exists
+        html = result.get("report_html", "")
+        if html and Path(html).exists():
+            self.report_path = Path(html)
+
+        import datetime
+        ts = ""
+        try:
+            ts = datetime.datetime.fromtimestamp(rp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+        n_groups = len(self.scan_groups)
+        n_prev   = sum(len(g.previews) for g in self.scan_groups)
+        n_solo   = len(self._solo_originals)
+        self._phase_label_var.set(
+            f"Previous scan ({ts})  ·  {n_groups} groups, {n_prev} duplicates"
+            + (f", {n_solo} unique" if n_solo else "") + ".  "
+            "Click 'Review In-App' to open."
+        )
+
+        _mat_enable(self.browser_report_btn)
+        _mat_enable(self.inapp_report_btn)
+        if result.get("dry_run", True):
+            _mat_enable(self.accept_btn)
+
     # ── scan control ──────────────────────────────────────────────────────
 
     def _start_scan(self, resume_state=None) -> None:
@@ -962,16 +1293,22 @@ class App:
         self._stop_flag[0] = False
         self._pause_flag[0] = False
 
-        self.scan_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.NORMAL)
-        self.accept_btn.config(state=tk.DISABLED)
-        self.browser_report_btn.config(state=tk.DISABLED)
-        self.inapp_report_btn.config(state=tk.DISABLED)
-        self.revert_all_btn.config(state=tk.DISABLED)
+        _mat_disable(self.scan_btn)
+        _mat_enable(self.stop_btn)
+        _mat_enable(self.pause_btn)
+        _mat_disable(self.accept_btn)
+        _mat_disable(self.browser_report_btn)
+        _mat_disable(self.inapp_report_btn)
+        _mat_disable(self.revert_all_btn)
         self.report_path = None
         self.scan_groups = []
         self.scan_records = []
+        self._broken_files = []
+        self._solo_originals = []
+
+        # Hide settings UI during scan — only progress + toolbar remain visible
+        self._scroll_container.pack_forget()
+        self._mode_bar.pack_forget()
 
         # Set up phase tracker
         self._tracker = PhaseTracker(PHASE_NAMES)
@@ -990,13 +1327,13 @@ class App:
 
     def _pause_scan(self) -> None:
         self._pause_flag[0] = True
-        self.pause_btn.config(state=tk.DISABLED)
+        _mat_disable(self.pause_btn)
         self._phase_label_var.set("Pausing...")
 
     def _stop_scan(self) -> None:
         self._stop_flag[0] = True
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
+        _mat_disable(self.stop_btn)
+        _mat_disable(self.pause_btn)
         self._phase_label_var.set("Stopping...")
 
     # ── progress callback ─────────────────────────────────────────────────
@@ -1084,12 +1421,15 @@ class App:
                 cb(f"Restored {len(records)} records from paused state.", 0, 0, "Hashing")
             else:
                 cb("Discovering images...", 0, 1, "Discovery")
+                failed: list = []
                 records = collect_images(
                     src, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._stop_flag,
                     pause_flag=self._pause_flag,
+                    failed_paths=failed,
                 )
+                self._broken_files = failed
 
             if self._stop_flag[0]:
                 self.root.after(0, lambda: self._on_done("Stopped by user.", success=False))
@@ -1151,8 +1491,28 @@ class App:
             self.report_path = report
             self.scan_groups = groups
 
-            # Remove saved state on successful completion
-            from scan_state import state_path as _sp
+            # Compute solo originals (records not in any group)
+            grouped_paths = {
+                r.path.resolve()
+                for g in groups for r in g.originals + g.previews
+            }
+            solo_originals = [r for r in records if r.path.resolve() not in grouped_paths]
+            self._solo_originals = solo_originals
+
+            # Persist results so they survive app restart
+            from scan_state import save_results, state_path as _sp
+            save_results(
+                groups=groups,
+                solo_originals=solo_originals,
+                broken_files=getattr(self, "_broken_files", []),
+                total_scanned=len(records),
+                output_folder=out,
+                src_folder=str(src),
+                dry_run=settings.dry_run,
+                report_html=str(report) if report else "",
+            )
+
+            # Remove paused-scan state on successful completion
             _sp_file = _sp(out)
             if _sp_file.exists():
                 _sp_file.unlink()
@@ -1198,31 +1558,33 @@ class App:
         self._progress_bar["mode"] = "determinate"
         self._progress_bar["value"] = 100 if success and not paused else self._progress_bar["value"]
 
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
+        _mat_enable(self.scan_btn)
+        _mat_disable(self.stop_btn)
+        _mat_disable(self.pause_btn)
 
         self._phase_label_var.set(msg)
         self._eta_var.set("")
 
+        # Restore settings UI (re-pack in original order below the header)
+        self._mode_bar.pack(fill=tk.X)
+        self._scroll_container.pack(fill=tk.BOTH, expand=True)
+
         if success:
-            self.browser_report_btn.config(state=tk.NORMAL)
-            self.inapp_report_btn.config(state=tk.NORMAL)
+            _mat_enable(self.browser_report_btn)
+            _mat_enable(self.inapp_report_btn)
             if dry_run:
-                self.accept_btn.config(state=tk.NORMAL)
-                # Make it obvious what to do next
+                _mat_enable(self.accept_btn)
                 self._phase_label_var.set(
-                    msg + "  \u2192  Review report, then click \u201cAccept & Move\u201d to apply."
+                    msg + "  \u2192  Review results, then click \u201cAccept & Move\u201d to apply."
                 )
             else:
                 out = self.settings.out_folder.strip()
                 if out:
                     log_path = ops_log_path(Path(out))
                     if log_path.exists():
-                        self.revert_all_btn.config(state=tk.NORMAL)
-            # Auto-open report in browser
-            if self.report_path:
-                webbrowser.open(self.report_path.as_uri())
+                        _mat_enable(self.revert_all_btn)
+            # Auto-open in-app report (browser report available via button)
+            self.root.after(200, self._open_inapp_report)
 
         if paused:
             self._check_resume_state()
@@ -1230,9 +1592,9 @@ class App:
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._progress_bar.stop()
         self._phase_label_var.set("Error — see dialog.")
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
+        _mat_enable(self.scan_btn)
+        _mat_disable(self.stop_btn)
+        _mat_disable(self.pause_btn)
         detail = f"{msg}\n\n{tb}" if tb else msg
         messagebox.showerror("Error", detail, parent=self.root)
 
@@ -1245,7 +1607,7 @@ class App:
         out = self.settings.out_folder.strip()
         if not out:
             return
-        self.accept_btn.config(state=tk.DISABLED)
+        _mat_disable(self.accept_btn)
         self._phase_label_var.set("Moving files...")
 
         def _do_move() -> None:
@@ -1263,7 +1625,10 @@ class App:
                 self.report_path = report
                 msg = f"Moved {moved_orig} originals + {moved_prev} previews."
                 self.root.after(0, lambda: self._phase_label_var.set(msg))
-                self.root.after(0, lambda: self.revert_all_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: _mat_enable(self.revert_all_btn))
+                # Results applied — remove persistence file
+                from scan_state import delete_results
+                delete_results(Path(out))
                 if report:
                     self.root.after(0, lambda: webbrowser.open(report.as_uri()))
             except Exception as exc:
@@ -1276,11 +1641,14 @@ class App:
             webbrowser.open(self.report_path.as_uri())
 
     def _open_inapp_report(self) -> None:
-        if not self.scan_groups:
-            messagebox.showinfo("Review", "No groups to review.", parent=self.root)
+        if not self.scan_groups and not self.scan_records:
+            messagebox.showinfo("Review", "No scan results to review.", parent=self.root)
             return
         out = self.settings.out_folder.strip()
         log_path = ops_log_path(Path(out)) if out else None
+
+        # Use pre-computed solos (set by worker or restored from results file)
+        solo_originals = self._solo_originals
 
         def _apply_cb(groups: list) -> None:
             move_groups(groups, Path(out), dry_run=False, settings=self.settings)
@@ -1290,12 +1658,19 @@ class App:
                 len(self.scan_records), self.settings
             )
             self.report_path = report
+            # Results were applied — remove the persistence file
+            if out:
+                from scan_state import delete_results
+                delete_results(Path(out))
 
         viewer = ReportViewer(
             self.root,
             self.scan_groups,
             ops_log_path=log_path,
             on_apply_cb=_apply_cb,
+            solo_originals=solo_originals,
+            broken_files=self._broken_files,
+            settings=self.settings,
         )
         viewer.grab_set()
 

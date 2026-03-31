@@ -37,12 +37,16 @@ class Settings:
     min_dimension: int = 0
     recursive: bool = True
     skip_names: str = ".thumbnails, thumbs, @eaDir, Thumbs"
-    dry_run: bool = False
+    dry_run: bool = True
     details_visible: bool = False
     ambiguous_detection: bool = False
     ambiguous_threshold_factor: float = 1.5
     organize_by_date: bool = False
-    date_folder_format: str = "%Y-%m"
+    date_folder_format: str = "%Y-%m-%d"
+    disable_series_detection: bool = False  # skip series promotion in _classify_group
+    calib_folder: str = ""                  # last-used calibration folder
+    calibrated_threshold: int = 0           # best threshold from last calibration (0 = none)
+    calibrated_preview_ratio: float = 0.0  # best preview_ratio from last calibration
 
 
 DEFAULTS = Settings()

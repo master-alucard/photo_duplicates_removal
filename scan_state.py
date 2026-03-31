@@ -11,7 +11,8 @@ from typing import Optional
 import imagehash
 
 
-STATE_VERSION = 2
+STATE_VERSION   = 2
+RESULTS_VERSION = 1
 
 
 @dataclass
@@ -71,6 +72,103 @@ def state_path(output_folder: Path) -> Path:
 def delete_state(output_folder: Path) -> None:
     """Delete the scan state file if it exists."""
     p = state_path(output_folder)
+    if p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+
+# ── DuplicateGroup <-> dict serialization ────────────────────────────────────
+
+def serialize_group(grp) -> dict:
+    return {
+        "originals":   [serialize_record(r) for r in grp.originals],
+        "previews":    [serialize_record(r) for r in grp.previews],
+        "is_series":   grp.is_series,
+        "is_ambiguous": grp.is_ambiguous,
+        "group_id":    grp.group_id,
+    }
+
+
+def deserialize_group(data: dict):
+    from scanner import DuplicateGroup
+    return DuplicateGroup(
+        originals=[deserialize_record(r) for r in data.get("originals", [])],
+        previews=[deserialize_record(r) for r in data.get("previews", [])],
+        is_series=data.get("is_series", False),
+        is_ambiguous=data.get("is_ambiguous", False),
+        group_id=data.get("group_id", ""),
+    )
+
+
+# ── Completed-scan results persistence ───────────────────────────────────────
+
+def results_path(output_folder: Path) -> Path:
+    """Canonical path for the completed-scan results file."""
+    return output_folder / "scan_results.json"
+
+
+def save_results(
+    groups: list,
+    solo_originals: list,
+    broken_files: list,
+    total_scanned: int,
+    output_folder: Path,
+    src_folder: str = "",
+    dry_run: bool = True,
+    report_html: str = "",
+) -> None:
+    """Persist completed scan results so they can be restored after app restart."""
+    path = results_path(output_folder)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version":       RESULTS_VERSION,
+            "src_folder":    src_folder,
+            "out_folder":    str(output_folder),
+            "total_scanned": total_scanned,
+            "dry_run":       dry_run,
+            "report_html":   report_html,
+            "groups":        [serialize_group(g) for g in groups],
+            "solo_originals": [serialize_record(r) for r in solo_originals],
+            "broken_files":  [str(p) for p in broken_files],
+        }
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        import sys
+        print(f"[scan_state] Warning: could not save results: {exc}", file=sys.stderr)
+
+
+def load_results(output_folder: Path) -> "Optional[dict]":
+    """Load persisted scan results. Returns None if missing, corrupt, or wrong version."""
+    path = results_path(output_folder)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != RESULTS_VERSION:
+            return None
+        return {
+            "src_folder":    data.get("src_folder", ""),
+            "out_folder":    data.get("out_folder", str(output_folder)),
+            "total_scanned": data.get("total_scanned", 0),
+            "dry_run":       data.get("dry_run", True),
+            "report_html":   data.get("report_html", ""),
+            "groups":        [deserialize_group(g) for g in data.get("groups", [])],
+            "solo_originals": [deserialize_record(r) for r in data.get("solo_originals", [])],
+            "broken_files":  [Path(p) for p in data.get("broken_files", [])],
+        }
+    except Exception:
+        return None
+
+
+def delete_results(output_folder: Path) -> None:
+    """Delete the results file after the user applies / moves files."""
+    p = results_path(output_folder)
     if p.exists():
         try:
             p.unlink()
