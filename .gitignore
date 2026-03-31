@@ -1,0 +1,24 @@
+# User settings (kept local only)
+settings.json
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Output folders (generated at runtime)
+results/
+trash/
+output/
+*.html
+operations_log.json
+
+# OS
+.DS_Store
+Thumbs.db

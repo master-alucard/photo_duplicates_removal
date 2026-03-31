@@ -1,0 +1,3 @@
+@echo off
+:: Run without a console window appearing
+start "" pythonw "%~dp0main.py"
