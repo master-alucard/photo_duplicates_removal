@@ -242,6 +242,7 @@ class App:
         self._stop_flag: list[bool] = [False]
         self._pause_flag: list[bool] = [False]
         self._paused_state = None
+        self._is_paused: bool = False
         self._save_after_id = None
         self._tracker: PhaseTracker | None = None
         self._last_scan_info: dict = {}
@@ -2073,10 +2074,15 @@ class App:
         self._scanning      = True
         self._stop_flag[0]  = False
         self._pause_flag[0] = False
+        self._is_paused     = False
 
-        # Swap button frames
+        # Swap button frames (safe to call even if active frame is already visible)
         self._scan_idle_frame.pack_forget()
         self._scan_active_frame.pack(fill=tk.X, padx=4)
+        # Ensure pause button is in correct state
+        self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+        _mat_enable(self.pause_btn)
+        _mat_enable(self.stop_btn)
 
         self.report_path     = None
         self.scan_groups     = []
@@ -2102,10 +2108,30 @@ class App:
 
     def _pause_scan(self) -> None:
         self._pause_flag[0] = True
-        _mat_disable(self.pause_btn)
+        self.pause_btn.configure(state=tk.DISABLED)
         self._phase_label_var.set("Pausing…")
 
+    def _resume_in_place(self) -> None:
+        """Resume a paused scan without going back to the idle state."""
+        self._is_paused = False
+        self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+        _mat_enable(self.stop_btn)
+        self._start_scan(resume_state=self._paused_state)
+
     def _stop_scan(self) -> None:
+        if self._is_paused:
+            # Scan already stopped; stopping just discards the paused state
+            if not messagebox.askyesno("Discard Paused Scan",
+                                       "Discard the paused scan?", parent=self.root):
+                return
+            self._is_paused = False
+            self._paused_state = None
+            self._scan_active_frame.pack_forget()
+            self._scan_idle_frame.pack(fill=tk.X, padx=4)
+            self._phase_label_var.set("Paused scan discarded.")
+            # Reset pause button for next scan
+            self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+            return
         if not messagebox.askyesno("Stop Scan", "Stop the current scan?", parent=self.root):
             return
         self._stop_flag[0] = True
@@ -2339,9 +2365,21 @@ class App:
         self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
         self._scanning = False
 
-        # Restore idle button frame
-        self._scan_active_frame.pack_forget()
-        self._scan_idle_frame.pack(fill=tk.X, padx=4)
+        if paused:
+            # Keep the active frame visible; flip Pause → Resume
+            self._is_paused = True
+            self.pause_btn.configure(
+                text="▶  Resume", command=self._resume_in_place,
+                state=tk.NORMAL,
+            )
+            _mat_enable(self.pause_btn)
+            _mat_enable(self.stop_btn)    # Stop = Discard while paused
+        else:
+            # Restore idle button frame
+            self._scan_active_frame.pack_forget()
+            self._scan_idle_frame.pack(fill=tk.X, padx=4)
+            # Reset pause button for next scan
+            self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
 
         self._phase_label_var.set(msg)
         self._eta_var.set("")
@@ -2371,9 +2409,6 @@ class App:
 
             # Auto-open in-app report
             self.root.after(300, self._open_inapp_report)
-
-        if paused:
-            self._check_resume_state()
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._progress_bar.stop()
