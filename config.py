@@ -47,6 +47,9 @@ class Settings:
     calib_folder: str = ""                  # last-used calibration folder
     calibrated_threshold: int = 0           # best threshold from last calibration (0 = none)
     calibrated_preview_ratio: float = 0.0  # best preview_ratio from last calibration
+    custom_main_folder: str = ""            # Custom Scan: reference folder (never modified)
+    custom_check_folder: str = ""           # Custom Scan: folder to search for duplicates
+    custom_out_folder: str = ""             # Custom Scan: output/trash folder
 
 
 DEFAULTS = Settings()
