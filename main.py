@@ -1,10 +1,11 @@
 """
 main.py — Image Deduper v2 GUI
-Complete rewrite: Quick/Advanced modes, ⓘ info popups, phase-aware progress,
-pre-scan estimate, pause/resume, in-app report viewer.
+Tab-based UI: Scan, Results (dynamic), History, Settings.
 """
 from __future__ import annotations
 
+import datetime
+import json
 import os
 import sys
 import threading
@@ -42,16 +43,67 @@ from scanner import collect_images, find_groups, IMAGE_EXTENSIONS
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
+from about_tab import build_about_tab
 
 
 # ── constants ────────────────────────────────────────────────────────────────
 
 SETTINGS_PATH = Path(__file__).parent / "settings.json"
-PHASE_NAMES = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
+HISTORY_PATH  = Path(__file__).parent / "scan_history.json"
+PHASE_NAMES   = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
 
-_ACCENT = "#1a73e8"
-_BG = "#f0f2f5"
-_CARD_BG = "#ffffff"
+_ACCENT         = "#1565C0"   # Blue 800
+_ACCENT_DARK    = "#0D47A1"   # Blue 900
+_ACCENT_TINT    = "#E3F2FD"   # Blue 50
+_BG             = "#F5F5F5"   # Grey 100
+_CARD_BG        = "#FFFFFF"   # Surface white
+_M_SUCCESS      = "#2E7D32"   # Green 800
+_M_ERROR        = "#C62828"   # Red 800
+_M_WARNING      = "#E65100"   # Deep Orange 900
+_M_AMBER        = "#F57F17"   # Amber 900
+_M_DIVIDER      = "#E0E0E0"   # Grey 300
+_M_TEXT1        = "#212121"   # Grey 900
+_M_TEXT2        = "#616161"   # Grey 700
+_MAT_DISABLED   = "#BDBDBD"   # Grey 400
+
+
+def _darken_color(hex_color: str) -> str:
+    try:
+        r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+        f = 0.85
+        return f"#{int(r*f):02x}{int(g*f):02x}{int(b*f):02x}"
+    except Exception:
+        return hex_color
+
+
+def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.Button:
+    btn = tk.Button(
+        parent, text=text, command=command,
+        bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
+        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
+    )
+    btn._mat_bg = bg
+
+    def _enter(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=_darken_color(btn._mat_bg))
+
+    def _leave(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=btn._mat_bg)
+
+    btn.bind("<Enter>", _enter)
+    btn.bind("<Leave>", _leave)
+    return btn
+
+
+def _mat_enable(btn: tk.Button) -> None:
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, cursor="hand2")
+
+
+def _mat_disable(btn: tk.Button) -> None:
+    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, cursor="")
 
 
 # ── app icon ─────────────────────────────────────────────────────────────────
@@ -80,15 +132,19 @@ def show_info(parent: tk.Widget, key: str) -> None:
     title, text = INFO_TEXTS.get(key, ("Help", "No help available."))
     win = tk.Toplevel(parent)
     win.title(title)
-    win.geometry("460x280")
+    win.geometry("480x280")
     win.grab_set()
     win.resizable(False, False)
-    txt = tk.Text(win, wrap=tk.WORD, padx=12, pady=12, relief=tk.FLAT,
-                  bg=win.cget("bg"), font=("Segoe UI", 9))
+    win.configure(bg=_CARD_BG)
+    tk.Label(win, text=title, font=("Segoe UI", 11, "bold"),
+             bg=_CARD_BG, fg=_M_TEXT1).pack(anchor=tk.W, padx=16, pady=(14, 4))
+    tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=(0, 8))
+    txt = tk.Text(win, wrap=tk.WORD, padx=14, pady=8, relief=tk.FLAT,
+                  bg=_CARD_BG, fg=_M_TEXT2, font=("Segoe UI", 9))
     txt.insert("1.0", text)
     txt.config(state=tk.DISABLED)
-    txt.pack(fill=tk.BOTH, expand=True)
-    ttk.Button(win, text="Close", command=win.destroy).pack(pady=8)
+    txt.pack(fill=tk.BOTH, expand=True, padx=4)
+    _mat_btn(win, "Close", win.destroy, _ACCENT).pack(pady=10)
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -119,22 +175,55 @@ def _label(parent: tk.Widget, text: str, width: int = 26) -> ttk.Label:
 
 
 def _first_sentence(text: str) -> str:
-    """Extract the first sentence from a multi-line help string."""
     line = text.split("\n")[0].strip()
     if "." in line:
         return line[: line.index(".") + 1]
     return line[:100]
 
 
+def _scrollable_frame(parent: tk.Widget):
+    """Return (outer_frame, body_frame) where body is inside a scrollable canvas."""
+    outer = tk.Frame(parent)
+    outer.pack(fill=tk.BOTH, expand=True)
+
+    canvas = tk.Canvas(outer, bg=_BG, highlightthickness=0)
+    sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
+    canvas.configure(yscrollcommand=sb.set)
+    sb.pack(side=tk.RIGHT, fill=tk.Y)
+    canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    body = ttk.Frame(canvas, padding=(14, 8, 14, 8))
+    bw = canvas.create_window((0, 0), window=body, anchor=tk.NW)
+    body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
+    canvas.bind("<Configure>", lambda e: canvas.itemconfig(bw, width=e.width))
+
+    def _on_mw(event):
+        canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+    canvas.bind("<Enter>", lambda _: canvas.bind_all("<MouseWheel>", _on_mw))
+    canvas.bind("<Leave>", lambda _: canvas.unbind_all("<MouseWheel>"))
+
+    return outer, body
+
+
 # ── main application ──────────────────────────────────────────────────────────
 
 class App:
+    # Date format helpers
+    _DATE_ORDER_TEMPLATES = [
+        "%Y{s}%m{s}%d",
+        "%d{s}%m{s}%Y",
+        "%m{s}%d{s}%Y",
+        "%Y{s}%m",
+        "%Y",
+    ]
+    _DATE_SEPARATORS = ["-", "/", ".", "_", " "]
+
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Image Deduper v2")
-        self.root.geometry("750x820")
+        self.root.geometry("860x640")
         self.root.resizable(True, True)
-        self.root.minsize(700, 600)
+        self.root.minsize(700, 520)
 
         try:
             self._icon = _make_icon(64)
@@ -142,29 +231,35 @@ class App:
         except Exception:
             pass
 
-        style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except Exception:
-            pass
-
-        # Load settings
         self.settings = load_settings(SETTINGS_PATH)
+        self._scan_history: list[dict] = self._load_scan_history()
 
         # Scan state
         self.report_path: Path | None = None
         self.scan_groups: list = []
         self.scan_records: list = []
+        self._broken_files: list = []
+        self._solo_originals: list = []
         self._stop_flag: list[bool] = [False]
         self._pause_flag: list[bool] = [False]
-        self._paused_state = None   # ScanState if paused mid-scan
-        self._save_after_id = None  # debounce timer id
-
-        # Tracker
+        self._paused_state = None
+        self._is_paused: bool = False
+        self._save_after_id = None
         self._tracker: PhaseTracker | None = None
+        self._last_scan_info: dict = {}
+        self._results_tab_visible        = False
+
+        # Custom scan state
+        self._custom_stop_flag:  list[bool] = [False]
+        self._custom_pause_flag: list[bool] = [False]
+        self._custom_groups:     list = []
+        self._custom_broken:     list = []
+        self._custom_report_path: Path | None = None
+        self._scanning = False   # prevents concurrent scans
 
         self._build_ui()
         self._check_resume_state()
+        self._check_last_results()
         self._schedule_estimate_update()
 
     # ── UI construction ───────────────────────────────────────────────────
@@ -173,218 +268,692 @@ class App:
         # Header
         hdr = tk.Frame(self.root, bg=_ACCENT)
         hdr.pack(fill=tk.X)
-        tk.Label(
-            hdr, text="Image Deduper v2",
-            font=("Segoe UI", 15, "bold"), bg=_ACCENT, fg="white"
-        ).pack(side=tk.LEFT, padx=20, pady=11)
-        tk.Label(
-            hdr, text="Find & remove duplicate preview images",
-            font=("Segoe UI", 9), bg=_ACCENT, fg="#b3cfff"
-        ).pack(side=tk.LEFT)
+        tk.Label(hdr, text="Image Deduper v2",
+                 font=("Segoe UI", 15, "bold"), bg=_ACCENT, fg="white").pack(
+            side=tk.LEFT, padx=20, pady=12)
+        tk.Label(hdr, text="Find & remove duplicate preview images",
+                 font=("Segoe UI", 9), bg=_ACCENT, fg="#90CAF9").pack(side=tk.LEFT)
 
-        # Mode toggle
-        mode_bar = tk.Frame(self.root, bg="#e8eaed")
-        mode_bar.pack(fill=tk.X)
-        tk.Label(mode_bar, text="Mode:", bg="#e8eaed", font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=(12, 4), pady=6)
-        self._mode_var = tk.StringVar(value=self.settings.mode)
-        for mode_val, mode_lbl in (("quick", "Quick"), ("advanced", "Advanced")):
-            rb = tk.Radiobutton(
-                mode_bar, text=mode_lbl, variable=self._mode_var, value=mode_val,
-                bg="#e8eaed", font=("Segoe UI", 9, "bold"),
-                indicatoron=False, width=10, relief=tk.GROOVE,
-                command=self._on_mode_change,
-                selectcolor=_ACCENT, fg="white" if self._mode_var.get() == mode_val else "#333",
-            )
-            rb.pack(side=tk.LEFT, padx=2, pady=4)
-        self._mode_btns = mode_bar
+        # Notebook style — white selected tab with blue text works reliably on Windows
+        style = ttk.Style()
+        try:
+            style.theme_use("vista")
+        except Exception:
+            pass
+        try:
+            style.configure("App.TNotebook", background=_BG)
+            style.configure("App.TNotebook.Tab",
+                            font=("Segoe UI", 9, "bold"), padding=[14, 6])
+            style.map("App.TNotebook.Tab",
+                      background=[("selected", _CARD_BG), ("!selected", _ACCENT_TINT)],
+                      foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
+        except Exception:
+            pass
+
+        self._nb = ttk.Notebook(self.root, style="App.TNotebook")
+        self._nb.pack(fill=tk.BOTH, expand=True)
+
+        self._tab_scan     = ttk.Frame(self._nb)
+        self._tab_results  = ttk.Frame(self._nb)
+        self._tab_custom   = ttk.Frame(self._nb)
+        self._tab_history  = ttk.Frame(self._nb)
+        self._tab_settings = ttk.Frame(self._nb)
+        self._tab_about    = ttk.Frame(self._nb)
+
+        self._nb.add(self._tab_scan,     text="  Scan  ")
+        self._nb.add(self._tab_custom,   text="  Custom Scan  ")
+        self._nb.add(self._tab_history,  text="  History  ")
+        self._nb.add(self._tab_settings, text="  Settings  ")
+        self._nb.add(self._tab_about,    text="  About  ")
+
+        # Results tab inserted dynamically at position 1 after a scan completes
+        self._results_tab_visible = False
+
+        # Init all shared vars before building tabs
+        self._init_setting_vars()
+
+        self._build_scan_tab()
+        self._build_results_tab_content()
+        self._build_custom_scan_tab()
+        self._build_history_tab()
+        self._build_settings_tab()
+        self._build_about_tab()
+
+    def _init_setting_vars(self) -> None:
+        """Create all tkinter data vars from current settings. Called once before building tabs."""
+        s = self.settings
+        self._mode_var          = tk.StringVar(value=s.mode)
+        self.thresh_var         = tk.DoubleVar(value=s.threshold)
+        self.ratio_var          = tk.DoubleVar(value=s.preview_ratio)
+        self.series_tol_var     = tk.DoubleVar(value=s.series_tolerance_pct)
+        self.series_thresh_var  = tk.DoubleVar(value=s.series_threshold_factor)
+        self.ar_tol_var         = tk.DoubleVar(value=s.ar_tolerance_pct)
+        self.dark_var           = tk.BooleanVar(value=s.dark_protection)
+        self.dark_thresh_var    = tk.DoubleVar(value=s.dark_threshold)
+        self.dark_factor_var    = tk.DoubleVar(value=s.dark_tighten_factor)
+        self.dual_hash_var      = tk.BooleanVar(value=s.use_dual_hash)
+        self.hist_var           = tk.BooleanVar(value=s.use_histogram)
+        self.hist_sim_var       = tk.DoubleVar(value=s.hist_min_similarity)
+        self.brightness_diff_var = tk.DoubleVar(value=s.brightness_max_diff)
+        self.ambig_var          = tk.BooleanVar(value=s.ambiguous_detection)
+        self.ambig_factor_var   = tk.DoubleVar(value=s.ambiguous_threshold_factor)
+        self.disable_series_var = tk.BooleanVar(value=s.disable_series_detection)
+        self.rawpy_var          = tk.BooleanVar(value=s.use_rawpy)
+        self.strategy_var       = tk.StringVar(value=s.keep_strategy)
+        self.all_formats_var    = tk.BooleanVar(value=s.keep_all_formats)
+        self.prefer_meta_var    = tk.BooleanVar(value=s.prefer_rich_metadata)
+        self.collect_meta_var   = tk.BooleanVar(value=s.collect_metadata)
+        self.export_csv_var     = tk.BooleanVar(value=s.export_csv)
+        self.ext_report_var     = tk.BooleanVar(value=s.extended_report)
+        self.sort_fname_var     = tk.BooleanVar(value=s.sort_by_filename_date)
+        self.sort_exif_var      = tk.BooleanVar(value=s.sort_by_exif_date)
+        self.mindim_var         = tk.DoubleVar(value=s.min_dimension)
+        self.recursive_var      = tk.BooleanVar(value=s.recursive)
+        self.skip_names_var     = tk.StringVar(value=s.skip_names)
+        self.dry_var            = tk.BooleanVar(value=s.dry_run)
+        self.org_date_var       = tk.BooleanVar(value=s.organize_by_date)
+        self._details_var       = tk.BooleanVar(value=s.details_visible)
+        self._phase_label_var   = tk.StringVar(value="Ready.")
+        self._eta_var           = tk.StringVar(value="")
+        self._estimate_var      = tk.StringVar(value="Select a source folder to see estimate.")
+        self._resume_var        = tk.StringVar(value="")
+        self._results_info_var  = tk.StringVar(value="")
+
+        # Date format vars
+        init_order_idx, init_sep = self._guess_order_sep(s.date_folder_format)
+        self._date_fmt_var_hidden = tk.StringVar(value=s.date_folder_format)
+        self.date_fmt_var         = self._date_fmt_var_hidden
+        self._date_order_var      = tk.StringVar()
+        self._date_order_idx_val  = init_order_idx
+        self._date_sep_var        = tk.StringVar(value=init_sep)
+        self._date_fmt_example    = tk.StringVar()
+
+        # Auto-update
+        self.auto_update_var = tk.BooleanVar(value=s.auto_update)
+        self.auto_update_var.trace_add("write", self._on_setting_change)
+
+        self._calib_info_var = tk.StringVar(value=self._calib_info_text())
+
+        # Custom scan folder vars
+        s2 = self.settings
+        self._custom_main_var    = tk.StringVar(value=s2.custom_main_folder)
+        self._custom_check_var   = tk.StringVar(value=s2.custom_check_folder)
+        self._custom_out_var     = tk.StringVar(value=s2.custom_out_folder or s2.out_folder)
+        self._custom_phase_label = tk.StringVar(value="Ready.")
+        self._custom_eta_var     = tk.StringVar(value="")
+        self._custom_estimate_var = tk.StringVar(value="Select folders to see estimate.")
+        self._custom_dry_var     = tk.BooleanVar(value=s2.dry_run)
+        self._custom_dry_var.trace_add("write", self._on_setting_change)
+
+        # Add traces
+        for var in (
+            self.thresh_var, self.ratio_var, self.series_tol_var, self.series_thresh_var,
+            self.ar_tol_var, self.dark_thresh_var, self.dark_factor_var, self.hist_sim_var,
+            self.brightness_diff_var, self.ambig_factor_var, self.mindim_var,
+        ):
+            var.trace_add("write", lambda *_: self._on_setting_change())
+
+        for var in (
+            self.dark_var, self.dual_hash_var, self.hist_var, self.ambig_var,
+            self.disable_series_var, self.rawpy_var, self.all_formats_var,
+            self.prefer_meta_var, self.collect_meta_var, self.export_csv_var,
+            self.ext_report_var, self.sort_fname_var, self.sort_exif_var,
+            self.recursive_var, self.dry_var, self.org_date_var,
+        ):
+            var.trace_add("write", self._on_setting_change)
+
+        self.strategy_var.trace_add("write", self._on_setting_change)
+        self.skip_names_var.trace_add("write", self._on_setting_change)
+        self._date_sep_var.trace_add("write", self._on_date_sep_change)
+        self._date_order_var.trace_add("write", self._on_date_fmt_change)
+
+    # ── Scan tab ──────────────────────────────────────────────────────────
+
+    def _build_scan_tab(self) -> None:
+        tab = self._tab_scan
 
         # Scrollable body
-        scroll_container = tk.Frame(self.root)
-        scroll_container.pack(fill=tk.BOTH, expand=True)
+        _, body = _scrollable_frame(tab)
 
-        self._body_canvas = tk.Canvas(scroll_container, bg=_BG, highlightthickness=0)
-        _sb = ttk.Scrollbar(scroll_container, orient=tk.VERTICAL, command=self._body_canvas.yview)
-        self._body_canvas.configure(yscrollcommand=_sb.set)
-        _sb.pack(side=tk.RIGHT, fill=tk.Y)
-        self._body_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-
-        self._body = ttk.Frame(self._body_canvas, padding=(14, 6, 14, 6))
-        self._body_window = self._body_canvas.create_window((0, 0), window=self._body, anchor=tk.NW)
-        self._body.bind("<Configure>", lambda e: self._body_canvas.configure(
-            scrollregion=self._body_canvas.bbox("all")))
-        self._body_canvas.bind("<Configure>", lambda e: self._body_canvas.itemconfig(
-            self._body_window, width=e.width))
-        # Scroll anywhere on the page — bind_all catches wheel on every child widget
-        def _on_mousewheel(event):
-            self._body_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
-
-        self.root.bind_all("<MouseWheel>", _on_mousewheel)
-
-        # ── Folders ──────────────────────────────────────────────────────
-        folders = _section(self._body, "Folders")
+        # Folders
+        folders = _section(body, "Folders")
         self.src_var = self._folder_row(folders, "Source folder:", "src_folder")
         self.out_var = self._folder_row(folders, "Output folder:", "out_folder")
 
-        # ── Advanced-only sections (hidden in quick mode) ─────────────────
-        self._advanced_frames: list[tk.Widget] = []
+        # Mode toggle
+        mode_card = ttk.LabelFrame(body, text="Mode", padding=(10, 6, 10, 8))
+        mode_card.pack(fill=tk.X, pady=(0, 6))
+        mode_row = ttk.Frame(mode_card)
+        mode_row.pack(fill=tk.X)
+        for val, lbl in (("quick", "Quick"), ("advanced", "Advanced")):
+            rb = tk.Radiobutton(
+                mode_row, text=lbl, variable=self._mode_var, value=val,
+                bg=_ACCENT_TINT, font=("Segoe UI", 9, "bold"),
+                indicatoron=False, width=12, relief=tk.FLAT,
+                command=self._on_mode_change,
+                selectcolor=_ACCENT,
+            )
+            rb.pack(side=tk.LEFT, padx=2)
 
-        # Detection
-        det = _section(self._body, "Detection")
-        self._advanced_frames.append(det)
+        # Compact key settings (advanced mode only)
+        self._compact_adv_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
+        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(3)]
+        for cr in _crows:
+            cr.pack(fill=tk.X, pady=2)
 
-        self.thresh_var = tk.DoubleVar(value=self.settings.threshold)
+        ttk.Checkbutton(_crows[0], text="Ambiguous Match Detection",
+                        variable=self.ambig_var).pack(side=tk.LEFT)
+        _info_btn(_crows[0], "ambiguous_detection").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_crows[0], text="  ", width=3).pack(side=tk.LEFT)
+        ttk.Checkbutton(_crows[0], text="Disable Series Detection",
+                        variable=self.disable_series_var).pack(side=tk.LEFT)
+
+        ttk.Checkbutton(_crows[1], text="Scan subfolders recursively",
+                        variable=self.recursive_var).pack(side=tk.LEFT)
+        _info_btn(_crows[1], "recursive").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_crows[1], text="  ", width=3).pack(side=tk.LEFT)
+        self._compact_rawpy_cb = ttk.Checkbutton(
+            _crows[1], text="Use rawpy for RAW files", variable=self.rawpy_var,
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
+        )
+        self._compact_rawpy_cb.pack(side=tk.LEFT)
+        if not _RAWPY_AVAILABLE:
+            ttk.Label(_crows[1], text="(not installed)", foreground="#e03",
+                      font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=2)
+
+        ttk.Label(_crows[2], text="Prefer to keep:", width=14, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Radiobutton(_crows[2], text="Largest resolution",
+                        variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
+        ttk.Radiobutton(_crows[2], text="Oldest file date",
+                        variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
+        _info_btn(_crows[2], "keep_strategy").pack(side=tk.LEFT, padx=2)
+
+        # Actions
+        act = _section(body, "Actions")
+
+        r = _row(act)
+        ttk.Checkbutton(r, text="Dry Run (recommended)", variable=self.dry_var).pack(side=tk.LEFT)
+        _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
+        ttk.Label(r, text="Scan & report only — no files moved.",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        r = _row(act)
+        ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
+        _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
+        ttk.Label(r, text="Create date subfolders in results/ and trash/",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        # Date format
+        r = _row(act)
+        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        init_order_idx, init_sep = self._guess_order_sep(self.settings.date_folder_format)
+        self._date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
+                                           width=14, state="readonly")
+        self._date_order_cb.pack(side=tk.LEFT)
+        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
+        self._date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
+                                         values=self._DATE_SEPARATORS, width=4, state="readonly")
+        self._date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
+        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
+        ttk.Label(r, textvariable=self._date_fmt_example,
+                  foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
+        self._refresh_date_order_choices(init_sep, init_order_idx)
+
+        # Estimate
+        self._estimate_frame = ttk.Frame(body)
+        self._estimate_frame.pack(fill=tk.X, pady=(2, 4))
+        ttk.Label(self._estimate_frame, textvariable=self._estimate_var,
+                  foreground="#555", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+
+        # Resume notice
+        self._resume_frame = ttk.Frame(body)
+        self._resume_frame.pack(fill=tk.X, pady=(2, 2))
+        self._resume_lbl = ttk.Label(
+            self._resume_frame, textvariable=self._resume_var,
+            foreground="#7c3aed", font=("Segoe UI", 8, "bold"))
+        self._resume_lbl.pack(side=tk.LEFT)
+        self._resume_btn  = ttk.Button(self._resume_frame, text="Resume",  command=self._resume_scan)
+        self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
+
+        # Progress panel (fixed, bottom of tab)
+        self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(8, 4, 8, 6))
+        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+
+        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
+                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
+        self._progress_bar.pack(fill=tk.X, pady=(4, 2))
+        ttk.Label(self._prog_frame, textvariable=self._eta_var,
+                  foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
+        ttk.Checkbutton(
+            self._prog_frame, text="Show phase details",
+            variable=self._details_var, command=self._toggle_details,
+        ).pack(anchor=tk.W, pady=(2, 0))
+        self._detail_text = tk.Text(
+            self._prog_frame, height=7, state=tk.DISABLED,
+            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT,
+        )
+
+        # Button bar (fixed, very bottom of tab)
+        btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
+
+        _GR = "#757575"
+
+        # Idle frame: shown when not scanning
+        self._scan_idle_frame = tk.Frame(btn_bar, bg=_ACCENT_TINT)
+        self._scan_idle_frame.pack(fill=tk.X, padx=4)
+
+        _mat_btn(self._scan_idle_frame, "Reset Defaults",
+                 self._reset_defaults, _GR).pack(side=tk.LEFT, padx=(4, 4))
+
+        self._scan_last_calib_btn = _mat_btn(
+            self._scan_idle_frame, "↩ Last Calibration",
+            self._apply_last_calibration, _ACCENT)
+        self._scan_last_calib_btn.pack(side=tk.LEFT, padx=4)
+        if self.settings.calibrated_threshold == 0:
+            _mat_disable(self._scan_last_calib_btn)
+
+        self.scan_btn = _mat_btn(self._scan_idle_frame, "▶  Start Scan",
+                                 self._start_scan, _M_SUCCESS)
+        self.scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
+
+        # Active frame: shown while scanning
+        self._scan_active_frame = tk.Frame(btn_bar, bg=_ACCENT_TINT)
+        # Not packed initially
+
+        self.stop_btn = _mat_btn(self._scan_active_frame, "■  Stop",
+                                 self._stop_scan, _M_ERROR)
+        self.stop_btn.pack(side=tk.LEFT, padx=(8, 4))
+
+        self.pause_btn = _mat_btn(self._scan_active_frame, "⏸  Pause",
+                                  self._pause_scan, _M_AMBER)
+        self.pause_btn.pack(side=tk.LEFT, padx=4)
+
+        self._apply_mode()
+
+    # ── Results tab ───────────────────────────────────────────────────────
+
+    def _build_results_tab_content(self) -> None:
+        tab = self._tab_results
+
+        # Info card
+        info_card = tk.Frame(tab, bg=_CARD_BG, bd=1, relief=tk.FLAT)
+        info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
+        tk.Frame(info_card, height=3, bg=_ACCENT).pack(fill=tk.X)
+        tk.Label(
+            info_card, textvariable=self._results_info_var,
+            bg=_CARD_BG, fg=_M_TEXT1, font=("Segoe UI", 9),
+            justify=tk.LEFT, wraplength=700, padx=14, pady=10,
+            anchor=tk.W,
+        ).pack(fill=tk.X)
+
+        # Action buttons row
+        btn_row = tk.Frame(tab, bg=_BG)
+        btn_row.pack(fill=tk.X, padx=16, pady=6)
+
+        self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _M_WARNING)
+        self.revert_all_btn.pack(side=tk.LEFT, padx=(0, 6))
+        _mat_disable(self.revert_all_btn)
+
+        self.inapp_report_btn = _mat_btn(btn_row, "Review In-App",
+                                         self._open_inapp_report, _ACCENT)
+        self.inapp_report_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self.inapp_report_btn)
+
+        self.browser_report_btn = _mat_btn(btn_row, "Browser Report",
+                                           self._open_browser_report, "#757575")
+        self.browser_report_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self.browser_report_btn)
+
+        self.accept_btn = _mat_btn(btn_row, "✓  Accept & Move",
+                                   self._accept_and_move, _M_SUCCESS)
+        self.accept_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self.accept_btn)
+
+        # Divider
+        tk.Frame(tab, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=14)
+
+        # Start New Scan
+        new_frame = tk.Frame(tab, bg=_BG)
+        new_frame.pack(pady=10)
+        _mat_btn(new_frame, "   +  Start New Scan   ",
+                 self._new_scan_prompt, _ACCENT, font_size=11).pack()
+        ttk.Label(new_frame, text="Clears current results and returns to the Scan tab.",
+                  foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
+
+    def _show_results_tab(self) -> None:
+        if not self._results_tab_visible:
+            self._nb.insert(1, self._tab_results, text="  Results  ")
+            self._results_tab_visible = True
+
+    def _hide_results_tab(self) -> None:
+        if self._results_tab_visible:
+            self._nb.forget(self._tab_results)
+            self._results_tab_visible = False
+
+    def _update_results_tab_ui(self, info: "dict | None" = None) -> None:
+        """Refresh the info card text and button states on the Results tab."""
+        if info:
+            self._last_scan_info = info
+        i = self._last_scan_info
+        if not i:
+            self._results_info_var.set("No scan results available.")
+            return
+
+        ts       = i.get("date", "")
+        src      = i.get("src_folder", "")
+        files    = i.get("total_files", 0)
+        groups   = i.get("groups", 0)
+        dups     = i.get("duplicates", 0)
+        dup_pct  = i.get("dup_pct", 0.0)
+        dry_run  = i.get("dry_run", True)
+        applied  = i.get("applied", False)
+
+        dry_tag  = "  [DRY RUN — files not moved]" if dry_run else ""
+        appl_tag = "  ✓ Results applied." if applied else ""
+
+        lines = [
+            f"Scan:   {ts}{dry_tag}{appl_tag}",
+            f"Source: {src}",
+            f"Files scanned: {files}   ·   Groups: {groups}   ·   "
+            f"Duplicates: {dups}   ({dup_pct:.1f}%)",
+        ]
+        self._results_info_var.set("\n".join(lines))
+
+    # ── History tab ───────────────────────────────────────────────────────
+
+    def _build_history_tab(self) -> None:
+        tab = self._tab_history
+
+        header = tk.Frame(tab, bg=_BG)
+        header.pack(fill=tk.X, padx=8, pady=(10, 4))
+        tk.Label(header, text="Scan History", font=("Segoe UI", 10, "bold"),
+                 bg=_BG, fg=_M_TEXT1).pack(side=tk.LEFT)
+
+        cols = ("date", "src", "files", "groups", "dups", "dup_pct", "dry_run", "applied")
+        self._hist_tree = ttk.Treeview(tab, columns=cols, show="headings",
+                                       selectmode="browse", height=16)
+
+        col_cfg = [
+            ("date",    "Date",      130, "w"),
+            ("src",     "Source",    220, "w"),
+            ("files",   "Files",      60, "center"),
+            ("groups",  "Groups",     60, "center"),
+            ("dups",    "Dups",       60, "center"),
+            ("dup_pct", "Dup %",      60, "center"),
+            ("dry_run", "Dry Run",    65, "center"),
+            ("applied", "Applied",    65, "center"),
+        ]
+        for cid, head, w, anch in col_cfg:
+            self._hist_tree.heading(cid, text=head)
+            self._hist_tree.column(cid, width=w, anchor=anch)
+
+        vsb = ttk.Scrollbar(tab, orient="vertical", command=self._hist_tree.yview)
+        self._hist_tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 6), pady=6)
+        self._hist_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
+
+        btn_bar = tk.Frame(tab, bg=_BG)
+        btn_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
+        _mat_btn(btn_bar, "Clear History", self._clear_history, "#757575").pack(side=tk.LEFT)
+
+        self._refresh_history_view()
+
+    def _refresh_history_view(self) -> None:
+        if not hasattr(self, "_hist_tree"):
+            return
+        for item in self._hist_tree.get_children():
+            self._hist_tree.delete(item)
+        for entry in reversed(self._scan_history):
+            self._hist_tree.insert("", "end", values=(
+                entry.get("date", ""),
+                entry.get("src_folder", ""),
+                entry.get("total_files", ""),
+                entry.get("groups", ""),
+                entry.get("duplicates", ""),
+                f"{entry.get('dup_pct', 0):.1f}%",
+                "Yes" if entry.get("dry_run") else "No",
+                "Yes" if entry.get("applied") else "No",
+            ))
+
+    def _load_scan_history(self) -> list[dict]:
+        try:
+            if HISTORY_PATH.exists():
+                return json.loads(HISTORY_PATH.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        return []
+
+    def _save_scan_history(self) -> None:
+        try:
+            HISTORY_PATH.write_text(
+                json.dumps(self._scan_history, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            pass
+
+    def _log_scan_history(
+        self, total_files: int, groups: int, duplicates: int,
+        dry_run: bool, src_folder: str, applied: bool = False,
+    ) -> None:
+        dup_pct = duplicates / total_files * 100 if total_files > 0 else 0.0
+        entry = {
+            "date":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "src_folder":  src_folder,
+            "total_files": total_files,
+            "groups":      groups,
+            "duplicates":  duplicates,
+            "dup_pct":     round(dup_pct, 2),
+            "dry_run":     dry_run,
+            "applied":     applied,
+        }
+        self._scan_history.append(entry)
+        self._save_scan_history()
+        self._refresh_history_view()
+        self._last_scan_info = entry
+
+    def _clear_history(self) -> None:
+        if not messagebox.askyesno("Clear History",
+                                   "Remove all history entries?", parent=self.root):
+            return
+        self._scan_history.clear()
+        self._save_scan_history()
+        self._refresh_history_view()
+
+    # ── Settings tab ──────────────────────────────────────────────────────
+
+    def _build_settings_tab(self) -> None:
+        tab = self._tab_settings
+        _, body = _scrollable_frame(tab)
+
+        # Calibration
+        calib_sec = _section(body, "Calibration")
+        calib_btn_row = ttk.Frame(calib_sec)
+        calib_btn_row.pack(fill=tk.X, pady=(2, 4))
+
+        _mat_btn(calib_btn_row, "⚙  Calibrate Detection Settings…",
+                 self._open_calibration, _ACCENT, font_size=10).pack(side=tk.LEFT)
+
+        self._calib_apply_btn = _mat_btn(
+            calib_btn_row, "↩  Apply Last Calibration",
+            self._apply_last_calibration, _ACCENT)
+        self._calib_apply_btn.pack(side=tk.LEFT, padx=10)
+        if self.settings.calibrated_threshold == 0:
+            _mat_disable(self._calib_apply_btn)
+
+        self._calib_info_lbl = ttk.Label(calib_sec, textvariable=self._calib_info_var,
+                                         foreground=_M_SUCCESS if self.settings.calibrated_threshold > 0 else "#999",
+                                         font=("Segoe UI", 8, "bold"))
+        self._calib_info_lbl.pack(anchor=tk.W, pady=(2, 2))
+
+        ttk.Label(calib_sec,
+                  text="Calibration finds the best threshold and ratio for your specific photo library.",
+                  foreground="#666", font=("Segoe UI", 8)).pack(anchor=tk.W, pady=(0, 2))
+
+        # ── Detection ────────────────────────────────────────────────────
+        det = _section(body, "Detection")
+
         self._slider_row(det, "Similarity Threshold", self.thresh_var,
                          1, 30, 8, 12, 12, "threshold", 1,
                          lambda v: str(int(round(v))))
 
-        self.ratio_var = tk.DoubleVar(value=self.settings.preview_ratio)
         self._slider_row(det, "Preview Size Ratio (per-dimension)", self.ratio_var,
                          0.50, 0.99, 0.85, 0.95, 0.90, "preview_ratio", 0.01,
                          lambda v: f"{v:.2f}")
 
-        self.series_tol_var = tk.DoubleVar(value=self.settings.series_tolerance_pct)
-        self._slider_row(det, "Series Dimension Tolerance %", self.series_tol_var,
-                         0.0, 10.0, 0.0, 2.0, 0.0, "series_tolerance_pct", 0.1,
-                         lambda v: f"{v:.1f}%")
-
-        self.series_thresh_var = tk.DoubleVar(value=self.settings.series_threshold_factor)
-        self._slider_row(det, "Series Grouping Leniency", self.series_thresh_var,
-                         1.0, 5.0, 1.5, 2.5, 2.0, "series_threshold_factor", 0.1,
-                         lambda v: f"{v:.1f}\u00d7")
-
-        self.ar_tol_var = tk.DoubleVar(value=self.settings.ar_tolerance_pct)
-        self._slider_row(det, "Aspect Ratio Tolerance %", self.ar_tol_var,
-                         0.0, 20.0, 3.0, 8.0, 5.0, "ar_tolerance_pct", 0.5,
-                         lambda v: f"{v:.1f}%")
-
-        # Dark protection group
         r = _row(det)
-        self.dark_var = tk.BooleanVar(value=self.settings.dark_protection)
-        ttk.Checkbutton(r, text="Dark Image Protection", variable=self.dark_var).pack(side=tk.LEFT)
-        _info_btn(r, "dark_protection").pack(side=tk.LEFT, padx=2)
-        _, _dark_desc = INFO_TEXTS.get("dark_protection", ("", ""))
-        if _dark_desc:
-            ttk.Label(r, text=_first_sentence(_dark_desc),
-                      foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-        self.dark_var.trace_add("write", self._on_setting_change)
-
-        self.dark_thresh_var = tk.DoubleVar(value=self.settings.dark_threshold)
-        self._slider_row(det, "  Dark Image Threshold (brightness 0–255)", self.dark_thresh_var,
-                         0.0, 128.0, 30.0, 50.0, 40.0, "dark_threshold", 1.0,
-                         lambda v: f"{int(round(v))}")
-
-        self.dark_factor_var = tk.DoubleVar(value=self.settings.dark_tighten_factor)
-        self._slider_row(det, "  Dark Tighten Factor", self.dark_factor_var,
-                         0.1, 1.0, 0.4, 0.6, 0.5, "dark_tighten_factor", 0.05,
-                         lambda v: f"{v:.2f}")
-
-        # Dual hash / histogram toggles
-        r = _row(det)
-        self.dual_hash_var = tk.BooleanVar(value=self.settings.use_dual_hash)
-        ttk.Checkbutton(r, text="Dual Hash (dHash)", variable=self.dual_hash_var).pack(side=tk.LEFT)
-        _info_btn(r, "use_dual_hash").pack(side=tk.LEFT, padx=2)
-        self.dual_hash_var.trace_add("write", self._on_setting_change)
-
-        r = _row(det)
-        self.hist_var = tk.BooleanVar(value=self.settings.use_histogram)
-        ttk.Checkbutton(r, text="Histogram Intersection Guard", variable=self.hist_var).pack(side=tk.LEFT)
-        _info_btn(r, "use_histogram").pack(side=tk.LEFT, padx=2)
-        self.hist_var.trace_add("write", self._on_setting_change)
-
-        self.hist_sim_var = tk.DoubleVar(value=self.settings.hist_min_similarity)
-        self._slider_row(det, "  Minimum Histogram Similarity", self.hist_sim_var,
-                         0.0, 1.0, 0.65, 0.80, 0.70, "hist_min_similarity", 0.05,
-                         lambda v: f"{v:.2f}")
-
-        self.brightness_diff_var = tk.DoubleVar(value=self.settings.brightness_max_diff)
-        self._slider_row(det, "Max Brightness Difference (0–255)", self.brightness_diff_var,
-                         0.0, 200.0, 40.0, 80.0, 60.0, "brightness_max_diff", 5.0,
-                         lambda v: f"{int(round(v))}")
-
-        # Ambiguous detection
-        r = _row(det)
-        self.ambig_var = tk.BooleanVar(value=self.settings.ambiguous_detection)
-        ttk.Checkbutton(r, text="Ambiguous Match Detection", variable=self.ambig_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Ambiguous Match Detection",
+                        variable=self.ambig_var).pack(side=tk.LEFT)
         _info_btn(r, "ambiguous_detection").pack(side=tk.LEFT, padx=2)
-        _, _ambig_desc = INFO_TEXTS.get("ambiguous_detection", ("", ""))
-        if _ambig_desc:
-            ttk.Label(r, text=_first_sentence(_ambig_desc),
-                      foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-        self.ambig_var.trace_add("write", self._on_setting_change)
-
-        self.ambig_factor_var = tk.DoubleVar(value=self.settings.ambiguous_threshold_factor)
         self._slider_row(det, "  Ambiguous Threshold Factor", self.ambig_factor_var,
                          1.0, 3.0, 1.3, 2.0, 1.5, "ambiguous_threshold_factor", 0.1,
                          lambda v: f"{v:.1f}\u00d7")
 
-        # Keep Strategy
-        keep = _section(self._body, "Keep Strategy")
-        self._advanced_frames.append(keep)
+        r = _row(det)
+        self.disable_series_cb = ttk.Checkbutton(
+            r, text="Disable Series Detection", variable=self.disable_series_var)
+        self.disable_series_cb.pack(side=tk.LEFT)
+        ttk.Label(r, text="Treat all same-size duplicates normally instead of keeping burst shots",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        # ── Keep Strategy ────────────────────────────────────────────────
+        keep = _section(body, "Keep Strategy")
 
         r = _row(keep)
         _label(r, "Prefer to keep:")
-        self.strategy_var = tk.StringVar(value=self.settings.keep_strategy)
-        ttk.Radiobutton(r, text="Largest resolution", variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
-        ttk.Radiobutton(r, text="Oldest file date", variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
+        ttk.Radiobutton(r, text="Largest resolution",
+                        variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
+        ttk.Radiobutton(r, text="Oldest file date",
+                        variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
         _info_btn(r, "keep_strategy").pack(side=tk.LEFT, padx=2)
-        self.strategy_var.trace_add("write", self._on_setting_change)
 
         r = _row(keep)
-        self.all_formats_var = tk.BooleanVar(value=self.settings.keep_all_formats)
-        ttk.Checkbutton(r, text="Keep all formats (best per extension)", variable=self.all_formats_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Keep all formats (best per extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(r, "keep_all_formats").pack(side=tk.LEFT, padx=2)
-        self.all_formats_var.trace_add("write", self._on_setting_change)
 
         r = _row(keep)
-        self.prefer_meta_var = tk.BooleanVar(value=self.settings.prefer_rich_metadata)
-        ttk.Checkbutton(r, text="Prefer image with richer EXIF metadata", variable=self.prefer_meta_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Prefer image with richer EXIF metadata",
+                        variable=self.prefer_meta_var).pack(side=tk.LEFT)
         _info_btn(r, "prefer_rich_metadata").pack(side=tk.LEFT, padx=2)
-        self.prefer_meta_var.trace_add("write", self._on_setting_change)
 
-        # Metadata
-        meta_sec = _section(self._body, "Metadata")
-        self._advanced_frames.append(meta_sec)
+        # ── Filters ──────────────────────────────────────────────────────
+        filt = _section(body, "Filters")
+
+        r = _row(filt)
+        ttk.Checkbutton(r, text="Scan subfolders recursively",
+                        variable=self.recursive_var).pack(side=tk.LEFT)
+        _info_btn(r, "recursive").pack(side=tk.LEFT, padx=2)
+
+        r = _row(filt)
+        _label(r, "Skip folder names:")
+        ttk.Entry(r, textvariable=self.skip_names_var, width=36).pack(side=tk.LEFT)
+        _info_btn(r, "skip_names").pack(side=tk.LEFT, padx=2)
+
+        self._slider_row(filt, "Minimum Dimension Filter (px)", self.mindim_var,
+                         0, 2000, 100, 300, 0, "min_dimension", 50,
+                         lambda v: f"{int(round(v))} px" if v > 0 else "off")
+
+        # ── Show Advanced toggle ──────────────────────────────────────────
+        self._advanced_frames: list[tk.Widget] = []
+        self._all_settings_visible = False
+
+        self._show_all_btn = ttk.Button(
+            body, text="▼  Show Advanced Settings",
+            command=self._toggle_show_all,
+        )
+        self._show_all_btn.pack(anchor=tk.W, padx=2, pady=(4, 6))
+
+        def _adv(title: str) -> ttk.LabelFrame:
+            f = ttk.LabelFrame(body, text=title, padding=(10, 6, 10, 8))
+            self._advanced_frames.append(f)
+            return f
+
+        # Advanced: Series detection
+        series_sec = _adv("Series Detection")
+
+        self._slider_row(series_sec, "Series Dimension Tolerance %", self.series_tol_var,
+                         0.0, 10.0, 0.0, 2.0, 0.0, "series_tolerance_pct", 0.1,
+                         lambda v: f"{v:.1f}%")
+        self._slider_row(series_sec, "Series Grouping Leniency", self.series_thresh_var,
+                         1.0, 5.0, 1.5, 2.5, 2.0, "series_threshold_factor", 0.1,
+                         lambda v: f"{v:.1f}\u00d7")
+
+        # Advanced: Hash options
+        hash_sec = _adv("Hash & Match Options")
+
+        self._slider_row(hash_sec, "Aspect Ratio Tolerance %", self.ar_tol_var,
+                         0.0, 20.0, 3.0, 8.0, 5.0, "ar_tolerance_pct", 0.5,
+                         lambda v: f"{v:.1f}%")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dark Image Protection",
+                        variable=self.dark_var).pack(side=tk.LEFT)
+        _info_btn(r, "dark_protection").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Dark Image Threshold (brightness 0–255)",
+                         self.dark_thresh_var,
+                         0.0, 128.0, 30.0, 50.0, 40.0, "dark_threshold", 1.0,
+                         lambda v: f"{int(round(v))}")
+        self._slider_row(hash_sec, "  Dark Tighten Factor", self.dark_factor_var,
+                         0.1, 1.0, 0.4, 0.6, 0.5, "dark_tighten_factor", 0.05,
+                         lambda v: f"{v:.2f}")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dual Hash (dHash)",
+                        variable=self.dual_hash_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_dual_hash").pack(side=tk.LEFT, padx=2)
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Histogram Intersection Guard",
+                        variable=self.hist_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_histogram").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Minimum Histogram Similarity", self.hist_sim_var,
+                         0.0, 1.0, 0.65, 0.80, 0.70, "hist_min_similarity", 0.05,
+                         lambda v: f"{v:.2f}")
+        self._slider_row(hash_sec, "Max Brightness Difference (0–255)",
+                         self.brightness_diff_var,
+                         0.0, 200.0, 40.0, 80.0, 60.0, "brightness_max_diff", 5.0,
+                         lambda v: f"{int(round(v))}")
+
+        # Advanced: Metadata
+        meta_sec = _adv("Metadata")
 
         r = _row(meta_sec)
-        self.collect_meta_var = tk.BooleanVar(value=self.settings.collect_metadata)
-        ttk.Checkbutton(r, text="Collect EXIF metadata", variable=self.collect_meta_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Collect EXIF metadata",
+                        variable=self.collect_meta_var).pack(side=tk.LEFT)
         _info_btn(r, "collect_metadata").pack(side=tk.LEFT, padx=2)
-        self.collect_meta_var.trace_add("write", self._on_setting_change)
 
         r = _row(meta_sec)
-        self.export_csv_var = tk.BooleanVar(value=self.settings.export_csv)
-        ttk.Checkbutton(r, text="Export metadata CSV", variable=self.export_csv_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Export metadata CSV",
+                        variable=self.export_csv_var).pack(side=tk.LEFT)
         _info_btn(r, "export_csv").pack(side=tk.LEFT, padx=2)
-        self.export_csv_var.trace_add("write", self._on_setting_change)
 
         r = _row(meta_sec)
-        self.ext_report_var = tk.BooleanVar(value=self.settings.extended_report)
-        ttk.Checkbutton(r, text="Extended report (EXIF per image)", variable=self.ext_report_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Extended report (EXIF per image)",
+                        variable=self.ext_report_var).pack(side=tk.LEFT)
         _info_btn(r, "extended_report").pack(side=tk.LEFT, padx=2)
-        self.ext_report_var.trace_add("write", self._on_setting_change)
 
         r = _row(meta_sec)
-        self.sort_fname_var = tk.BooleanVar(value=self.settings.sort_by_filename_date)
-        ttk.Checkbutton(r, text="Sort by filename date", variable=self.sort_fname_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Sort by filename date",
+                        variable=self.sort_fname_var).pack(side=tk.LEFT)
         _info_btn(r, "sort_by_filename_date").pack(side=tk.LEFT, padx=2)
-        self.sort_fname_var.trace_add("write", self._on_setting_change)
 
         r = _row(meta_sec)
-        self.sort_exif_var = tk.BooleanVar(value=self.settings.sort_by_exif_date)
-        ttk.Checkbutton(r, text="Sort by EXIF date", variable=self.sort_exif_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Sort by EXIF date",
+                        variable=self.sort_exif_var).pack(side=tk.LEFT)
         _info_btn(r, "sort_by_exif_date").pack(side=tk.LEFT, padx=2)
-        self.sort_exif_var.trace_add("write", self._on_setting_change)
 
-        # RAW
-        raw_sec = _section(self._body, "RAW Files")
-        self._advanced_frames.append(raw_sec)
+        # Advanced: RAW Files
+        raw_sec = _adv("RAW Files")
 
         r = _row(raw_sec)
-        self.rawpy_var = tk.BooleanVar(value=self.settings.use_rawpy)
         rawpy_cb = ttk.Checkbutton(
-            r, text="Use rawpy for RAW files (CR2, NEF, ARW...)",
+            r, text="Use rawpy for RAW files (CR2, NEF, ARW…)",
             variable=self.rawpy_var,
-            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
         )
         rawpy_cb.pack(side=tk.LEFT)
         _info_btn(r, "use_rawpy").pack(side=tk.LEFT, padx=2)
@@ -392,168 +961,763 @@ class App:
             ttk.Label(r, text="not installed", foreground="#e03").pack(side=tk.LEFT, padx=4)
             ttk.Button(r, text="Install rawpy",
                        command=self._install_rawpy).pack(side=tk.LEFT, padx=2)
-        self.rawpy_var.trace_add("write", self._on_setting_change)
 
-        # Filters
-        filt = _section(self._body, "Filters")
-        self._advanced_frames.append(filt)
+    # ── Custom Scan tab ───────────────────────────────────────────────────
 
-        self.mindim_var = tk.DoubleVar(value=self.settings.min_dimension)
-        self._slider_row(filt, "Minimum Dimension Filter (px)", self.mindim_var,
+    def _build_custom_scan_tab(self) -> None:
+        """Cross-folder duplicate finder: main folder (read-only) vs check folder."""
+        tab = self._tab_custom
+        _, body = _scrollable_frame(tab)
+
+        # ── Info banner ───────────────────────────────────────────────────
+        banner = tk.Frame(body, bg="#E8F5E9", bd=0)
+        banner.pack(fill=tk.X, pady=(0, 8))
+        tk.Frame(banner, height=3, bg=_M_SUCCESS).pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text=(
+                "Custom Scan compares a reference folder against a second folder.\n"
+                "Files in the Main folder are never moved or deleted.\n"
+                "Only duplicates found in the Check folder are moved to trash."
+            ),
+            bg="#E8F5E9", fg="#1B5E20",
+            font=("Segoe UI", 8), justify=tk.LEFT, padx=12, pady=8,
+        ).pack(anchor=tk.W)
+
+        # ── Folders ───────────────────────────────────────────────────────
+        folders = _section(body, "Folders")
+
+        def _cust_folder_row(parent, label, var, key):
+            f = ttk.Frame(parent)
+            f.pack(fill=tk.X, pady=3)
+            ttk.Label(f, text=label, width=22, anchor=tk.W).pack(side=tk.LEFT)
+            ttk.Entry(f, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            ttk.Button(f, text="Browse…",
+                       command=lambda v=var: self._browse_custom(v)).pack(side=tk.RIGHT)
+            var.trace_add("write", self._on_custom_folder_change)
+
+        _cust_folder_row(folders, "Main folder (reference):",   self._custom_main_var,  "custom_main_folder")
+        _cust_folder_row(folders, "Check folder (find dups):",  self._custom_check_var, "custom_check_folder")
+        _cust_folder_row(folders, "Output / trash folder:",     self._custom_out_var,   "custom_out_folder")
+
+        # ── Detection Settings ────────────────────────────────────────────
+        det = _section(body, "Detection Settings")
+
+        # Threshold and ratio share the same vars as Settings tab
+        self._slider_row(det, "Similarity Threshold", self.thresh_var,
+                         1, 30, 8, 12, 12, "threshold", 1,
+                         lambda v: str(int(round(v))))
+        self._slider_row(det, "Preview Size Ratio (per-dimension)", self.ratio_var,
+                         0.50, 0.99, 0.85, 0.95, 0.90, "preview_ratio", 0.01,
+                         lambda v: f"{v:.2f}")
+
+        r = _row(det)
+        ttk.Checkbutton(r, text="Ambiguous Match Detection",
+                        variable=self.ambig_var).pack(side=tk.LEFT)
+        _info_btn(r, "ambiguous_detection").pack(side=tk.LEFT, padx=2)
+        self._slider_row(det, "  Ambiguous Threshold Factor", self.ambig_factor_var,
+                         1.0, 3.0, 1.3, 2.0, 1.5, "ambiguous_threshold_factor", 0.1,
+                         lambda v: f"{v:.1f}\u00d7")
+
+        r = _row(det)
+        ttk.Checkbutton(r, text="Disable Series Detection",
+                        variable=self.disable_series_var).pack(side=tk.LEFT)
+        ttk.Label(r, text="Treat all same-size duplicates normally instead of keeping burst shots",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        r = _row(det)
+        ttk.Checkbutton(r, text="Scan subfolders recursively",
+                        variable=self.recursive_var).pack(side=tk.LEFT)
+        _info_btn(r, "recursive").pack(side=tk.LEFT, padx=2)
+        ttk.Label(r, text="  ", width=3).pack(side=tk.LEFT)
+        self._compact_rawpy_cb2 = ttk.Checkbutton(
+            r, text="Use rawpy for RAW files", variable=self.rawpy_var,
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
+        )
+        self._compact_rawpy_cb2.pack(side=tk.LEFT)
+
+        r = _row(det)
+        _label(r, "Skip folder names:")
+        ttk.Entry(r, textvariable=self.skip_names_var, width=36).pack(side=tk.LEFT)
+        _info_btn(r, "skip_names").pack(side=tk.LEFT, padx=2)
+
+        self._slider_row(det, "Minimum Dimension Filter (px)", self.mindim_var,
                          0, 2000, 100, 300, 0, "min_dimension", 50,
                          lambda v: f"{int(round(v))} px" if v > 0 else "off")
 
-        r = _row(filt)
-        self.recursive_var = tk.BooleanVar(value=self.settings.recursive)
-        ttk.Checkbutton(r, text="Scan subfolders recursively", variable=self.recursive_var).pack(side=tk.LEFT)
-        _info_btn(r, "recursive").pack(side=tk.LEFT, padx=2)
-        self.recursive_var.trace_add("write", self._on_setting_change)
+        # ── Show Advanced toggle ──────────────────────────────────────────
+        self._custom_advanced_frames: list[tk.Widget] = []
+        self._custom_all_settings_visible = False
 
-        r = _row(filt)
-        _label(r, "Skip folder names:")
-        self.skip_names_var = tk.StringVar(value=self.settings.skip_names)
-        ttk.Entry(r, textvariable=self.skip_names_var, width=36).pack(side=tk.LEFT)
-        _info_btn(r, "skip_names").pack(side=tk.LEFT, padx=2)
-        self.skip_names_var.trace_add("write", self._on_setting_change)
+        self._custom_show_all_btn = ttk.Button(
+            body, text="▼  Show Advanced Settings",
+            command=self._toggle_custom_show_all,
+        )
+        self._custom_show_all_btn.pack(anchor=tk.W, padx=2, pady=(4, 6))
 
-        # Actions (dry run + organize — visible in both modes)
-        act = _section(self._body, "Actions")
+        def _cadv(title: str) -> ttk.LabelFrame:
+            f = ttk.LabelFrame(body, text=title, padding=(10, 6, 10, 8))
+            self._custom_advanced_frames.append(f)
+            return f
+
+        # Advanced: Series Detection
+        series_sec = _cadv("Series Detection")
+
+        self._slider_row(series_sec, "Series Dimension Tolerance %", self.series_tol_var,
+                         0.0, 10.0, 0.0, 2.0, 0.0, "series_tolerance_pct", 0.1,
+                         lambda v: f"{v:.1f}%")
+        self._slider_row(series_sec, "Series Grouping Leniency", self.series_thresh_var,
+                         1.0, 5.0, 1.5, 2.5, 2.0, "series_threshold_factor", 0.1,
+                         lambda v: f"{v:.1f}\u00d7")
+
+        # Advanced: Hash & Match Options
+        hash_sec = _cadv("Hash & Match Options")
+
+        self._slider_row(hash_sec, "Aspect Ratio Tolerance %", self.ar_tol_var,
+                         0.0, 20.0, 3.0, 8.0, 5.0, "ar_tolerance_pct", 0.5,
+                         lambda v: f"{v:.1f}%")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dark Image Protection",
+                        variable=self.dark_var).pack(side=tk.LEFT)
+        _info_btn(r, "dark_protection").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Dark Image Threshold (brightness 0–255)",
+                         self.dark_thresh_var,
+                         0.0, 128.0, 30.0, 50.0, 40.0, "dark_threshold", 1.0,
+                         lambda v: f"{int(round(v))}")
+        self._slider_row(hash_sec, "  Dark Tighten Factor", self.dark_factor_var,
+                         0.1, 1.0, 0.4, 0.6, 0.5, "dark_tighten_factor", 0.05,
+                         lambda v: f"{v:.2f}")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dual Hash (dHash)",
+                        variable=self.dual_hash_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_dual_hash").pack(side=tk.LEFT, padx=2)
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Histogram Intersection Guard",
+                        variable=self.hist_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_histogram").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Minimum Histogram Similarity", self.hist_sim_var,
+                         0.0, 1.0, 0.65, 0.80, 0.70, "hist_min_similarity", 0.05,
+                         lambda v: f"{v:.2f}")
+        self._slider_row(hash_sec, "Max Brightness Difference (0–255)",
+                         self.brightness_diff_var,
+                         0.0, 200.0, 40.0, 80.0, 60.0, "brightness_max_diff", 5.0,
+                         lambda v: f"{int(round(v))}")
+
+        # Advanced: Keep Strategy
+        keep_sec = _cadv("Keep Strategy")
+
+        r = _row(keep_sec)
+        _label(r, "Prefer to keep:")
+        ttk.Radiobutton(r, text="Largest resolution",
+                        variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
+        ttk.Radiobutton(r, text="Oldest file date",
+                        variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
+        _info_btn(r, "keep_strategy").pack(side=tk.LEFT, padx=2)
+
+        r = _row(keep_sec)
+        ttk.Checkbutton(r, text="Keep all formats (best per extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
+        _info_btn(r, "keep_all_formats").pack(side=tk.LEFT, padx=2)
+
+        r = _row(keep_sec)
+        ttk.Checkbutton(r, text="Prefer image with richer EXIF metadata",
+                        variable=self.prefer_meta_var).pack(side=tk.LEFT)
+        _info_btn(r, "prefer_rich_metadata").pack(side=tk.LEFT, padx=2)
+
+        # Advanced: Metadata
+        meta_sec = _cadv("Metadata")
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Collect EXIF metadata",
+                        variable=self.collect_meta_var).pack(side=tk.LEFT)
+        _info_btn(r, "collect_metadata").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Export metadata CSV",
+                        variable=self.export_csv_var).pack(side=tk.LEFT)
+        _info_btn(r, "export_csv").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Extended report (EXIF per image)",
+                        variable=self.ext_report_var).pack(side=tk.LEFT)
+        _info_btn(r, "extended_report").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Sort by filename date",
+                        variable=self.sort_fname_var).pack(side=tk.LEFT)
+        _info_btn(r, "sort_by_filename_date").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Sort by EXIF date",
+                        variable=self.sort_exif_var).pack(side=tk.LEFT)
+        _info_btn(r, "sort_by_exif_date").pack(side=tk.LEFT, padx=2)
+
+        # Advanced: RAW Files
+        raw_sec = _cadv("RAW Files")
+
+        r = _row(raw_sec)
+        self._custom_rawpy_cb = ttk.Checkbutton(
+            r, text="Use rawpy for RAW files (CR2, NEF, ARW…)",
+            variable=self.rawpy_var,
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
+        )
+        self._custom_rawpy_cb.pack(side=tk.LEFT)
+        _info_btn(r, "use_rawpy").pack(side=tk.LEFT, padx=2)
+        if not _RAWPY_AVAILABLE:
+            ttk.Label(r, text="not installed", foreground="#e03").pack(side=tk.LEFT, padx=4)
+            ttk.Button(r, text="Install rawpy",
+                       command=self._install_rawpy).pack(side=tk.LEFT, padx=2)
+
+        # ── Actions ───────────────────────────────────────────────────────
+        act = _section(body, "Actions")
 
         r = _row(act)
-        self.dry_var = tk.BooleanVar(value=self.settings.dry_run)
-        ttk.Checkbutton(r, text="Dry Run", variable=self.dry_var).pack(side=tk.LEFT)
+        ttk.Checkbutton(r, text="Dry Run (recommended)",
+                        variable=self._custom_dry_var).pack(side=tk.LEFT)
         _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r,
-                  text="Scan & report only \u2014 no files moved. "
-                       "Click \u201cAccept & Move\u201d afterwards to apply.",
+        ttk.Label(r, text="Report only — no files moved. Use 'Accept & Move' after reviewing.",
                   foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-        self.dry_var.trace_add("write", self._on_setting_change)
 
         r = _row(act)
-        self.org_date_var = tk.BooleanVar(value=self.settings.organize_by_date)
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
         _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
         ttk.Label(r, text="Create date subfolders in results/ and trash/",
                   foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-        self.org_date_var.trace_add("write", self._on_setting_change)
 
+        # Date format
         r = _row(act)
-        ttk.Label(r, text="  Date format:", width=14, anchor=tk.W).pack(side=tk.LEFT)
-        self.date_fmt_var = tk.StringVar(value=self.settings.date_folder_format)
-        _FMT_CHOICES = ["%Y-%m", "%Y/%m", "%Y-%m-%d", "%Y"]
-        fmt_cb = ttk.Combobox(r, textvariable=self.date_fmt_var,
-                              values=_FMT_CHOICES, width=14, state="readonly")
-        fmt_cb.pack(side=tk.LEFT)
-        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=2)
-        self._date_fmt_example = tk.StringVar()
+        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        init_order_idx2, init_sep2 = self._guess_order_sep(self.settings.date_folder_format)
+        self._custom_date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
+                                                   width=14, state="readonly")
+        self._custom_date_order_cb.pack(side=tk.LEFT)
+        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
+        self._custom_date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
+                                                 values=self._DATE_SEPARATORS, width=4, state="readonly")
+        self._custom_date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
+        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
         ttk.Label(r, textvariable=self._date_fmt_example,
                   foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
-        self.date_fmt_var.trace_add("write", self._on_date_fmt_change)
-        self._on_date_fmt_change()
+        self._refresh_date_order_choices(init_sep2, init_order_idx2)
 
-        # Pre-scan estimate (always visible)
-        self._estimate_frame = ttk.Frame(self._body)
-        self._estimate_frame.pack(fill=tk.X, pady=(2, 4))
-        self._estimate_var = tk.StringVar(value="Select a source folder to see estimate.")
-        ttk.Label(self._estimate_frame, textvariable=self._estimate_var,
+        # Estimate
+        self._custom_estimate_frame = ttk.Frame(body)
+        self._custom_estimate_frame.pack(fill=tk.X, pady=(2, 4))
+        ttk.Label(self._custom_estimate_frame, textvariable=self._custom_estimate_var,
                   foreground="#555", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
 
-        # Resume notice (hidden until a paused state is found)
-        self._resume_frame = ttk.Frame(self._body)
-        self._resume_frame.pack(fill=tk.X, pady=(2, 2))
-        self._resume_var = tk.StringVar(value="")
-        self._resume_lbl = ttk.Label(
-            self._resume_frame, textvariable=self._resume_var,
-            foreground="#7c3aed", font=("Segoe UI", 8, "bold")
-        )
-        self._resume_lbl.pack(side=tk.LEFT)
-        self._resume_btn = ttk.Button(self._resume_frame, text="Resume", command=self._resume_scan)
-        self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
+        # ── Progress panel (fixed bottom of tab) ──────────────────────────
+        self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(8, 4, 8, 6))
+        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
 
-        # Progress panel
-        self._prog_frame = ttk.LabelFrame(self._body, text="Progress", padding=(8, 4, 8, 6))
-        self._prog_frame.pack(fill=tk.X, pady=(4, 4))
-
-        self._phase_label_var = tk.StringVar(value="Ready.")
-        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
+        ttk.Label(self._custom_prog_frame, textvariable=self._custom_phase_label,
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        self._custom_progress_bar = ttk.Progressbar(
+            self._custom_prog_frame, mode="determinate", maximum=100)
+        self._custom_progress_bar.pack(fill=tk.X, pady=(4, 2))
+        ttk.Label(self._custom_prog_frame, textvariable=self._custom_eta_var,
+                  foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
 
-        self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
-        self._progress_bar.pack(fill=tk.X, pady=(4, 2))
+        # ── Button bar (fixed very bottom) ────────────────────────────────
+        c_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        c_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(c_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
-        self._eta_var = tk.StringVar(value="")
-        ttk.Label(self._prog_frame, textvariable=self._eta_var, foreground="#555",
-                  font=("Segoe UI", 8)).pack(anchor=tk.W)
+        _GR = "#757575"
 
-        # Details toggle
-        self._details_var = tk.BooleanVar(value=self.settings.details_visible)
-        toggle_btn = ttk.Checkbutton(
-            self._prog_frame, text="Show phase details",
-            variable=self._details_var,
-            command=self._toggle_details
+        self._custom_idle_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
+        self._custom_idle_frame.pack(fill=tk.X, padx=4)
+
+        # Left side: Reset Defaults + Last Calibration
+        _mat_btn(self._custom_idle_frame, "Reset Defaults",
+                 self._reset_defaults, _GR).pack(side=tk.LEFT, padx=(4, 4))
+
+        self._custom_last_calib_btn = _mat_btn(
+            self._custom_idle_frame, "↩ Last Calibration",
+            self._apply_last_calibration, _ACCENT)
+        self._custom_last_calib_btn.pack(side=tk.LEFT, padx=4)
+        if self.settings.calibrated_threshold == 0:
+            _mat_disable(self._custom_last_calib_btn)
+
+        # Right side: Start + Accept + Review + Browser
+        self._custom_scan_btn = _mat_btn(
+            self._custom_idle_frame, "▶  Start Custom Scan",
+            self._start_custom_scan, _M_SUCCESS)
+        self._custom_scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
+
+        self._custom_accept_btn = _mat_btn(
+            self._custom_idle_frame, "✓  Accept & Move",
+            self._custom_accept_and_move, _M_SUCCESS)
+        self._custom_accept_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._custom_accept_btn)
+
+        self._custom_inapp_btn = _mat_btn(
+            self._custom_idle_frame, "Review In-App",
+            self._custom_open_inapp_report, _ACCENT)
+        self._custom_inapp_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._custom_inapp_btn)
+
+        self._custom_browser_btn = _mat_btn(
+            self._custom_idle_frame, "Browser Report",
+            self._custom_open_browser_report, "#757575")
+        self._custom_browser_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._custom_browser_btn)
+
+        self._custom_active_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
+        # Not packed initially
+
+        self._custom_stop_btn = _mat_btn(
+            self._custom_active_frame, "■  Stop",
+            self._stop_custom_scan, _M_ERROR)
+        self._custom_stop_btn.pack(side=tk.LEFT, padx=(8, 4))
+
+        self._custom_pause_btn = _mat_btn(
+            self._custom_active_frame, "⏸  Pause",
+            self._pause_custom_scan, _M_AMBER)
+        self._custom_pause_btn.pack(side=tk.LEFT, padx=4)
+
+    # ── custom scan folder helpers ─────────────────────────────────────────
+
+    def _browse_custom(self, var: tk.StringVar) -> None:
+        folder = filedialog.askdirectory(parent=self.root)
+        if folder:
+            var.set(folder)
+
+    def _on_custom_folder_change(self, *_) -> None:
+        self._on_setting_change()
+        if hasattr(self, "_custom_estimate_after_id"):
+            self.root.after_cancel(self._custom_estimate_after_id)
+        self._custom_estimate_after_id = self.root.after(2000, self._update_custom_estimate)
+
+    def _update_custom_estimate(self) -> None:
+        main  = self._custom_main_var.get().strip()
+        check = self._custom_check_var.get().strip()
+        if not main and not check:
+            return
+
+        def _count() -> None:
+            total = 0
+            try:
+                recursive      = self.recursive_var.get()
+                skip_names_set = {s.strip() for s in self.skip_names_var.get().split(",") if s.strip()}
+                for folder in (main, check):
+                    if not folder or not Path(folder).is_dir():
+                        continue
+                    if recursive:
+                        for root_d, dirs, files in os.walk(folder):
+                            dirs[:] = [d for d in dirs if d not in skip_names_set]
+                            for f in files:
+                                if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
+                                    total += 1
+                    else:
+                        for f in os.listdir(folder):
+                            if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
+                                total += 1
+
+                hash_time    = total * 0.3
+                compare_time = total * (total - 1) / 2 * 0.0000005
+                total_s      = hash_time + compare_time
+                if total_s < 60:
+                    time_str = f"~{int(total_s)}s"
+                elif total_s < 3600:
+                    si = int(total_s)
+                    time_str = f"~{si // 60}m {si % 60}s"
+                else:
+                    time_str = f"~{int(total_s) // 3600}h"
+
+                msg = f"Estimated time: {time_str}  ·  {total} images total across both folders"
+                self.root.after(0, lambda m=msg: self._custom_estimate_var.set(m))
+            except Exception:
+                pass
+
+        threading.Thread(target=_count, daemon=True).start()
+
+    # ── custom scan control ────────────────────────────────────────────────
+
+    def _start_custom_scan(self) -> None:
+        if self._scanning:
+            messagebox.showwarning("Busy", "A scan is already running.", parent=self.root)
+            return
+
+        main  = self._custom_main_var.get().strip()
+        check = self._custom_check_var.get().strip()
+        out   = self._custom_out_var.get().strip()
+
+        if not main:
+            messagebox.showerror("Error", "Please select the Main (reference) folder.", parent=self.root)
+            return
+        if not check:
+            messagebox.showerror("Error", "Please select the Check folder.", parent=self.root)
+            return
+        if not out:
+            messagebox.showerror("Error", "Please select an Output folder.", parent=self.root)
+            return
+
+        main_path, check_path, out_path = Path(main), Path(check), Path(out)
+        if not main_path.is_dir():
+            messagebox.showerror("Error", "Main folder does not exist.", parent=self.root)
+            return
+        if not check_path.is_dir():
+            messagebox.showerror("Error", "Check folder does not exist.", parent=self.root)
+            return
+        if main_path.resolve() == check_path.resolve():
+            messagebox.showerror("Error", "Main and Check folders must be different.", parent=self.root)
+            return
+
+        self._collect_settings()
+        self._scanning = True
+        self._custom_stop_flag[0]  = False
+        self._custom_pause_flag[0] = False
+        self._custom_groups        = []
+        self._custom_broken        = []
+        self._custom_report_path   = None
+
+        # Swap button frames
+        self._custom_idle_frame.pack_forget()
+        self._custom_active_frame.pack(fill=tk.X, padx=4)
+        _mat_disable(self._custom_accept_btn)
+        _mat_disable(self._custom_inapp_btn)
+        _mat_disable(self._custom_browser_btn)
+
+        self._custom_phase_label.set("Initialising…")
+        self._custom_progress_bar["value"] = 0
+        self._custom_progress_bar["mode"]  = "indeterminate"
+        self._custom_progress_bar.start(12)
+
+        threading.Thread(
+            target=self._custom_worker,
+            args=(main_path, check_path, out_path, self.settings),
+            daemon=True,
+        ).start()
+
+    def _pause_custom_scan(self) -> None:
+        self._custom_pause_flag[0] = True
+        _mat_disable(self._custom_pause_btn)
+        self._custom_phase_label.set("Pausing…")
+
+    def _stop_custom_scan(self) -> None:
+        if not messagebox.askyesno("Stop Scan", "Stop the custom scan?", parent=self.root):
+            return
+        self._custom_stop_flag[0] = True
+        _mat_disable(self._custom_stop_btn)
+        _mat_disable(self._custom_pause_btn)
+        self._custom_phase_label.set("Stopping…")
+
+    # ── custom worker ─────────────────────────────────────────────────────
+
+    def _custom_worker(
+        self, main_path: Path, check_path: Path, out_path: Path, settings: Settings
+    ) -> None:
+        _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
+
+        def cb(msg, done, total, phase):
+            self._custom_progress_cb(msg, done, total, phase)
+
+        try:
+            out_path.mkdir(parents=True, exist_ok=True)
+            skip_paths = {
+                (out_path / "results").resolve(),
+                (out_path / "trash").resolve(),
+                out_path.resolve(),
+            }
+
+            # Phase 1 — hash main folder
+            cb("Scanning main folder…", 0, 1, "Main folder")
+            main_failed: list = []
+            main_records = collect_images(
+                main_path, skip_paths, settings,
+                progress_cb=cb,
+                stop_flag=self._custom_stop_flag,
+                pause_flag=self._custom_pause_flag,
+                failed_paths=main_failed,
+            )
+
+            if self._custom_stop_flag[0]:
+                self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
+                return
+
+            # Phase 2 — hash check folder
+            cb("Scanning check folder…", 0, 1, "Check folder")
+            check_failed: list = []
+            check_records = collect_images(
+                check_path, skip_paths, settings,
+                progress_cb=cb,
+                stop_flag=self._custom_stop_flag,
+                pause_flag=self._custom_pause_flag,
+                failed_paths=check_failed,
+            )
+
+            if self._custom_stop_flag[0]:
+                self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
+                return
+
+            all_records = main_records + check_records
+            self._custom_broken = main_failed + check_failed
+
+            # Phase 3 — find groups across both folders
+            cb("Comparing images…", 0, 1, "Comparing")
+            all_groups, _ = find_groups(
+                all_records, settings,
+                progress_cb=cb,
+                stop_flag=self._custom_stop_flag,
+                pause_flag=self._custom_pause_flag,
+            )
+
+            if self._custom_stop_flag[0]:
+                self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
+                return
+
+            # Reclassify: main = originals (never moved), check = duplicates (candidates for trash)
+            main_res  = main_path.resolve()
+            check_res = check_path.resolve()
+
+            def _in_folder(p: Path, folder: Path) -> bool:
+                try:
+                    p.resolve().relative_to(folder)
+                    return True
+                except ValueError:
+                    return False
+
+            cross_groups = []
+            within_check_groups = []
+            for g in all_groups:
+                all_members = g.originals + g.previews
+                from_main  = [r for r in all_members if _in_folder(r.path, main_res)]
+                from_check = [r for r in all_members if _in_folder(r.path, check_res)]
+
+                if from_main and from_check:
+                    # Cross-folder match: main files = originals, check files = duplicates
+                    g.originals = from_main
+                    g.previews  = from_check
+                    cross_groups.append(g)
+                elif not from_main and len(from_check) > 1:
+                    # Within-check duplicates — keep the best, mark rest as previews
+                    g.originals = from_check[:1]
+                    g.previews  = from_check[1:]
+                    within_check_groups.append(g)
+
+            combined_groups = cross_groups + within_check_groups
+            n_cross = sum(len(g.previews) for g in cross_groups)
+            n_inner = sum(len(g.previews) for g in within_check_groups)
+            n_total = n_cross + n_inner
+
+            # Phase 4 — report
+            cb("Generating report…", 0, 1, "Report")
+            report = generate_report(
+                combined_groups, out_path, main_path, len(all_records), settings)
+            self._custom_groups      = combined_groups
+            self._custom_report_path = report
+
+            dry = settings.dry_run
+            msg = (
+                f"Done. {len(main_records)} main + {len(check_records)} check images scanned.  "
+                f"{len(cross_groups)} cross-folder matches ({n_cross} dups from check folder)"
+                + (f",  {len(within_check_groups)} within-check groups ({n_inner} dups)" if n_inner else "")
+                + ("  [DRY RUN]" if dry else "")
+                + "."
+            )
+            self.root.after(0, lambda: self._on_custom_done(
+                msg, success=True, dry_run=dry,
+                n_main=len(main_records), n_check=len(check_records),
+                n_cross=len(cross_groups), n_dups=n_total,
+                src_folder=str(main_path),
+            ))
+
+        except Exception as exc:
+            import traceback
+            tb = traceback.format_exc()
+            self.root.after(0, lambda e=exc, t=tb: self._on_custom_error(str(e), t))
+
+    def _custom_progress_cb(
+        self, msg: str, done: int, total: int, phase_name: str
+    ) -> None:
+        _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
+
+        def _update() -> None:
+            pct_per_phase = 100 / len(_PHASES)
+            try:
+                phase_idx = _PHASES.index(phase_name)
+            except ValueError:
+                phase_idx = 0
+            base_pct = phase_idx * pct_per_phase
+            inner    = (done / max(total, 1)) * pct_per_phase if total > 0 else 0
+            pct      = min(100, base_pct + inner)
+
+            self._custom_progress_bar.stop()
+            self._custom_progress_bar["mode"]  = "determinate"
+            self._custom_progress_bar["value"] = pct
+            self._custom_phase_label.set(
+                f"[{phase_name}] {msg[:90]}"
+            )
+            self._custom_eta_var.set(f"{pct:.0f}%")
+
+        self.root.after(0, _update)
+
+    def _on_custom_done(
+        self, msg: str, success: bool = True,
+        dry_run: bool = True, n_main: int = 0, n_check: int = 0,
+        n_cross: int = 0, n_dups: int = 0, src_folder: str = "",
+    ) -> None:
+        self._custom_progress_bar.stop()
+        self._custom_progress_bar["mode"]  = "determinate"
+        self._custom_progress_bar["value"] = 100 if success else self._custom_progress_bar["value"]
+        self._scanning = False
+
+        # Restore idle frame
+        self._custom_active_frame.pack_forget()
+        self._custom_idle_frame.pack(fill=tk.X, padx=4)
+
+        self._custom_phase_label.set(msg)
+        self._custom_eta_var.set("")
+
+        if success and self._custom_groups:
+            _mat_enable(self._custom_inapp_btn)
+            _mat_enable(self._custom_browser_btn)
+            if dry_run:
+                _mat_enable(self._custom_accept_btn)
+
+            # Log to scan history (with note that it's a custom scan)
+            dup_pct = n_dups / max(n_main + n_check, 1) * 100
+            entry = {
+                "date":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "src_folder":  f"[Custom] {src_folder}",
+                "total_files": n_main + n_check,
+                "groups":      n_cross,
+                "duplicates":  n_dups,
+                "dup_pct":     round(dup_pct, 2),
+                "dry_run":     dry_run,
+                "applied":     not dry_run,
+            }
+            self._scan_history.append(entry)
+            self._save_scan_history()
+            self._refresh_history_view()
+
+            # Auto-open in-app report
+            self.root.after(300, self._custom_open_inapp_report)
+
+    def _on_custom_error(self, msg: str, tb: str = "") -> None:
+        self._custom_progress_bar.stop()
+        self._custom_phase_label.set("Error — see dialog.")
+        self._scanning = False
+        self._custom_active_frame.pack_forget()
+        self._custom_idle_frame.pack(fill=tk.X, padx=4)
+        messagebox.showerror("Custom Scan Error", f"{msg}\n\n{tb}" if tb else msg,
+                             parent=self.root)
+
+    # ── custom scan post-scan actions ──────────────────────────────────────
+
+    def _custom_open_inapp_report(self) -> None:
+        if not self._custom_groups:
+            messagebox.showinfo("Review", "No custom scan results to review.", parent=self.root)
+            return
+        out = self._custom_out_var.get().strip()
+
+        def _apply_cb(_paths_trashed: list) -> None:
+            # File moving is handled inside ReportViewer; update history here.
+            if self._scan_history:
+                for e in reversed(self._scan_history):
+                    if "[Custom]" in e.get("src_folder", ""):
+                        e["applied"] = True
+                        break
+                self._save_scan_history()
+                self._refresh_history_view()
+
+        viewer = ReportViewer(
+            self.root, self._custom_groups,
+            ops_log_path=None,
+            on_apply_cb=_apply_cb,
+            solo_originals=[],
+            broken_files=self._custom_broken,
+            settings=self.settings,
         )
-        toggle_btn.pack(anchor=tk.W, pady=(2, 0))
+        viewer.grab_set()
 
-        self._detail_text = tk.Text(
-            self._prog_frame, height=7, state=tk.DISABLED,
-            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT
-        )
+    def _custom_open_browser_report(self) -> None:
+        if self._custom_report_path and self._custom_report_path.exists():
+            webbrowser.open(self._custom_report_path.as_uri())
 
-        self._bottom_toolbar()
-        self._apply_mode()
+    def _custom_accept_and_move(self) -> None:
+        if not self._custom_groups:
+            messagebox.showwarning("Accept & Move", "No groups to move.", parent=self.root)
+            return
+        if not messagebox.askyesno(
+            "Accept & Move",
+            "Move duplicate files from the Check folder to trash?\n"
+            "Main folder files will NOT be touched.",
+            parent=self.root,
+        ):
+            return
+        out = self._custom_out_var.get().strip()
+        if not out:
+            return
+        _mat_disable(self._custom_accept_btn)
+        self._custom_phase_label.set("Moving files…")
 
-    def _bottom_toolbar(self) -> None:
-        """Fixed bottom toolbar with all action buttons."""
-        bar = tk.Frame(self.root, bg="#e8eaed", pady=6)
-        bar.pack(fill=tk.X, side=tk.BOTTOM)
+        def _do() -> None:
+            try:
+                moved_orig, moved_prev = move_groups(
+                    self._custom_groups, Path(out),
+                    dry_run=False, settings=self.settings,
+                )
+                report = generate_report(
+                    self._custom_groups, Path(out),
+                    Path(self._custom_main_var.get()),
+                    0, self.settings,
+                )
+                self._custom_report_path = report
+                msg = f"Moved {moved_prev} duplicates from check folder to trash."
+                self.root.after(0, lambda: self._custom_phase_label.set(msg))
+                if self._scan_history:
+                    for e in reversed(self._scan_history):
+                        if "[Custom]" in e.get("src_folder", ""):
+                            e["applied"] = True
+                            break
+                    self._save_scan_history()
+                    self.root.after(0, self._refresh_history_view)
+                if report:
+                    self.root.after(0, lambda: webbrowser.open(report.as_uri()))
+            except Exception as exc:
+                self.root.after(0, lambda e=exc: messagebox.showerror(
+                    "Error", str(e), parent=self.root))
 
-        # Left: reset defaults
-        ttk.Button(bar, text="Reset Defaults", command=self._reset_defaults).pack(side=tk.LEFT, padx=8)
-
-        # Right: scan controls
-        self.scan_btn = ttk.Button(bar, text="Start Scan", command=self._start_scan)
-        self.scan_btn.pack(side=tk.RIGHT, padx=4)
-
-        self.pause_btn = ttk.Button(bar, text="Pause", command=self._pause_scan, state=tk.DISABLED)
-        self.pause_btn.pack(side=tk.RIGHT, padx=4)
-
-        self.stop_btn = ttk.Button(bar, text="Stop", command=self._stop_scan, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.RIGHT, padx=4)
-
-        # Post-scan buttons (initially hidden, enabled when scan completes)
-        self.accept_btn = ttk.Button(
-            bar, text="Accept & Move",
-            command=self._accept_and_move, state=tk.DISABLED
-        )
-        self.accept_btn.pack(side=tk.RIGHT, padx=4)
-
-        self.browser_report_btn = ttk.Button(
-            bar, text="Browser Report",
-            command=self._open_browser_report, state=tk.DISABLED
-        )
-        self.browser_report_btn.pack(side=tk.RIGHT, padx=4)
-
-        self.inapp_report_btn = ttk.Button(
-            bar, text="Review In-App",
-            command=self._open_inapp_report, state=tk.DISABLED
-        )
-        self.inapp_report_btn.pack(side=tk.RIGHT, padx=4)
-
-        self.revert_all_btn = ttk.Button(
-            bar, text="Revert All",
-            command=self._revert_all, state=tk.DISABLED
-        )
-        self.revert_all_btn.pack(side=tk.RIGHT, padx=4)
+        threading.Thread(target=_do, daemon=True).start()
 
     # ── mode management ───────────────────────────────────────────────────
 
     def _apply_mode(self) -> None:
-        mode = self._mode_var.get()
-        for frame in self._advanced_frames:
-            if mode == "advanced":
-                frame.pack(fill=tk.X, pady=(0, 6))
-            else:
-                frame.pack_forget()
+        if self._mode_var.get() == "advanced":
+            self._compact_adv_frame.pack(fill=tk.X, pady=(0, 4))
+        else:
+            self._compact_adv_frame.pack_forget()
+
+    def _toggle_show_all(self) -> None:
+        self._all_settings_visible = not self._all_settings_visible
+        if self._all_settings_visible:
+            self._show_all_btn.pack_forget()
+            for f in self._advanced_frames:
+                f.pack(fill=tk.X, pady=(0, 6))
+            self._show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._show_all_btn.configure(text="▲  Hide Advanced Settings")
+        else:
+            for f in self._advanced_frames:
+                f.pack_forget()
+            self._show_all_btn.configure(text="▼  Show Advanced Settings")
+
+    def _toggle_custom_show_all(self) -> None:
+        self._custom_all_settings_visible = not self._custom_all_settings_visible
+        if self._custom_all_settings_visible:
+            self._custom_show_all_btn.pack_forget()
+            for f in self._custom_advanced_frames:
+                f.pack(fill=tk.X, pady=(0, 6))
+            self._custom_show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._custom_show_all_btn.configure(text="▲  Hide Advanced Settings")
+        else:
+            for f in self._custom_advanced_frames:
+                f.pack_forget()
+            self._custom_show_all_btn.configure(text="▼  Show Advanced Settings")
 
     def _on_mode_change(self) -> None:
         self.settings.mode = self._mode_var.get()
@@ -568,45 +1732,111 @@ class App:
         ttk.Label(frame, text=label, width=16, anchor=tk.W).pack(side=tk.LEFT)
         var = tk.StringVar(value=getattr(self.settings, setting_key, ""))
         ttk.Entry(frame, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        ttk.Button(frame, text="Browse...", command=lambda v=var, k=setting_key: self._browse(v, k)).pack(side=tk.RIGHT)
+        ttk.Button(frame, text="Browse…",
+                   command=lambda v=var, k=setting_key: self._browse(v, k)).pack(side=tk.RIGHT)
         var.trace_add("write", self._on_folder_change)
         return var
 
     # ── slider row helper ─────────────────────────────────────────────────
 
     def _slider_row(
-        self,
-        parent: tk.Widget,
-        label: str,
-        var: tk.Variable,
-        min_v: float,
-        max_v: float,
-        rec_lo: float,
-        rec_hi: float,
-        default: float,
-        key: str,
-        step: float,
-        fmt,          # callable: float -> str
+        self, parent, label, var, min_v, max_v,
+        rec_lo, rec_hi, default, key, step, fmt,
     ) -> None:
-        """
-        Create a complete slider block:
-          Label (bold)
-          [slider ━━━━◉━━━━━━] [value] [↺ reset] [ⓘ info]
-          marks canvas: min  ←rec: lo–hi→  max
-          Short description text
-        """
         outer = ttk.Frame(parent)
         outer.pack(fill=tk.X, pady=(6, 2))
 
-        # ── title ──
         ttk.Label(outer, text=label, font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
 
-        # ── control row ──
         ctrl = ttk.Frame(outer)
         ctrl.pack(fill=tk.X)
 
-        scale = ttk.Scale(ctrl, from_=min_v, to=max_v, variable=var, orient=tk.HORIZONTAL)
-        scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        # ── Canvas slider: green recommended band drawn behind track & thumb ──
+        CANVAS_H = 26
+        PAD = 10
+        try:
+            _cbg = parent.cget("bg")
+        except Exception:
+            _cbg = _BG
+
+        scale_c = tk.Canvas(ctrl, height=CANVAS_H, highlightthickness=0,
+                            bg=_cbg, cursor="hand2")
+        scale_c.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        def _eff_rec() -> tuple:
+            """Return (rec_lo, rec_hi), updated from calibration when available."""
+            if key == "threshold":
+                cv = getattr(self.settings, "calibrated_threshold", 0)
+                if cv > 0:
+                    return (max(float(min_v), cv - 1.0), min(float(max_v), cv + 1.0))
+            elif key == "preview_ratio":
+                cv = getattr(self.settings, "calibrated_preview_ratio", 0.0)
+                if cv > 0:
+                    return (max(float(min_v), cv - 0.02), min(float(max_v), cv + 0.02))
+            return (rec_lo, rec_hi)
+
+        def _px(v: float, w: int) -> float:
+            return PAD + (v - min_v) / max(float(max_v - min_v), 1e-9) * max(w - 2 * PAD, 1)
+
+        def _draw(*_):
+            scale_c.delete("all")
+            w = scale_c.winfo_width()
+            if w < 20:
+                return
+            cy = CANVAS_H // 2
+
+            rl, rh = _eff_rec()
+
+            # 1 — green recommended band (drawn first → visually behind everything)
+            scale_c.create_rectangle(
+                _px(rl, w), 1, _px(rh, w), CANVAS_H - 1,
+                fill="#c8e6c9", outline="",
+            )
+            # 2 — track line
+            scale_c.create_line(
+                PAD, cy, w - PAD, cy,
+                fill="#bdbdbd", width=2, capstyle=tk.ROUND,
+            )
+            # 3 — thumb knob (drawn last → on top)
+            tx = _px(var.get(), w)
+            r = 7
+            scale_c.create_oval(
+                tx - r, cy - r, tx + r, cy + r,
+                fill="#1565C0", outline="#FFFFFF", width=2,
+            )
+
+        def _on_input(event):
+            try:
+                t_w = max(scale_c.winfo_width() - 2 * PAD, 1)
+                frac = max(0.0, min(1.0, (event.x - PAD) / t_w))
+                raw  = min_v + frac * (max_v - min_v)
+                snap = round(round(raw / step) * step, 10)
+                var.set(max(min_v, min(max_v, snap)))
+            except Exception:
+                pass
+
+        def _snap(*_):
+            try:
+                v = var.get()
+                r = round(round(v / step) * step, 10)
+                if abs(r - v) > step * 0.001:
+                    var.set(r)
+            except Exception:
+                pass
+
+        scale_c.bind("<Button-1>",       _on_input)
+        scale_c.bind("<B1-Motion>",      _on_input)
+        scale_c.bind("<ButtonRelease-1>", _snap)
+        scale_c.bind("<Configure>",       _draw)
+        var.trace_add("write", _draw)
+        scale_c.after(50, _draw)
+
+        # Save draw-fn reference for calibration-triggered redraws
+        if key == "threshold":
+            self._thresh_slider_draw = _draw
+        elif key == "preview_ratio":
+            self._ratio_slider_draw  = _draw
+        # ─────────────────────────────────────────────────────────────────────
 
         disp_var = tk.StringVar()
 
@@ -630,91 +1860,9 @@ class App:
         ttk.Button(ctrl, text="\u24d8", width=2,
                    command=lambda k=key: show_info(self.root, k)).pack(side=tk.LEFT, padx=2)
 
-        # Jump to clicked position, then snap to nearest step
-        def _jump_to_click(event):
-            try:
-                w = scale.winfo_width()
-                PAD = 8
-                track_w = max(w - 2 * PAD, 1)
-                frac = max(0.0, min(1.0, (event.x - PAD) / track_w))
-                raw = min_v + frac * (max_v - min_v)
-                snapped = round(round(raw / step) * step, 10)
-                var.set(max(min_v, min(max_v, snapped)))
-            except Exception:
-                pass
-            return "break"  # prevent default step-by-one behaviour
-
-        scale.bind("<Button-1>", _jump_to_click)
-
-        def _snap_on_release(*_):
-            try:
-                v = var.get()
-                rounded = round(round(v / step) * step, 10)
-                if abs(rounded - v) > step * 0.001:
-                    var.set(rounded)
-            except Exception:
-                pass
-
-        scale.bind("<ButtonRelease-1>", _snap_on_release)
-        var.trace_add("write", lambda *_: self._on_setting_change())
-
-        # ── marks canvas ──
-        canvas_h = 20
-        try:
-            _cbg = parent.cget("bg")
-        except Exception:
-            _cbg = _BG
-        marks_c = tk.Canvas(outer, height=canvas_h, highlightthickness=0, bg=_cbg)
-        marks_c.pack(fill=tk.X, pady=(1, 0))
-
-        def _draw_marks(event=None):
-            marks_c.delete("all")
-            scale.update_idletasks()
-            scale_x = scale.winfo_x()
-            scale_w = scale.winfo_width()
-            if scale_w < 20:
-                return
-            PAD = 8  # approximate ttk.Scale track inset
-            t_start = scale_x + PAD
-            t_end = scale_x + scale_w - PAD
-            t_w = t_end - t_start
-            if t_w <= 0:
-                return
-
-            def px(v: float) -> float:
-                return t_start + (v - min_v) / (max_v - min_v) * t_w
-
-            # Baseline
-            marks_c.create_line(t_start, canvas_h // 2,
-                                 t_end, canvas_h // 2, fill="#ddd", width=1)
-            # Recommended range band
-            marks_c.create_rectangle(
-                px(rec_lo), canvas_h // 2 - 3,
-                px(rec_hi), canvas_h // 2 + 3,
-                fill="#b3cfff", outline="", tags="rec"
-            )
-            # Ticks and labels
-            for v, color, is_edge in [
-                (min_v,  "#999",     True),
-                (rec_lo, "#1a73e8",  False),
-                (rec_hi, "#1a73e8",  False),
-                (max_v,  "#999",     True),
-            ]:
-                x = px(v)
-                marks_c.create_line(x, 2, x, canvas_h - 4, fill=color, width=1)
-                text = fmt(v)
-                anchor = tk.NW if is_edge and v == min_v else (tk.NE if is_edge else tk.N)
-                marks_c.create_text(x, canvas_h - 2, text=text,
-                                    anchor=tk.S, fill=color, font=("Segoe UI", 7))
-
-        marks_c.bind("<Configure>", _draw_marks)
-        outer.after(80, _draw_marks)
-
-        # ── description ──
         _, detail = INFO_TEXTS.get(key, ("", ""))
         if detail:
-            desc = _first_sentence(detail)
-            ttk.Label(outer, text=desc, foreground="#666",
+            ttk.Label(outer, text=_first_sentence(detail), foreground="#666",
                       font=("Segoe UI", 8), wraplength=560,
                       justify=tk.LEFT).pack(anchor=tk.W, pady=(1, 0))
 
@@ -725,22 +1873,84 @@ class App:
 
     def _on_folder_change(self, *_) -> None:
         self._on_setting_change()
-        # Trigger estimate update after 2s
         if hasattr(self, "_estimate_after_id"):
             self.root.after_cancel(self._estimate_after_id)
         self._estimate_after_id = self.root.after(2000, self._update_estimate)
 
-    # ── settings persistence ──────────────────────────────────────────────
+    # ── date format helpers ───────────────────────────────────────────────
+
+    def _date_labels(self, sep: str) -> list[str]:
+        vis = sep if sep != " " else "·"
+        result = []
+        for tmpl in self._DATE_ORDER_TEMPLATES:
+            lbl = (tmpl.replace("{s}", vis)
+                       .replace("%Y", "YYYY").replace("%m", "MM").replace("%d", "DD"))
+            result.append(lbl)
+        return result
+
+    def _fmt_from_order_sep(self, idx: int, sep: str) -> str:
+        return self._DATE_ORDER_TEMPLATES[idx].replace("{s}", sep)
+
+    def _guess_order_sep(self, fmt: str) -> tuple[int, str]:
+        for sep in self._DATE_SEPARATORS:
+            for i, tmpl in enumerate(self._DATE_ORDER_TEMPLATES):
+                if tmpl.replace("{s}", sep) == fmt:
+                    return i, sep
+        return 0, "-"
+
+    def _refresh_date_order_choices(self, sep: str, select_idx: int) -> None:
+        labels = self._date_labels(sep)
+        self._date_order_cb["values"] = labels
+        if 0 <= select_idx < len(labels):
+            self._date_order_var.set(labels[select_idx])
+            self._date_order_idx_val = select_idx
+
+    def _on_date_sep_change(self, *_) -> None:
+        sep = self._date_sep_var.get()
+        cur_label = self._date_order_var.get()
+        old_labels = self._date_labels("-" if sep != "-" else "/")
+        try:
+            idx = old_labels.index(cur_label)
+        except ValueError:
+            idx = self._date_order_idx_val
+        self._refresh_date_order_choices(sep, idx)
+        self._recompute_date_fmt()
 
     def _on_date_fmt_change(self, *_) -> None:
-        import datetime
-        fmt = self.date_fmt_var.get()
+        self._recompute_date_fmt()
+
+    def _recompute_date_fmt(self, *_) -> None:
+        sep = self._date_sep_var.get()
+        labels = self._date_labels(sep)
+        cur_label = self._date_order_var.get()
+        try:
+            idx = labels.index(cur_label)
+        except ValueError:
+            idx = 0
+        self._date_order_idx_val = idx
+        fmt = self._fmt_from_order_sep(idx, sep)
+        self.date_fmt_var.set(fmt)
         try:
             example = datetime.datetime(2024, 3, 15).strftime(fmt)
             self._date_fmt_example.set(f"e.g. {example}/")
         except Exception:
-            self._date_fmt_example.set("(invalid format)")
+            self._date_fmt_example.set("(invalid)")
         self._on_setting_change()
+
+    # ── settings persistence ──────────────────────────────────────────────
+
+    def _calib_info_text(self) -> str:
+        t = self.settings.calibrated_threshold
+        r = self.settings.calibrated_preview_ratio
+        if t > 0:
+            return f"Last calibration: threshold = {t}  ·  ratio = {r:.2f}"
+        return "No calibration run yet."
+
+    def _apply_last_calibration(self) -> None:
+        if self.settings.calibrated_threshold > 0:
+            self.thresh_var.set(self.settings.calibrated_threshold)
+            self.ratio_var.set(self.settings.calibrated_preview_ratio)
+            self._on_setting_change()
 
     def _on_setting_change(self, *_) -> None:
         self._schedule_settings_save()
@@ -756,41 +1966,50 @@ class App:
         save_settings(self.settings, SETTINGS_PATH)
 
     def _collect_settings(self) -> None:
-        """Read all UI vars into self.settings."""
         s = self.settings
-        s.mode = self._mode_var.get()
-        s.src_folder = self.src_var.get()
-        s.out_folder = self.out_var.get()
-        s.threshold = self._safe_int(self.thresh_var, 12)
-        s.preview_ratio = self._safe_float(self.ratio_var, 0.90)
-        s.series_tolerance_pct = self._safe_float(self.series_tol_var, 0.0)
-        s.series_threshold_factor = self._safe_float(self.series_thresh_var, 2.0)
-        s.ar_tolerance_pct = self._safe_float(self.ar_tol_var, 5.0)
-        s.dark_protection = self.dark_var.get()
-        s.dark_threshold = self._safe_float(self.dark_thresh_var, 40.0)
-        s.dark_tighten_factor = self._safe_float(self.dark_factor_var, 0.5)
-        s.use_dual_hash = self.dual_hash_var.get()
-        s.use_histogram = self.hist_var.get()
-        s.hist_min_similarity = self._safe_float(self.hist_sim_var, 0.70)
-        s.brightness_max_diff = self._safe_float(self.brightness_diff_var, 60.0)
-        s.ambiguous_detection = self.ambig_var.get()
+        s.mode                     = self._mode_var.get()
+        s.src_folder               = self.src_var.get()
+        s.out_folder               = self.out_var.get()
+        s.threshold                = self._safe_int(self.thresh_var, 12)
+        s.preview_ratio            = self._safe_float(self.ratio_var, 0.90)
+        s.series_tolerance_pct     = self._safe_float(self.series_tol_var, 0.0)
+        s.series_threshold_factor  = self._safe_float(self.series_thresh_var, 1.0)
+        s.ar_tolerance_pct         = self._safe_float(self.ar_tol_var, 5.0)
+        s.dark_protection          = self.dark_var.get()
+        s.dark_threshold           = self._safe_float(self.dark_thresh_var, 40.0)
+        s.dark_tighten_factor      = self._safe_float(self.dark_factor_var, 0.5)
+        s.use_dual_hash            = self.dual_hash_var.get()
+        s.use_histogram            = self.hist_var.get()
+        s.hist_min_similarity      = self._safe_float(self.hist_sim_var, 0.70)
+        s.brightness_max_diff      = self._safe_float(self.brightness_diff_var, 60.0)
+        s.ambiguous_detection      = self.ambig_var.get()
         s.ambiguous_threshold_factor = self._safe_float(self.ambig_factor_var, 1.5)
-        s.use_rawpy = self.rawpy_var.get()
-        s.keep_strategy = self.strategy_var.get()
-        s.keep_all_formats = self.all_formats_var.get()
-        s.prefer_rich_metadata = self.prefer_meta_var.get()
-        s.collect_metadata = self.collect_meta_var.get()
-        s.export_csv = self.export_csv_var.get()
-        s.extended_report = self.ext_report_var.get()
-        s.sort_by_filename_date = self.sort_fname_var.get()
-        s.sort_by_exif_date = self.sort_exif_var.get()
-        s.min_dimension = self._safe_int(self.mindim_var, 0)
-        s.recursive = self.recursive_var.get()
-        s.skip_names = self.skip_names_var.get()
-        s.dry_run = self.dry_var.get()
-        s.organize_by_date = self.org_date_var.get()
-        s.date_folder_format = self.date_fmt_var.get() or "%Y-%m"
-        s.details_visible = self._details_var.get()
+        s.disable_series_detection = self.disable_series_var.get()
+        s.use_rawpy                = self.rawpy_var.get()
+        s.keep_strategy            = self.strategy_var.get()
+        s.keep_all_formats         = self.all_formats_var.get()
+        s.prefer_rich_metadata     = self.prefer_meta_var.get()
+        s.collect_metadata         = self.collect_meta_var.get()
+        s.export_csv               = self.export_csv_var.get()
+        s.extended_report          = self.ext_report_var.get()
+        s.sort_by_filename_date    = self.sort_fname_var.get()
+        s.sort_by_exif_date        = self.sort_exif_var.get()
+        s.min_dimension            = self._safe_int(self.mindim_var, 0)
+        s.recursive                = self.recursive_var.get()
+        s.skip_names               = self.skip_names_var.get()
+        s.dry_run                  = self.dry_var.get()
+        s.organize_by_date         = self.org_date_var.get()
+        s.date_folder_format       = self.date_fmt_var.get() or "%Y-%m-%d"
+        s.details_visible          = self._details_var.get()
+        s.dry_run                  = self._custom_dry_var.get()  # shared dry-run flag
+        s.custom_main_folder       = self._custom_main_var.get()
+        s.custom_check_folder      = self._custom_check_var.get()
+        s.custom_out_folder        = self._custom_out_var.get()
+        s.auto_update              = self.auto_update_var.get()
+
+    def _build_about_tab(self) -> None:
+        """Populate the About tab using the about_tab module."""
+        build_about_tab(self._tab_about, self)
 
     def _reset_defaults(self) -> None:
         d = DEFAULTS
@@ -808,6 +2027,7 @@ class App:
         self.brightness_diff_var.set(d.brightness_max_diff)
         self.ambig_var.set(d.ambiguous_detection)
         self.ambig_factor_var.set(d.ambiguous_threshold_factor)
+        self.disable_series_var.set(d.disable_series_detection)
         self.rawpy_var.set(d.use_rawpy)
         self.strategy_var.set(d.keep_strategy)
         self.all_formats_var.set(d.keep_all_formats)
@@ -822,8 +2042,56 @@ class App:
         self.skip_names_var.set(d.skip_names)
         self.dry_var.set(d.dry_run)
         self.org_date_var.set(d.organize_by_date)
-        self.date_fmt_var.set(d.date_folder_format)
+        new_fmt = d.date_folder_format
+        idx, sep = self._guess_order_sep(new_fmt)
+        self._date_sep_var.set(sep)
+        self._refresh_date_order_choices(sep, idx)
+        self.date_fmt_var.set(new_fmt)
         self._schedule_settings_save()
+
+    def _open_calibration(self) -> None:
+        self._collect_settings()
+        from calibration_window import CalibrationWindow
+
+        def _apply(threshold: int, preview_ratio: float) -> None:
+            self.thresh_var.set(threshold)
+            self.ratio_var.set(preview_ratio)
+            self._on_setting_change()
+
+        def _folder_saved(folder: str) -> None:
+            self.settings.calib_folder = folder
+            self._schedule_settings_save()
+
+        def _calib_applied(threshold: int, preview_ratio: float) -> None:
+            self.settings.calibrated_threshold = threshold
+            self.settings.calibrated_preview_ratio = preview_ratio
+            _mat_enable(self._calib_apply_btn)
+            _mat_enable(self._scan_last_calib_btn)
+            if hasattr(self, "_custom_last_calib_btn"):
+                _mat_enable(self._custom_last_calib_btn)
+            self._calib_info_var.set(self._calib_info_text())
+            try:
+                fg = _M_SUCCESS if self.settings.calibrated_threshold > 0 else "#999"
+                self._calib_info_lbl.configure(foreground=fg)
+            except Exception:
+                pass
+            # Redraw threshold and ratio slider canvases so their green
+            # recommended bands immediately reflect the new calibrated values.
+            for attr in ("_thresh_slider_draw", "_ratio_slider_draw"):
+                fn = getattr(self, attr, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
+            self._schedule_settings_save()
+
+        CalibrationWindow(
+            self.root, self.settings,
+            apply_cb=_apply,
+            folder_cb=_folder_saved,
+            calibration_applied_cb=_calib_applied,
+        )
 
     @staticmethod
     def _safe_int(var: tk.Variable, default: int) -> int:
@@ -852,13 +2120,12 @@ class App:
         def _count() -> None:
             try:
                 count = 0
-                recursive = self.recursive_var.get() if hasattr(self, "recursive_var") else True
-                skip_names_raw = self.skip_names_var.get() if hasattr(self, "skip_names_var") else ""
-                skip_names_set = {s.strip() for s in skip_names_raw.split(",") if s.strip()}
-                src_path = Path(src)
+                recursive      = self.recursive_var.get()
+                skip_names_set = {s.strip() for s in self.skip_names_var.get().split(",") if s.strip()}
+                src_path       = Path(src)
 
                 if recursive:
-                    for root, dirs, files in os.walk(src_path):
+                    for root_dir, dirs, files in os.walk(src_path):
                         dirs[:] = [d for d in dirs if d not in skip_names_set]
                         for f in files:
                             if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
@@ -868,10 +2135,9 @@ class App:
                         if Path(f).suffix.lower() in IMAGE_EXTENSIONS:
                             count += 1
 
-                # Time estimate
-                hash_time = count * 0.3
+                hash_time    = count * 0.3
                 compare_time = count * (count - 1) / 2 * 0.0000005
-                extras = 0.0
+                extras       = 0.0
                 try:
                     if self.collect_meta_var.get():
                         extras += hash_time * 0.15
@@ -886,14 +2152,14 @@ class App:
                 if total_s < 60:
                     time_str = f"~{int(total_s)}s"
                 elif total_s < 3600:
-                    total_s_int = int(total_s)
-                    time_str = f"~{total_s_int // 60}m {total_s_int % 60}s"
+                    s_int = int(total_s)
+                    time_str = f"~{s_int // 60}m {s_int % 60}s"
                 else:
-                    hrs = int(total_s) // 3600
+                    hrs  = int(total_s) // 3600
                     mins = (int(total_s) % 3600) // 60
                     time_str = f"~{hrs}h {mins}m"
 
-                msg = f"Estimated time: {time_str}  \u00b7  {count} images found"
+                msg = f"Estimated time: {time_str}  ·  {count} images found"
                 self.root.after(0, lambda m=msg: self._estimate_var.set(m))
             except Exception:
                 pass
@@ -911,11 +2177,9 @@ class App:
         st = load_state(sp)
         if st is None:
             return
-        import datetime
         ts = ""
         try:
-            mtime = sp.stat().st_mtime
-            ts = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d %H:%M")
+            ts = datetime.datetime.fromtimestamp(sp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
         except Exception:
             pass
         self._paused_state = st
@@ -942,9 +2206,67 @@ class App:
             if sp.exists():
                 sp.unlink()
 
+    # ── last-results restore ──────────────────────────────────────────────
+
+    def _check_last_results(self) -> None:
+        out = self.settings.out_folder.strip()
+        if not out:
+            return
+        from scan_state import load_results, results_path
+        rp = results_path(Path(out))
+        result = load_results(Path(out))
+        if result is None:
+            return
+
+        self.scan_groups     = result["groups"]
+        self._solo_originals = result["solo_originals"]
+        self._broken_files   = result["broken_files"]
+        self.scan_records = (
+            [r for g in self.scan_groups for r in g.originals + g.previews]
+            + self._solo_originals
+        )
+
+        html = result.get("report_html", "")
+        if html and Path(html).exists():
+            self.report_path = Path(html)
+
+        ts = ""
+        try:
+            ts = datetime.datetime.fromtimestamp(rp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+
+        n_groups = len(self.scan_groups)
+        n_prev   = sum(len(g.previews) for g in self.scan_groups)
+
+        _mat_enable(self.browser_report_btn)
+        _mat_enable(self.inapp_report_btn)
+        if result.get("dry_run", True):
+            _mat_enable(self.accept_btn)
+
+        self._last_scan_info = {
+            "date":        ts,
+            "src_folder":  result.get("src_folder", ""),
+            "total_files": result.get("total_scanned", 0),
+            "groups":      n_groups,
+            "duplicates":  n_prev,
+            "dup_pct":     n_prev / max(result.get("total_scanned", 1), 1) * 100,
+            "dry_run":     result.get("dry_run", True),
+            "applied":     False,
+        }
+        self._show_results_tab()
+        self._update_results_tab_ui()
+        self._phase_label_var.set(
+            f"Previous scan ({ts})  ·  {n_groups} groups, {n_prev} duplicates.  "
+            "Switch to Results tab to review."
+        )
+
     # ── scan control ──────────────────────────────────────────────────────
 
     def _start_scan(self, resume_state=None) -> None:
+        if self._scanning:
+            messagebox.showwarning("Busy", "A scan is already running.", parent=self.root)
+            return
         self._collect_settings()
         src = self.settings.src_folder.strip()
         out = self.settings.out_folder.strip()
@@ -959,27 +2281,33 @@ class App:
             messagebox.showerror("Error", "Source folder does not exist.", parent=self.root)
             return
 
-        self._stop_flag[0] = False
+        self._scanning      = True
+        self._stop_flag[0]  = False
         self._pause_flag[0] = False
+        self._is_paused     = False
 
-        self.scan_btn.config(state=tk.DISABLED)
-        self.stop_btn.config(state=tk.NORMAL)
-        self.pause_btn.config(state=tk.NORMAL)
-        self.accept_btn.config(state=tk.DISABLED)
-        self.browser_report_btn.config(state=tk.DISABLED)
-        self.inapp_report_btn.config(state=tk.DISABLED)
-        self.revert_all_btn.config(state=tk.DISABLED)
-        self.report_path = None
-        self.scan_groups = []
-        self.scan_records = []
+        # Swap button frames (safe to call even if active frame is already visible)
+        self._scan_idle_frame.pack_forget()
+        self._scan_active_frame.pack(fill=tk.X, padx=4)
+        # Ensure pause button is in correct state
+        self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+        _mat_enable(self.pause_btn)
+        _mat_enable(self.stop_btn)
 
-        # Set up phase tracker
+        self.report_path     = None
+        self.scan_groups     = []
+        self.scan_records    = []
+        self._broken_files   = []
+        self._solo_originals = []
+
+        # Switch to Scan tab so user sees progress
+        self._nb.select(self._tab_scan)
+
         self._tracker = PhaseTracker(PHASE_NAMES)
         self._tracker.start_phase("Discovery", 1)
-
-        self._phase_label_var.set("Phase 1/6: Discovering images...")
+        self._phase_label_var.set("Phase 1/6: Discovering images…")
         self._progress_bar["value"] = 0
-        self._progress_bar["mode"] = "indeterminate"
+        self._progress_bar["mode"]  = "indeterminate"
         self._progress_bar.start(12)
 
         threading.Thread(
@@ -990,28 +2318,71 @@ class App:
 
     def _pause_scan(self) -> None:
         self._pause_flag[0] = True
-        self.pause_btn.config(state=tk.DISABLED)
-        self._phase_label_var.set("Pausing...")
+        self.pause_btn.configure(state=tk.DISABLED)
+        self._phase_label_var.set("Pausing…")
+
+    def _resume_in_place(self) -> None:
+        """Resume a paused scan without going back to the idle state."""
+        self._is_paused = False
+        self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+        _mat_enable(self.stop_btn)
+        self._start_scan(resume_state=self._paused_state)
 
     def _stop_scan(self) -> None:
+        if self._is_paused:
+            # Scan already stopped; stopping just discards the paused state
+            if not messagebox.askyesno("Discard Paused Scan",
+                                       "Discard the paused scan?", parent=self.root):
+                return
+            self._is_paused = False
+            self._paused_state = None
+            self._scan_active_frame.pack_forget()
+            self._scan_idle_frame.pack(fill=tk.X, padx=4)
+            self._phase_label_var.set("Paused scan discarded.")
+            # Reset pause button for next scan
+            self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
+            return
+        if not messagebox.askyesno("Stop Scan", "Stop the current scan?", parent=self.root):
+            return
         self._stop_flag[0] = True
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
-        self._phase_label_var.set("Stopping...")
+        _mat_disable(self.stop_btn)
+        _mat_disable(self.pause_btn)
+        self._phase_label_var.set("Stopping…")
+
+    # ── new scan prompt ───────────────────────────────────────────────────
+
+    def _new_scan_prompt(self) -> None:
+        if not messagebox.askyesno(
+            "Start New Scan",
+            "Clear the current results and start a new scan?",
+            parent=self.root,
+        ):
+            return
+        self._hide_results_tab()
+        self.scan_groups     = []
+        self.scan_records    = []
+        self._broken_files   = []
+        self._solo_originals = []
+        self.report_path     = None
+        self._last_scan_info = {}
+        _mat_disable(self.accept_btn)
+        _mat_disable(self.browser_report_btn)
+        _mat_disable(self.inapp_report_btn)
+        _mat_disable(self.revert_all_btn)
+        self._phase_label_var.set("Ready.")
+        self._nb.select(self._tab_scan)
 
     # ── progress callback ─────────────────────────────────────────────────
 
     def _progress_cb(self, msg: str, done: int, total: int, phase_name: str) -> None:
-        """Called from worker thread. Posts updates to main thread via after()."""
         def _update() -> None:
             if self._tracker is None:
                 return
-            # If this is a new phase, start it
             if self._tracker.current_phase_name != phase_name:
                 self._tracker.finish_phase()
                 phase_num = PHASE_NAMES.index(phase_name) + 1 if phase_name in PHASE_NAMES else "?"
                 self._tracker.start_phase(phase_name, max(total, 1))
-                self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}...")
+                self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}…")
                 self._progress_bar.stop()
                 self._progress_bar["mode"] = "determinate"
 
@@ -1021,7 +2392,7 @@ class App:
             pct = self._tracker.total_pct
             self._progress_bar["value"] = pct
             eta = self._tracker.format_eta()
-            self._eta_var.set(f"{pct:.0f}%  \u00b7  {eta} remaining  \u00b7  {msg[:80]}")
+            self._eta_var.set(f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}")
             self._update_detail_log()
 
         self.root.after(0, _update)
@@ -1042,7 +2413,6 @@ class App:
                 icon = "○"
                 info = "waiting"
             lines.append(f"{icon} {s['name']:<14} {info}")
-
         text = "\n".join(lines)
         self._detail_text.config(state=tk.NORMAL)
         self._detail_text.delete("1.0", tk.END)
@@ -1058,14 +2428,8 @@ class App:
 
     # ── worker thread ─────────────────────────────────────────────────────
 
-    def _worker(
-        self,
-        src: Path,
-        out: Path,
-        settings: Settings,
-        resume_state=None,
-    ) -> None:
-        def cb(msg: str, done: int, total: int, phase: str) -> None:
+    def _worker(self, src: Path, out: Path, settings: Settings, resume_state=None) -> None:
+        def cb(msg, done, total, phase):
             self._progress_cb(msg, done, total, phase)
 
         try:
@@ -1076,20 +2440,21 @@ class App:
                 out.resolve(),
             }
 
-            # ── Phase: Hashing ─────────────────────────────────────────
             if resume_state and resume_state.phase == "comparing":
-                # Restore records from state
                 from scan_state import deserialize_record
                 records = [deserialize_record(r) for r in resume_state.records]
                 cb(f"Restored {len(records)} records from paused state.", 0, 0, "Hashing")
             else:
-                cb("Discovering images...", 0, 1, "Discovery")
+                cb("Discovering images…", 0, 1, "Discovery")
+                failed: list = []
                 records = collect_images(
                     src, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._stop_flag,
                     pause_flag=self._pause_flag,
+                    failed_paths=failed,
                 )
+                self._broken_files = failed
 
             if self._stop_flag[0]:
                 self.root.after(0, lambda: self._on_done("Stopped by user.", success=False))
@@ -1102,7 +2467,6 @@ class App:
 
             self.scan_records = records
 
-            # ── Phase: Comparing ───────────────────────────────────────
             groups, partial_state = find_groups(
                 records, settings,
                 progress_cb=cb,
@@ -1116,65 +2480,75 @@ class App:
                 return
 
             if self._pause_flag[0] and partial_state is not None:
-                # Save paused compare state
                 from scan_state import save_state, state_path, serialize_record
                 from dataclasses import asdict
-                import copy
-                partial_state.source_folder = str(src)
-                partial_state.output_folder = str(out)
-                partial_state.settings_snapshot = asdict(settings)
+                partial_state.source_folder      = str(src)
+                partial_state.output_folder      = str(out)
+                partial_state.settings_snapshot  = asdict(settings)
                 if not partial_state.records:
                     partial_state.records = [serialize_record(r) for r in records]
                 save_state(partial_state, state_path(out))
                 self.root.after(0, lambda: self._on_done("Scan paused.", success=False, paused=True))
                 return
 
-            # ── Phase: Metadata ────────────────────────────────────────
             if settings.collect_metadata and groups:
-                cb("Saving metadata...", 0, 1, "Metadata")
+                cb("Saving metadata…", 0, 1, "Metadata")
                 from metadata import save_metadata_json, export_metadata_csv
                 save_metadata_json(groups, out)
                 if settings.export_csv:
                     export_metadata_csv(groups, out)
 
-            # ── Phase: Moving ──────────────────────────────────────────
             if not settings.dry_run and groups:
-                cb("Moving files...", 0, len(groups), "Moving")
+                cb("Moving files…", 0, len(groups), "Moving")
                 move_groups(groups, out, dry_run=False, settings=settings)
-            elif settings.dry_run:
-                # Still assign group_ids for report even in dry run
-                pass
 
-            # ── Phase: Report ──────────────────────────────────────────
-            cb("Generating report...", 0, 1, "Report")
+            cb("Generating report…", 0, 1, "Report")
             report = generate_report(groups, out, src, len(records), settings)
             self.report_path = report
             self.scan_groups = groups
 
-            # Remove saved state on successful completion
-            from scan_state import state_path as _sp
+            grouped_paths = {
+                r.path.resolve()
+                for g in groups for r in g.originals + g.previews
+            }
+            solo_originals     = [r for r in records if r.path.resolve() not in grouped_paths]
+            self._solo_originals = solo_originals
+
+            from scan_state import save_results, state_path as _sp
+            save_results(
+                groups=groups,
+                solo_originals=solo_originals,
+                broken_files=getattr(self, "_broken_files", []),
+                total_scanned=len(records),
+                output_folder=out,
+                src_folder=str(src),
+                dry_run=settings.dry_run,
+                report_html=str(report) if report else "",
+            )
+
             _sp_file = _sp(out)
             if _sp_file.exists():
                 _sp_file.unlink()
 
             n_orig = sum(len(g.originals) for g in groups)
-            n_prev = sum(len(g.previews) for g in groups)
+            n_prev = sum(len(g.previews)  for g in groups)
             dry_note = " (DRY RUN)" if settings.dry_run else ""
             msg = (
-                f"Done{dry_note}. {len(records)} scanned \u2014 "
-                f"{len(groups)} groups, {n_orig} kept, {n_prev} previews."
+                f"Done{dry_note}. {len(records)} scanned — "
+                f"{len(groups)} groups, {n_orig} kept, {n_prev} duplicates."
             )
-            self.root.after(0, lambda: self._on_done(msg, success=True, dry_run=settings.dry_run))
+            self.root.after(0, lambda: self._on_done(
+                msg, success=True, dry_run=settings.dry_run,
+                total_scanned=len(records), n_groups=len(groups),
+                n_prev=n_prev, src_folder=str(src),
+            ))
 
         except Exception as exc:
             import traceback
             tb = traceback.format_exc()
             self.root.after(0, lambda e=exc, t=tb: self._on_error(str(e), t))
 
-    def _save_pause_state(
-        self, records: list, out: Path, settings: Settings,
-        compare_i: int, union_parent: list
-    ) -> None:
+    def _save_pause_state(self, records, out, settings, compare_i, union_parent) -> None:
         from scan_state import ScanState, save_state, state_path, serialize_record
         from dataclasses import asdict
         state = ScanState(
@@ -1192,47 +2566,66 @@ class App:
 
     def _on_done(
         self, msg: str, success: bool = True,
-        dry_run: bool = False, paused: bool = False
+        dry_run: bool = False, paused: bool = False,
+        total_scanned: int = 0, n_groups: int = 0,
+        n_prev: int = 0, src_folder: str = "",
     ) -> None:
         self._progress_bar.stop()
-        self._progress_bar["mode"] = "determinate"
-        self._progress_bar["value"] = 100 if success and not paused else self._progress_bar["value"]
+        self._progress_bar["mode"]  = "determinate"
+        self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
+        self._scanning = False
 
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
+        if paused:
+            # Keep the active frame visible; flip Pause → Resume
+            self._is_paused = True
+            self.pause_btn.configure(
+                text="▶  Resume", command=self._resume_in_place,
+                state=tk.NORMAL,
+            )
+            _mat_enable(self.pause_btn)
+            _mat_enable(self.stop_btn)    # Stop = Discard while paused
+        else:
+            # Restore idle button frame
+            self._scan_active_frame.pack_forget()
+            self._scan_idle_frame.pack(fill=tk.X, padx=4)
+            # Reset pause button for next scan
+            self.pause_btn.configure(text="⏸  Pause", command=self._pause_scan)
 
         self._phase_label_var.set(msg)
         self._eta_var.set("")
 
         if success:
-            self.browser_report_btn.config(state=tk.NORMAL)
-            self.inapp_report_btn.config(state=tk.NORMAL)
+            _mat_enable(self.browser_report_btn)
+            _mat_enable(self.inapp_report_btn)
             if dry_run:
-                self.accept_btn.config(state=tk.NORMAL)
-                # Make it obvious what to do next
-                self._phase_label_var.set(
-                    msg + "  \u2192  Review report, then click \u201cAccept & Move\u201d to apply."
-                )
+                _mat_enable(self.accept_btn)
             else:
                 out = self.settings.out_folder.strip()
-                if out:
-                    log_path = ops_log_path(Path(out))
-                    if log_path.exists():
-                        self.revert_all_btn.config(state=tk.NORMAL)
-            # Auto-open report in browser
-            if self.report_path:
-                webbrowser.open(self.report_path.as_uri())
+                if out and ops_log_path(Path(out)).exists():
+                    _mat_enable(self.revert_all_btn)
 
-        if paused:
-            self._check_resume_state()
+            # Log to history and show Results tab
+            self._log_scan_history(
+                total_files=total_scanned,
+                groups=n_groups,
+                duplicates=n_prev,
+                dry_run=dry_run,
+                src_folder=src_folder,
+                applied=not dry_run,
+            )
+            self._update_results_tab_ui()
+            self._show_results_tab()
+            self._nb.select(self._tab_results)
+
+            # Auto-open in-app report
+            self.root.after(300, self._open_inapp_report)
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._progress_bar.stop()
         self._phase_label_var.set("Error — see dialog.")
-        self.scan_btn.config(state=tk.NORMAL)
-        self.stop_btn.config(state=tk.DISABLED)
-        self.pause_btn.config(state=tk.DISABLED)
+        self._scanning = False
+        self._scan_active_frame.pack_forget()
+        self._scan_idle_frame.pack(fill=tk.X, padx=4)
         detail = f"{msg}\n\n{tb}" if tb else msg
         messagebox.showerror("Error", detail, parent=self.root)
 
@@ -1242,32 +2635,48 @@ class App:
         if not self.scan_groups:
             messagebox.showwarning("Accept & Move", "No groups to move.", parent=self.root)
             return
+        if not messagebox.askyesno(
+            "Accept & Move",
+            "Move all duplicate files to the output folder?\n"
+            "Originals stay in place. This action can be reverted via 'Revert All'.",
+            parent=self.root,
+        ):
+            return
         out = self.settings.out_folder.strip()
         if not out:
             return
-        self.accept_btn.config(state=tk.DISABLED)
-        self._phase_label_var.set("Moving files...")
+        _mat_disable(self.accept_btn)
+        self._phase_label_var.set("Moving files…")
 
         def _do_move() -> None:
             try:
                 moved_orig, moved_prev = move_groups(
-                    self.scan_groups, Path(out), dry_run=False,
-                    settings=self.settings
+                    self.scan_groups, Path(out), dry_run=False, settings=self.settings
                 )
-                # Re-generate report with updated paths
                 report = generate_report(
                     self.scan_groups, Path(out),
                     Path(self.settings.src_folder),
-                    len(self.scan_records), self.settings
+                    len(self.scan_records), self.settings,
                 )
                 self.report_path = report
-                msg = f"Moved {moved_orig} originals + {moved_prev} previews."
+                msg = f"Moved {moved_orig} originals + {moved_prev} duplicates."
                 self.root.after(0, lambda: self._phase_label_var.set(msg))
-                self.root.after(0, lambda: self.revert_all_btn.config(state=tk.NORMAL))
+                self.root.after(0, lambda: _mat_enable(self.revert_all_btn))
+                from scan_state import delete_results
+                delete_results(Path(out))
+                # Update history entry applied flag
+                if self._scan_history:
+                    self._scan_history[-1]["applied"] = True
+                    self._save_scan_history()
+                    self._refresh_history_view()
+                if self._last_scan_info:
+                    self._last_scan_info["applied"] = True
+                    self.root.after(0, self._update_results_tab_ui)
                 if report:
                     self.root.after(0, lambda: webbrowser.open(report.as_uri()))
             except Exception as exc:
-                self.root.after(0, lambda e=exc: messagebox.showerror("Error", str(e), parent=self.root))
+                self.root.after(0, lambda e=exc: messagebox.showerror(
+                    "Error", str(e), parent=self.root))
 
         threading.Thread(target=_do_move, daemon=True).start()
 
@@ -1276,26 +2685,32 @@ class App:
             webbrowser.open(self.report_path.as_uri())
 
     def _open_inapp_report(self) -> None:
-        if not self.scan_groups:
-            messagebox.showinfo("Review", "No groups to review.", parent=self.root)
+        if not self.scan_groups and not self.scan_records:
+            messagebox.showinfo("Review", "No scan results to review.", parent=self.root)
             return
-        out = self.settings.out_folder.strip()
+        out      = self.settings.out_folder.strip()
         log_path = ops_log_path(Path(out)) if out else None
 
-        def _apply_cb(groups: list) -> None:
-            move_groups(groups, Path(out), dry_run=False, settings=self.settings)
-            report = generate_report(
-                self.scan_groups, Path(out),
-                Path(self.settings.src_folder),
-                len(self.scan_records), self.settings
-            )
-            self.report_path = report
+        def _apply_cb(_paths_trashed: list) -> None:
+            # File moving is handled inside ReportViewer; this callback
+            # handles post-apply tasks: regenerate report and clean state.
+            if out:
+                report = generate_report(
+                    self.scan_groups, Path(out),
+                    Path(self.settings.src_folder),
+                    len(self.scan_records), self.settings,
+                )
+                self.report_path = report
+                from scan_state import delete_results
+                delete_results(Path(out))
 
         viewer = ReportViewer(
-            self.root,
-            self.scan_groups,
+            self.root, self.scan_groups,
             ops_log_path=log_path,
             on_apply_cb=_apply_cb,
+            solo_originals=self._solo_originals,
+            broken_files=self._broken_files,
+            settings=self.settings,
         )
         viewer.grab_set()
 
@@ -1310,7 +2725,7 @@ class App:
         if not messagebox.askyesno(
             "Revert All",
             "Move all files back to their original locations?\nThis cannot be undone.",
-            parent=self.root
+            parent=self.root,
         ):
             return
 
@@ -1327,20 +2742,18 @@ class App:
     # ── rawpy installer ───────────────────────────────────────────────────
 
     def _install_rawpy(self) -> None:
-        """Run 'pip install rawpy' in a background thread and report the result."""
         import subprocess
         win = tk.Toplevel(self.root)
-        win.title("Installing rawpy...")
+        win.title("Installing rawpy…")
         win.geometry("480x220")
         win.grab_set()
         win.resizable(False, False)
-        ttk.Label(win, text="Installing rawpy via pip...",
+        ttk.Label(win, text="Installing rawpy via pip…",
                   font=("Segoe UI", 10, "bold")).pack(pady=(18, 6))
         log = tk.Text(win, height=6, state=tk.DISABLED,
                       font=("Consolas", 8), relief=tk.FLAT, bg="#f4f4f4")
         log.pack(fill=tk.BOTH, expand=True, padx=12)
-        close_btn = ttk.Button(win, text="Close", state=tk.DISABLED,
-                               command=win.destroy)
+        close_btn = ttk.Button(win, text="Close", state=tk.DISABLED, command=win.destroy)
         close_btn.pack(pady=8)
 
         def _append(text: str) -> None:
@@ -1353,12 +2766,12 @@ class App:
             try:
                 proc = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "rawpy"],
-                    capture_output=True, text=True
+                    capture_output=True, text=True,
                 )
-                out = (proc.stdout + proc.stderr).strip()
+                out  = (proc.stdout + proc.stderr).strip()
                 success = proc.returncode == 0
             except Exception as exc:
-                out = str(exc)
+                out     = str(exc)
                 success = False
 
             def _done() -> None:

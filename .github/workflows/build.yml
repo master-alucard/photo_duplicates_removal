@@ -1,0 +1,117 @@
+name: Build Windows Installer
+
+# Trigger on any version tag (e.g. v1.0.0, v1.2.3)
+on:
+  push:
+    tags:
+      - "v*"
+  # Allow manual trigger from the Actions tab
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout ─────────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Python setup ──────────────────────────────────────────────────────
+      # Pin to 3.12 — PyInstaller does not yet support 3.13+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # ── 3. Install all dependencies (including rawpy) ────────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      # ── 4. Verify rawpy + LibRaw DLL are importable ──────────────────────────
+      - name: Verify rawpy installation
+        run: |
+          python -c "import rawpy; print('rawpy OK —', rawpy.__version__)"
+          python -c "from PIL import Image; import imagehash, piexif, pywt; print('Core deps OK')"
+
+      # ── 5. Bundle with PyInstaller ───────────────────────────────────────────
+      - name: Build EXE with PyInstaller
+        run: pyinstaller image_deduper.spec
+
+      # ── 6. Verify the EXE was produced ───────────────────────────────────────
+      - name: Check output
+        run: |
+          if (!(Test-Path "dist\ImageDeduper\ImageDeduper.exe")) {
+            Write-Error "ImageDeduper.exe not found — PyInstaller build failed"
+            exit 1
+          }
+          Write-Host "ImageDeduper.exe found — $(Get-Item dist\ImageDeduper\ImageDeduper.exe | Select-Object -ExpandProperty Length) bytes"
+
+      # ── 7. Install Inno Setup ─────────────────────────────────────────────────
+      - name: Install Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # ── 8. Extract version from the tag (strips leading "v") ─────────────────
+      - name: Get version from tag
+        id: version
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $ver = $tag.TrimStart('v')
+          echo "VERSION=$ver" >> $env:GITHUB_OUTPUT
+
+      # ── 9. Patch the installer version in installer.iss ───────────────────────
+      - name: Patch version in installer.iss
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          (Get-Content installer.iss) `
+            -replace '#define AppVersion\s+"[^"]+"', "#define AppVersion `"$ver`"" |
+            Set-Content installer.iss
+          Write-Host "installer.iss patched to version $ver"
+
+      # ── 10. Build the installer ───────────────────────────────────────────────
+      - name: Build installer with Inno Setup
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      # ── 11. Rename installer to include version in filename ───────────────────
+      - name: Rename installer
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          $src = Get-ChildItem installer_output\*.exe | Select-Object -First 1
+          $dst = "installer_output\ImageDeduper-Setup-$ver.exe"
+          Move-Item $src.FullName $dst
+          Write-Host "Installer: $dst"
+
+      # ── 12. Upload installer as a build artifact ──────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageDeduper-Setup-${{ steps.version.outputs.VERSION }}
+          path: installer_output\*.exe
+          retention-days: 90
+
+      # ── 13. Create GitHub Release and attach the installer ────────────────────
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "Image Deduper ${{ steps.version.outputs.VERSION }}"
+          body: |
+            ## What's new
+            See the [commit history](https://github.com/master-alucard/photo_duplicates_removal/commits/${{ github.ref_name }}) for changes in this release.
+
+            ## Installation
+            Download **ImageDeduper-Setup-${{ steps.version.outputs.VERSION }}.exe** below and run it — no admin rights required.
+
+            **Includes:** Python runtime, all dependencies (Pillow, imagehash, rawpy + LibRaw, piexif, PyWavelets, NumPy, SciPy).
+            No separate Python installation needed.
+          files: installer_output\*.exe
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

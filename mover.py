@@ -35,6 +35,49 @@ def _date_subfolder(path: Path, fmt: str) -> str:
         return "unknown_date"
 
 
+def trash_files(
+    paths: List[Path],
+    trash_dir: Path,
+    dry_run: bool = False,
+) -> tuple[int, list]:
+    """
+    Move explicit file paths to trash_dir.
+    Originals are never touched — only the caller-selected paths are moved.
+    Returns (moved_count, error_list).
+    Appends operations to operations_log.json in trash_dir.parent.
+    """
+    if not dry_run:
+        trash_dir.mkdir(parents=True, exist_ok=True)
+
+    moved = 0
+    errors: list[str] = []
+    operations: list[dict] = []
+
+    for p in paths:
+        if not p.exists():
+            errors.append(f"{p.name}: file not found")
+            continue
+        dest = _unique_path(trash_dir / p.name)
+        op = {"type": "trash", "from": str(p), "to": str(dest)}
+        if not dry_run:
+            try:
+                shutil.move(str(p), str(dest))
+                moved += 1
+                op["status"] = "moved"
+            except Exception as exc:
+                errors.append(f"{p.name}: {exc}")
+                op["status"] = f"error: {exc}"
+        else:
+            moved += 1
+            op["status"] = "dry_run"
+        operations.append(op)
+
+    if not dry_run and operations:
+        _write_ops_log(operations, trash_dir.parent)
+
+    return moved, errors
+
+
 def move_groups(
     groups: List,
     output_folder: Path,

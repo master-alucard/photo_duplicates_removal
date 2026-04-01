@@ -29,6 +29,13 @@ RAW_EXTENSIONS = {
 KeepStrategy = Literal["pixels", "oldest"]
 ProgressCb = Callable[[str, int, int, str], None]
 
+# Files in the same dimension bucket with pHash distance ≤ this value are
+# treated as exact duplicates (same image saved twice) — only the best copy
+# is kept.  Files with pHash > this value are genuine burst/series shots and
+# all are kept as originals.  Calibration data shows 0 for exact dupes and
+# ≥ 3 for genuinely different shots, so 2 is a clean separator.
+_EXACT_DUP_PHASH = 2
+
 
 @dataclass
 class ImageRecord:
@@ -110,6 +117,7 @@ def collect_images(
     progress_cb: Optional[ProgressCb] = None,
     stop_flag: Optional[list[bool]] = None,
     pause_flag: Optional[list[bool]] = None,
+    failed_paths: Optional[list] = None,
 ) -> List[ImageRecord]:
     """
     Walk folder, compute phash/dhash/histogram/brightness for every qualifying image.
@@ -193,6 +201,8 @@ def collect_images(
         except Exception as exc:
             if progress_cb:
                 progress_cb(f"  Skip {path.name}: {exc}", i + 1, total, "Hashing")
+            if failed_paths is not None:
+                failed_paths.append(path)
 
     # ── attach RAW companions (stem matching) ────────────────────────────
 
@@ -514,56 +524,81 @@ def _classify_group(
     """
     Given a set of similar images, classify each as original or preview.
 
-    Series detection:
-    - Group members by (width, height) within series_tolerance_pct
-    - Any bucket with 2+ members -> all are originals (is_series = True)
-    - A member is only a preview if BOTH dimensions are strictly smaller than the best
+    Same-dimension handling distinguishes two cases:
+      - Exact duplicates (pHash ≤ _EXACT_DUP_PHASH within the bucket): same image
+        saved/exported twice.  Keep the best copy; trash the rest as duplicates.
+      - Genuine series / burst (pHash > _EXACT_DUP_PHASH): different shots at the
+        same resolution.  Keep all; none are previews.
 
-    Returns None if no previews were found (all images are equal/series).
+    A member is only a preview if BOTH dimensions are strictly smaller than the best.
+
+    Returns None if no previews were found (nothing to trash).
     """
     members_sorted = sorted(members, key=lambda r: _sort_key(r, settings))
     global_best = members_sorted[0]
 
-    # ── series detection ────────────────────────────────────────────────
-    tol = settings.series_tolerance_pct / 100.0
-
-    def _same_dim(a: ImageRecord, b: ImageRecord) -> bool:
-        if a.width == 0 or a.height == 0 or b.width == 0 or b.height == 0:
-            return False
-        w_ratio = abs(a.width - b.width) / max(a.width, b.width)
-        h_ratio = abs(a.height - b.height) / max(a.height, b.height)
-        return w_ratio <= tol and h_ratio <= tol
-
-    # Build dimension buckets (union-find approach for transitivity)
-    dim_parent = list(range(len(members_sorted)))
-
-    def dim_find(x: int) -> int:
-        while dim_parent[x] != x:
-            dim_parent[x] = dim_parent[dim_parent[x]]
-            x = dim_parent[x]
-        return x
-
-    def dim_union(x: int, y: int) -> None:
-        px, py = dim_find(x), dim_find(y)
-        if px != py:
-            dim_parent[px] = py
-
-    for i in range(len(members_sorted)):
-        for j in range(i + 1, len(members_sorted)):
-            if _same_dim(members_sorted[i], members_sorted[j]):
-                dim_union(i, j)
-
-    dim_buckets: dict[int, list[int]] = defaultdict(list)
-    for i in range(len(members_sorted)):
-        dim_buckets[dim_find(i)].append(i)
-
-    # Mark series members
-    series_indices: set[int] = set()
+    # ── series / exact-dup detection ─────────────────────────────────────
+    series_indices:   set[int] = set()   # genuine burst shots — keep all
+    exact_dup_indices: set[int] = set()  # exact same-image copies — trash extras
     is_series = False
-    for bucket_indices in dim_buckets.values():
-        if len(bucket_indices) >= 2:
-            is_series = True
-            series_indices.update(bucket_indices)
+
+    if not getattr(settings, "disable_series_detection", False):
+        tol = settings.series_tolerance_pct / 100.0
+
+        def _same_dim(a: ImageRecord, b: ImageRecord) -> bool:
+            if a.width == 0 or a.height == 0 or b.width == 0 or b.height == 0:
+                return False
+            w_ratio = abs(a.width - b.width) / max(a.width, b.width)
+            h_ratio = abs(a.height - b.height) / max(a.height, b.height)
+            return w_ratio <= tol and h_ratio <= tol
+
+        # Build dimension buckets (union-find for transitivity)
+        dim_parent = list(range(len(members_sorted)))
+
+        def dim_find(x: int) -> int:
+            while dim_parent[x] != x:
+                dim_parent[x] = dim_parent[dim_parent[x]]
+                x = dim_parent[x]
+            return x
+
+        def dim_union(x: int, y: int) -> None:
+            px, py = dim_find(x), dim_find(y)
+            if px != py:
+                dim_parent[px] = py
+
+        for i in range(len(members_sorted)):
+            for j in range(i + 1, len(members_sorted)):
+                if _same_dim(members_sorted[i], members_sorted[j]):
+                    dim_union(i, j)
+
+        dim_buckets: dict[int, list[int]] = defaultdict(list)
+        for i in range(len(members_sorted)):
+            dim_buckets[dim_find(i)].append(i)
+
+        for bucket_indices in dim_buckets.values():
+            if len(bucket_indices) < 2:
+                continue
+
+            recs = [members_sorted[i] for i in bucket_indices]
+
+            # Check whether all pairs in this bucket are visually identical.
+            # pHash ≤ _EXACT_DUP_PHASH means "same image, different file" —
+            # keep only the best copy and trash the rest.
+            # pHash > _EXACT_DUP_PHASH means genuine burst/series shots.
+            max_pdist = max(
+                recs[a].phash - recs[b].phash
+                for a in range(len(recs))
+                for b in range(a + 1, len(recs))
+            )
+
+            if max_pdist <= _EXACT_DUP_PHASH:
+                # Exact duplicates: best (bucket_indices[0]) stays; the rest are trashed.
+                for dup_idx in bucket_indices[1:]:
+                    exact_dup_indices.add(dup_idx)
+            else:
+                # Genuine series: keep every member.
+                is_series = True
+                series_indices.update(bucket_indices)
 
     # ── classify originals vs previews ───────────────────────────────────
     preview_ratio_gap = 1.0 - settings.preview_ratio
@@ -573,17 +608,17 @@ def _classify_group(
 
     if settings.keep_all_formats:
         originals, previews = _split_by_format(
-            members_sorted, global_best, settings, series_indices
+            members_sorted, global_best, settings, series_indices, exact_dup_indices
         )
     else:
         for idx, member in enumerate(members_sorted):
-            if idx in series_indices:
-                # Series member: always keep
+            if idx in exact_dup_indices:
+                previews.append(member)
+            elif idx in series_indices:
                 originals.append(member)
             elif _is_preview(member, global_best, preview_ratio_gap):
                 previews.append(member)
             else:
-                # Not a series member but also not a clear preview -> keep as original
                 originals.append(member)
 
     # If no previews, this group is all originals (nothing to trash)
@@ -600,11 +635,22 @@ def _classify_group(
 
 def _is_preview(member: ImageRecord, best: ImageRecord, ratio_gap: float) -> bool:
     """
-    Return True only if BOTH dimensions of member are strictly smaller than
-    best's dimensions by at least ratio_gap fraction.
+    Return True if member should be treated as a duplicate/preview of best.
+
+    Two cases:
+    1. Same resolution: all members other than best are previews (burst shots /
+       same-quality duplicates). The one with the most pixels (best) is kept;
+       the rest are sent to trash.  ratio_gap is ignored because there is no
+       meaningful size difference to measure.
+    2. Different resolution: member must be strictly smaller in BOTH dimensions
+       by at least ratio_gap fraction (original resize/compress workflow).
     """
     if best.width == 0 or best.height == 0:
         return False
+    # Same-resolution duplicates (burst shots, re-saves, same-quality copies)
+    if member is not best and member.width == best.width and member.height == best.height:
+        return True
+    # Downscaled / compressed copies
     w_threshold = best.width * (1.0 - ratio_gap)
     h_threshold = best.height * (1.0 - ratio_gap)
     return member.width < w_threshold and member.height < h_threshold
@@ -615,22 +661,24 @@ def _split_by_format(
     global_best: ImageRecord,
     settings: Settings,
     series_indices: set[int],
+    exact_dup_indices: set[int],
 ) -> tuple[list[ImageRecord], list[ImageRecord]]:
     """
     For keep_all_formats mode:
     - Keep the best representative of EACH file extension, but ONLY if it has
       the same dimensions as the global best (i.e., the full-resolution copy).
     - Smaller versions in any format are still treated as previews.
-    - Series members (same-dim bucket) are always kept.
+    - Genuine series members (different content, same dims) are always kept.
+    - Exact duplicate members (same content, same dims) are trashed.
     """
     by_ext: dict[str, list[tuple[int, ImageRecord]]] = defaultdict(list)
     for idx, m in enumerate(members):
         by_ext[m.path.suffix.lower()].append((idx, m))
 
     tol = settings.series_tolerance_pct / 100.0
+    preview_ratio_gap = 1.0 - settings.preview_ratio
 
     def _same_size_as_best(r: ImageRecord) -> bool:
-        """True if r has the same dimensions as global_best within tolerance."""
         if global_best.width == 0 or global_best.height == 0:
             return False
         w_ratio = abs(r.width - global_best.width) / max(r.width, global_best.width)
@@ -643,24 +691,29 @@ def _split_by_format(
     for ext_items in by_ext.values():
         ext_sorted = sorted(ext_items, key=lambda t: _sort_key(t[1], settings))
 
-        # Split ext members into series members and non-series members
-        series_in_ext = [(idx, m) for idx, m in ext_sorted if idx in series_indices]
-        non_series_in_ext = [(idx, m) for idx, m in ext_sorted if idx not in series_indices]
+        # Exact duplicates are always trashed regardless of size
+        exact_in_ext    = [(idx, m) for idx, m in ext_sorted if idx in exact_dup_indices]
+        series_in_ext   = [(idx, m) for idx, m in ext_sorted if idx in series_indices]
+        non_series_in_ext = [
+            (idx, m) for idx, m in ext_sorted
+            if idx not in series_indices and idx not in exact_dup_indices
+        ]
 
-        # Series members of this format are always kept as originals
+        for _, m in exact_in_ext:
+            previews.append(m)
+
+        # Genuine series members of this format are always kept as originals
         for _, m in series_in_ext:
             originals.append(m)
 
-        # For non-series members, keep only the best if it's the same size as global_best
+        # For non-series, non-exact-dup members: keep the best if full-resolution
         if non_series_in_ext:
             ns_best_idx, ns_best = non_series_in_ext[0]
             if _same_size_as_best(ns_best):
                 originals.append(ns_best)
             else:
                 previews.append(ns_best)
-            # For remaining non-series members: only trash if they're genuinely small previews.
-            # Without this check, near-same-size images in the same format get wrongly trashed.
-            preview_ratio_gap = 1.0 - settings.preview_ratio
+            # Remaining: preview-size check only — near-same-size kept as originals
             for _, m in non_series_in_ext[1:]:
                 if _is_preview(m, global_best, preview_ratio_gap):
                     previews.append(m)
