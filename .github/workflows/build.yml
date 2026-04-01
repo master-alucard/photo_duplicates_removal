@@ -104,14 +104,34 @@ jobs:
           tag_name: ${{ github.ref_name }}
           name: "Image Deduper ${{ steps.version.outputs.VERSION }}"
           body: |
-            ## What's new
-            See the [commit history](https://github.com/master-alucard/photo_duplicates_removal/commits/${{ github.ref_name }}) for changes in this release.
+            ## What's new in ${{ steps.version.outputs.VERSION }}
+
+            ### 🚀 Performance
+            - **BK-tree duplicate detection** — scanning 100,000+ files is now practical. The comparison phase is O(n log n) instead of O(n²), reducing runtime from hours to minutes on large collections.
+
+            ### 🖥️ User Experience
+            - **Scan Complete screen** — after every scan a summary card shows: files scanned, duplicate groups, duplicates found, space that can be freed, safe originals count, and groups needing manual review.
+            - **No auto-open** — the detailed report viewer now opens only when you click *View Report*, so you can read the summary first.
+            - **Sleep prevention** — the PC is prevented from sleeping while a scan is running and is released automatically when the scan finishes.
+
+            ### 🛠 Developer / Quality
+            - **Developer Mode** toggle in Settings — friendly error messages for normal users; full technical details and stack traces when Developer Mode is on.
+            - **Centralised error handling** — all errors and warnings go through a single module with consistent, readable messages.
+            - **32 automated tests** covering config defaults, UI structure, action buttons, scanner smoke tests, mover, and error handler behaviour.
+
+            ### 📁 Project structure
+            - Installer scripts (`installer.iss`, `install.bat`, `run.bat`) moved to `installer/` folder for a cleaner repository layout.
+
+            ### 🐛 Bug fixes
+            - Fixed app crash on startup (`pack()` returns `None` in tkinter — `.bind()` can no longer be chained on it).
+            - HTML report for very large scans (> 500 groups) no longer embeds thumbnails that would make the file gigabytes in size; an in-app note explains how to use the viewer instead.
+
+            ---
 
             ## Installation
-            Download **ImageDeduper-Setup-${{ steps.version.outputs.VERSION }}.exe** below and run it — no admin rights required.
+            Download **ImageDeduper-Setup-${{ steps.version.outputs.VERSION }}.exe** below and run it.
 
-            **Includes:** Python runtime, all dependencies (Pillow, imagehash, rawpy + LibRaw, piexif, PyWavelets, NumPy, SciPy).
-            No separate Python installation needed.
+            **Includes:** Python runtime and all dependencies (Pillow, imagehash, rawpy + LibRaw, piexif, PyWavelets, NumPy, SciPy) — no separate Python installation needed.
           files: installer\installer_output\*.exe
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
