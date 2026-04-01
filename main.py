@@ -109,6 +109,18 @@ def _mat_disable(btn: tk.Button) -> None:
 # ── app icon ─────────────────────────────────────────────────────────────────
 
 def _make_icon(size: int = 64) -> ImageTk.PhotoImage:
+    # Try loading the high-quality .ico from assets/ first
+    _ico = Path(__file__).with_name("assets") / "app.ico"
+    if not _ico.exists():
+        # PyInstaller bundle: assets sit next to the exe
+        _ico = Path(__file__).parent / "assets" / "app.ico"
+    if _ico.exists():
+        try:
+            img = Image.open(_ico).convert("RGBA").resize((size, size), Image.LANCZOS)
+            return ImageTk.PhotoImage(img)
+        except Exception:
+            pass
+    # Fallback: generate icon programmatically
     img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
     draw = ImageDraw.Draw(img)
     draw.ellipse([0, 0, size - 1, size - 1], fill=(26, 115, 232, 255))
