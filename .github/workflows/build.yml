@@ -125,6 +125,9 @@ jobs:
             ### 🐛 Bug fixes
             - Fixed app crash on startup (`pack()` returns `None` in tkinter — `.bind()` can no longer be chained on it).
             - HTML report for very large scans (> 500 groups) no longer embeds thumbnails that would make the file gigabytes in size; an in-app note explains how to use the viewer instead.
+            - Fixed duplicate "Revert Selected / Revert All" buttons appearing twice after moving duplicates.
+            - App icon now correctly shows in the Windows taskbar and on desktop/Start Menu shortcuts.
+            - Renamed **Custom Scan** tab to **Compare Scan** for clarity.
 
             ---
 
