@@ -13,7 +13,7 @@ class Settings:
     mode: str = "quick"                    # "quick" or "advanced"
     src_folder: str = ""
     out_folder: str = ""
-    threshold: int = 12                    # pHash similarity threshold
+    threshold: int = 2                     # pHash similarity threshold
     preview_ratio: float = 0.90            # per-dimension ratio (both w and h must be smaller)
     series_tolerance_pct: float = 0.0      # % tolerance for "same dimensions" series detection
     series_threshold_factor: float = 1.0  # pHash threshold multiplier for same-size images
@@ -51,6 +51,7 @@ class Settings:
     custom_check_folder: str = ""           # Custom Scan: folder to search for duplicates
     custom_out_folder: str = ""             # Custom Scan: output/trash folder
     auto_update: bool = True                # Check for updates on startup
+    developer_mode: bool = False            # Show full error details / tracebacks
 
 
 DEFAULTS = Settings()

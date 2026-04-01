@@ -69,23 +69,23 @@ jobs:
       - name: Patch version in installer.iss
         run: |
           $ver = "${{ steps.version.outputs.VERSION }}"
-          (Get-Content installer.iss) `
+          (Get-Content installer\installer.iss) `
             -replace '#define AppVersion\s+"[^"]+"', "#define AppVersion `"$ver`"" |
-            Set-Content installer.iss
+            Set-Content installer\installer.iss
           Write-Host "installer.iss patched to version $ver"
 
       # ── 10. Build the installer ───────────────────────────────────────────────
       - name: Build installer with Inno Setup
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer\installer.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       # ── 11. Rename installer to include version in filename ───────────────────
       - name: Rename installer
         run: |
           $ver = "${{ steps.version.outputs.VERSION }}"
-          $src = Get-ChildItem installer_output\*.exe | Select-Object -First 1
-          $dst = "installer_output\ImageDeduper-Setup-$ver.exe"
+          $src = Get-ChildItem installer\installer_output\*.exe | Select-Object -First 1
+          $dst = "installer\installer_output\ImageDeduper-Setup-$ver.exe"
           Move-Item $src.FullName $dst
           Write-Host "Installer: $dst"
 
@@ -94,7 +94,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: ImageDeduper-Setup-${{ steps.version.outputs.VERSION }}
-          path: installer_output\*.exe
+          path: installer\installer_output\*.exe
           retention-days: 90
 
       # ── 13. Create GitHub Release and attach the installer ────────────────────
@@ -112,7 +112,7 @@ jobs:
 
             **Includes:** Python runtime, all dependencies (Pillow, imagehash, rawpy + LibRaw, piexif, PyWavelets, NumPy, SciPy).
             No separate Python installation needed.
-          files: installer_output\*.exe
+          files: installer\installer_output\*.exe
           draft: false
           prerelease: ${{ contains(github.ref_name, '-rc') || contains(github.ref_name, '-beta') || contains(github.ref_name, '-alpha') }}
         env:

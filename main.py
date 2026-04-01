@@ -44,6 +44,7 @@ from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
 from about_tab import build_about_tab
+import error_handler
 
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -233,7 +234,7 @@ class App:
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
         self.root.title("Image Deduper v2")
-        self.root.geometry("860x640")
+        self.root.geometry("1160x800")
         self.root.resizable(True, True)
         self.root.minsize(700, 520)
 
@@ -244,6 +245,7 @@ class App:
             pass
 
         self.settings = load_settings(SETTINGS_PATH)
+        error_handler.set_settings(self.settings)
         self._scan_history: list[dict] = self._load_scan_history()
 
         # Scan state
@@ -385,6 +387,8 @@ class App:
         self.auto_update_var.trace_add("write", self._on_setting_change)
 
         self._calib_info_var = tk.StringVar(value=self._calib_info_text())
+        self.developer_mode_var = tk.BooleanVar(value=s.developer_mode)
+        self.developer_mode_var.trace_add("write", self._on_setting_change)
 
         # Custom scan folder vars
         s2 = self.settings
@@ -482,12 +486,6 @@ class App:
 
         # Actions
         act = _section(body, "Actions")
-
-        r = _row(act)
-        ttk.Checkbutton(r, text="Dry Run (recommended)", variable=self.dry_var).pack(side=tk.LEFT)
-        _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="Scan & report only — no files moved.",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         r = _row(act)
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
@@ -590,26 +588,37 @@ class App:
     def _build_results_tab_content(self) -> None:
         tab = self._tab_results
 
-        # Info card
-        info_card = tk.Frame(tab, bg=_CARD_BG, bd=1, relief=tk.FLAT)
-        info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
-        tk.Frame(info_card, height=3, bg=_ACCENT).pack(fill=tk.X)
+        # Container shown when viewer is NOT active (summary + buttons)
+        self._results_summary_frame = tk.Frame(tab, bg=_BG)
+        self._results_summary_frame.pack(fill=tk.BOTH, expand=True)
+        sf = self._results_summary_frame
+
+        # Placeholder shown before first scan
+        self._results_placeholder = tk.Label(
+            sf, text="Run a scan to review results here.",
+            font=("Segoe UI", 11), bg=_BG, fg="#9E9E9E",
+        )
+        self._results_placeholder.pack(expand=True)
+
+        # Info card (hidden until scan completes)
+        self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=1, relief=tk.FLAT)
+        tk.Frame(self._results_info_card, height=3, bg=_ACCENT).pack(fill=tk.X)
         tk.Label(
-            info_card, textvariable=self._results_info_var,
+            self._results_info_card, textvariable=self._results_info_var,
             bg=_CARD_BG, fg=_M_TEXT1, font=("Segoe UI", 9),
             justify=tk.LEFT, wraplength=700, padx=14, pady=10,
             anchor=tk.W,
         ).pack(fill=tk.X)
 
         # Action buttons row
-        btn_row = tk.Frame(tab, bg=_BG)
-        btn_row.pack(fill=tk.X, padx=16, pady=6)
+        self._results_btn_row = tk.Frame(sf, bg=_BG)
+        btn_row = self._results_btn_row
 
         self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _M_WARNING)
         self.revert_all_btn.pack(side=tk.LEFT, padx=(0, 6))
         _mat_disable(self.revert_all_btn)
 
-        self.inapp_report_btn = _mat_btn(btn_row, "Review In-App",
+        self.inapp_report_btn = _mat_btn(btn_row, "📋  Review Results",
                                          self._open_inapp_report, _ACCENT)
         self.inapp_report_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.inapp_report_btn)
@@ -625,15 +634,55 @@ class App:
         _mat_disable(self.accept_btn)
 
         # Divider
-        tk.Frame(tab, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=14)
+        self._results_divider = tk.Frame(sf, height=1, bg=_M_DIVIDER)
 
         # Start New Scan
-        new_frame = tk.Frame(tab, bg=_BG)
-        new_frame.pack(pady=10)
-        _mat_btn(new_frame, "   +  Start New Scan   ",
+        self._results_new_frame = tk.Frame(sf, bg=_BG)
+        _mat_btn(self._results_new_frame, "   +  Start New Scan   ",
                  self._new_scan_prompt, _ACCENT, font_size=11).pack()
-        ttk.Label(new_frame, text="Clears current results and returns to the Scan tab.",
+        ttk.Label(self._results_new_frame,
+                  text="Clears current results and returns to the Scan tab.",
                   foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
+
+        # Container for the embedded ReportViewer (packed on demand)
+        self._results_viewer_host = tk.Frame(tab, bg=_BG)
+
+    def _embed_report_viewer(
+        self,
+        groups: list,
+        solo_originals: list,
+        broken_files: list,
+        out: str,
+        apply_cb=None,
+    ) -> None:
+        """Embed ReportViewer as a Frame inside the Results tab."""
+        # Clear any existing viewer
+        for w in self._results_viewer_host.winfo_children():
+            w.destroy()
+
+        # Hide summary, show viewer host
+        self._results_summary_frame.pack_forget()
+        self._results_viewer_host.pack(fill=tk.BOTH, expand=True)
+
+        log_path = ops_log_path(Path(out)) if out else None
+
+        def _on_close():
+            self._results_viewer_host.pack_forget()
+            for w in self._results_viewer_host.winfo_children():
+                w.destroy()
+            self._results_summary_frame.pack(fill=tk.BOTH, expand=True)
+
+        viewer = ReportViewer(
+            self._results_viewer_host,
+            groups,
+            ops_log_path=log_path,
+            on_apply_cb=apply_cb,
+            solo_originals=solo_originals,
+            broken_files=broken_files,
+            settings=self.settings,
+            on_close_cb=_on_close,
+        )
+        viewer.pack(fill=tk.BOTH, expand=True)
 
     def _show_results_tab(self) -> None:
         if not self._results_tab_visible:
@@ -660,19 +709,23 @@ class App:
         groups   = i.get("groups", 0)
         dups     = i.get("duplicates", 0)
         dup_pct  = i.get("dup_pct", 0.0)
-        dry_run  = i.get("dry_run", True)
         applied  = i.get("applied", False)
-
-        dry_tag  = "  [DRY RUN — files not moved]" if dry_run else ""
-        appl_tag = "  ✓ Results applied." if applied else ""
+        appl_tag = "  ✓ Applied." if applied else ""
 
         lines = [
-            f"Scan:   {ts}{dry_tag}{appl_tag}",
+            f"Scan:   {ts}{appl_tag}",
             f"Source: {src}",
             f"Files scanned: {files}   ·   Groups: {groups}   ·   "
             f"Duplicates: {dups}   ({dup_pct:.1f}%)",
         ]
         self._results_info_var.set("\n".join(lines))
+
+        # Show summary widgets (hide placeholder)
+        self._results_placeholder.pack_forget()
+        self._results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
+        self._results_btn_row.pack(fill=tk.X, padx=16, pady=6)
+        self._results_divider.pack(fill=tk.X, padx=16, pady=14)
+        self._results_new_frame.pack(pady=10)
 
     # ── History tab ───────────────────────────────────────────────────────
 
@@ -809,7 +862,7 @@ class App:
         det = _section(body, "Detection")
 
         self._slider_row(det, "Similarity Threshold", self.thresh_var,
-                         1, 30, 8, 12, 12, "threshold", 1,
+                         1, 30, 2, 12, 2, "threshold", 1,
                          lambda v: str(int(round(v))))
 
         self._slider_row(det, "Preview Size Ratio (per-dimension)", self.ratio_var,
@@ -974,6 +1027,29 @@ class App:
             ttk.Button(r, text="Install rawpy",
                        command=self._install_rawpy).pack(side=tk.LEFT, padx=2)
 
+        # ── Developer ─────────────────────────────────────────────────────
+        dev_sec = _section(body, "Developer")
+        dev_card = tk.Frame(dev_sec, bg="#FFF8E1", padx=12, pady=10,
+                            highlightbackground="#FFD54F", highlightthickness=1)
+        dev_card.pack(fill=tk.X)
+        tk.Label(dev_card, text="🛠  Developer Mode",
+                 font=("Segoe UI", 9, "bold"),
+                 bg="#FFF8E1", fg="#E65100").pack(anchor=tk.W)
+        tk.Label(
+            dev_card,
+            text=(
+                "When ON — all errors show the full technical details and traceback.\n"
+                "When OFF (default) — errors show a simple, plain-language message."
+            ),
+            font=("Segoe UI", 8), bg="#FFF8E1", fg="#795548",
+            justify=tk.LEFT,
+        ).pack(anchor=tk.W, pady=(2, 8))
+        ttk.Checkbutton(
+            dev_card,
+            text="Enable Developer Mode  (show full error details)",
+            variable=self.developer_mode_var,
+        ).pack(anchor=tk.W)
+
     # ── Custom Scan tab ───────────────────────────────────────────────────
 
     def _build_custom_scan_tab(self) -> None:
@@ -1017,7 +1093,7 @@ class App:
 
         # Threshold and ratio share the same vars as Settings tab
         self._slider_row(det, "Similarity Threshold", self.thresh_var,
-                         1, 30, 8, 12, 12, "threshold", 1,
+                         1, 30, 2, 12, 2, "threshold", 1,
                          lambda v: str(int(round(v))))
         self._slider_row(det, "Preview Size Ratio (per-dimension)", self.ratio_var,
                          0.50, 0.99, 0.85, 0.95, 0.90, "preview_ratio", 0.01,
@@ -1186,12 +1262,7 @@ class App:
         # ── Actions ───────────────────────────────────────────────────────
         act = _section(body, "Actions")
 
-        r = _row(act)
-        ttk.Checkbutton(r, text="Dry Run (recommended)",
-                        variable=self._custom_dry_var).pack(side=tk.LEFT)
-        _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="Report only — no files moved. Use 'Accept & Move' after reviewing.",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
 
         r = _row(act)
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
@@ -1351,7 +1422,8 @@ class App:
 
     def _start_custom_scan(self) -> None:
         if self._scanning:
-            messagebox.showwarning("Busy", "A scan is already running.", parent=self.root)
+            error_handler.show_warning(self.root, "Scan In Progress",
+                "A scan is already running.\nPlease wait for it to finish.")
             return
 
         main  = self._custom_main_var.get().strip()
@@ -1359,24 +1431,32 @@ class App:
         out   = self._custom_out_var.get().strip()
 
         if not main:
-            messagebox.showerror("Error", "Please select the Main (reference) folder.", parent=self.root)
+            error_handler.show_warning(self.root, "Missing Folder",
+                "Please select the Main (reference) folder before starting.")
             return
         if not check:
-            messagebox.showerror("Error", "Please select the Check folder.", parent=self.root)
+            error_handler.show_warning(self.root, "Missing Folder",
+                "Please select the Check folder before starting.")
             return
         if not out:
-            messagebox.showerror("Error", "Please select an Output folder.", parent=self.root)
+            error_handler.show_warning(self.root, "Missing Folder",
+                "Please select an Output folder before starting.")
             return
 
         main_path, check_path, out_path = Path(main), Path(check), Path(out)
         if not main_path.is_dir():
-            messagebox.showerror("Error", "Main folder does not exist.", parent=self.root)
+            error_handler.show_error(self.root, "Folder Not Found",
+                "The Main folder could not be found.\nCheck that the path is correct and the drive is connected.",
+                detail=f"Path: {main}")
             return
         if not check_path.is_dir():
-            messagebox.showerror("Error", "Check folder does not exist.", parent=self.root)
+            error_handler.show_error(self.root, "Folder Not Found",
+                "The Check folder could not be found.\nCheck that the path is correct and the drive is connected.",
+                detail=f"Path: {check}")
             return
         if main_path.resolve() == check_path.resolve():
-            messagebox.showerror("Error", "Main and Check folders must be different.", parent=self.root)
+            error_handler.show_warning(self.root, "Same Folder",
+                "The Main and Check folders must be different.\nPlease select two separate folders.")
             return
 
         self._collect_settings()
@@ -1612,12 +1692,12 @@ class App:
 
     def _on_custom_error(self, msg: str, tb: str = "") -> None:
         self._custom_progress_bar.stop()
-        self._custom_phase_label.set("Error — see dialog.")
+        self._custom_phase_label.set("Scan failed — see error message.")
         self._scanning = False
         self._custom_active_frame.pack_forget()
         self._custom_idle_frame.pack(fill=tk.X, padx=4)
-        messagebox.showerror("Custom Scan Error", f"{msg}\n\n{tb}" if tb else msg,
-                             parent=self.root)
+        user_msg, detail = error_handler.format_scan_error(Exception(msg), tb)
+        error_handler.show_error(self.root, "Scan Failed", user_msg, detail=detail)
 
     # ── custom scan post-scan actions ──────────────────────────────────────
 
@@ -1637,15 +1717,11 @@ class App:
                 self._save_scan_history()
                 self._refresh_history_view()
 
-        viewer = ReportViewer(
-            self.root, self._custom_groups,
-            ops_log_path=None,
-            on_apply_cb=_apply_cb,
-            solo_originals=[],
-            broken_files=self._custom_broken,
-            settings=self.settings,
+        self._show_results_tab()
+        self._nb.select(self._tab_results)
+        self._embed_report_viewer(
+            self._custom_groups, [], self._custom_broken, out, _apply_cb
         )
-        viewer.grab_set()
 
     def _custom_open_browser_report(self) -> None:
         if self._custom_report_path and self._custom_report_path.exists():
@@ -1692,8 +1768,11 @@ class App:
                 if report:
                     self.root.after(0, lambda: webbrowser.open(report.as_uri()))
             except Exception as exc:
-                self.root.after(0, lambda e=exc: messagebox.showerror(
-                    "Error", str(e), parent=self.root))
+                import traceback as _tb; _detail = _tb.format_exc()
+                self.root.after(0, lambda e=exc, d=_detail: error_handler.show_error(
+                    self.root, "Move Failed",
+                    "Could not move the files.\nCheck folder permissions and available disk space.",
+                    detail=d))
 
         threading.Thread(target=_do, daemon=True).start()
 
@@ -2018,6 +2097,7 @@ class App:
         s.custom_check_folder      = self._custom_check_var.get()
         s.custom_out_folder        = self._custom_out_var.get()
         s.auto_update              = self.auto_update_var.get()
+        s.developer_mode           = self.developer_mode_var.get()
 
     def _build_about_tab(self) -> None:
         """Populate the About tab using the about_tab module."""
@@ -2277,20 +2357,25 @@ class App:
 
     def _start_scan(self, resume_state=None) -> None:
         if self._scanning:
-            messagebox.showwarning("Busy", "A scan is already running.", parent=self.root)
+            error_handler.show_warning(self.root, "Scan In Progress",
+                "A scan is already running.\nPlease wait for it to finish.")
             return
         self._collect_settings()
         src = self.settings.src_folder.strip()
         out = self.settings.out_folder.strip()
         if not src:
-            messagebox.showerror("Error", "Please select a source folder.", parent=self.root)
+            error_handler.show_warning(self.root, "Missing Folder",
+                "Please select a source folder before starting the scan.")
             return
         if not out:
-            messagebox.showerror("Error", "Please select an output folder.", parent=self.root)
+            error_handler.show_warning(self.root, "Missing Folder",
+                "Please select an output folder before starting the scan.")
             return
         src_path, out_path = Path(src), Path(out)
         if not src_path.is_dir():
-            messagebox.showerror("Error", "Source folder does not exist.", parent=self.root)
+            error_handler.show_error(self.root, "Folder Not Found",
+                "The source folder could not be found.\nCheck that the path is correct and the drive is connected.",
+                detail=f"Path: {src}")
             return
 
         self._scanning      = True
@@ -2629,23 +2714,24 @@ class App:
             self._show_results_tab()
             self._nb.select(self._tab_results)
 
-            # Auto-open in-app report
-            self.root.after(300, self._open_inapp_report)
+            # Auto-open embedded review
+            self.root.after(200, self._open_inapp_report)
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         self._progress_bar.stop()
-        self._phase_label_var.set("Error — see dialog.")
+        self._phase_label_var.set("Scan failed — see error message.")
         self._scanning = False
         self._scan_active_frame.pack_forget()
         self._scan_idle_frame.pack(fill=tk.X, padx=4)
-        detail = f"{msg}\n\n{tb}" if tb else msg
-        messagebox.showerror("Error", detail, parent=self.root)
+        user_msg, detail = error_handler.format_scan_error(Exception(msg), tb)
+        error_handler.show_error(self.root, "Scan Failed", user_msg, detail=detail)
 
     # ── post-scan actions ─────────────────────────────────────────────────
 
     def _accept_and_move(self) -> None:
         if not self.scan_groups:
-            messagebox.showwarning("Accept & Move", "No groups to move.", parent=self.root)
+            error_handler.show_warning(self.root, "Nothing to Move",
+                "No duplicate groups found. Run a scan first.")
             return
         if not messagebox.askyesno(
             "Accept & Move",
@@ -2687,8 +2773,11 @@ class App:
                 if report:
                     self.root.after(0, lambda: webbrowser.open(report.as_uri()))
             except Exception as exc:
-                self.root.after(0, lambda e=exc: messagebox.showerror(
-                    "Error", str(e), parent=self.root))
+                import traceback as _tb; _detail = _tb.format_exc()
+                self.root.after(0, lambda e=exc, d=_detail: error_handler.show_error(
+                    self.root, "Move Failed",
+                    "Could not move the files.\nCheck folder permissions and available disk space.",
+                    detail=d))
 
         threading.Thread(target=_do_move, daemon=True).start()
 
@@ -2698,14 +2787,12 @@ class App:
 
     def _open_inapp_report(self) -> None:
         if not self.scan_groups and not self.scan_records:
-            messagebox.showinfo("Review", "No scan results to review.", parent=self.root)
+            error_handler.show_info(self.root, "No Results",
+                "No scan results yet. Run a scan first, then come back to review.")
             return
-        out      = self.settings.out_folder.strip()
-        log_path = ops_log_path(Path(out)) if out else None
+        out = self.settings.out_folder.strip()
 
         def _apply_cb(_paths_trashed: list) -> None:
-            # File moving is handled inside ReportViewer; this callback
-            # handles post-apply tasks: regenerate report and clean state.
             if out:
                 report = generate_report(
                     self.scan_groups, Path(out),
@@ -2716,15 +2803,11 @@ class App:
                 from scan_state import delete_results
                 delete_results(Path(out))
 
-        viewer = ReportViewer(
-            self.root, self.scan_groups,
-            ops_log_path=log_path,
-            on_apply_cb=_apply_cb,
-            solo_originals=self._solo_originals,
-            broken_files=self._broken_files,
-            settings=self.settings,
+        self._show_results_tab()
+        self._nb.select(self._tab_results)
+        self._embed_report_viewer(
+            self.scan_groups, self._solo_originals, self._broken_files, out, _apply_cb
         )
-        viewer.grab_set()
 
     def _revert_all(self) -> None:
         out = self.settings.out_folder.strip()
@@ -2732,7 +2815,8 @@ class App:
             return
         log_path = ops_log_path(Path(out))
         if not log_path.exists():
-            messagebox.showinfo("Revert", "No operations log found.", parent=self.root)
+            error_handler.show_info(self.root, "Nothing to Revert",
+                "No files have been moved yet — nothing to revert.")
             return
         if not messagebox.askyesno(
             "Revert All",
