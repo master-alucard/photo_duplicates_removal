@@ -1,5 +1,5 @@
 ; ── Inno Setup script for Image Deduper ──────────────────────────────────────
-; Build with: ISCC.exe installer.iss
+; Build with: ISCC.exe installer\installer.iss   (from repo root)
 ; Requires the PyInstaller output at dist\ImageDeduper\
 ; ─────────────────────────────────────────────────────────────────────────────
 
@@ -29,7 +29,7 @@ AllowNoIcons=yes
 PrivilegesRequired=admin
 OutputDir=installer_output
 OutputBaseFilename=ImageDeduper-Setup-{#AppVersion}
-SetupIconFile=assets\app.ico
+SetupIconFile=..\assets\app.ico
 UninstallDisplayIcon={app}\{#AppExeName}
 Compression=lzma2/ultra64
 SolidCompression=yes
@@ -47,7 +47,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; All bundled files from PyInstaller
-Source: "dist\ImageDeduper\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\ImageDeduper\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"
