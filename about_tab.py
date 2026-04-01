@@ -243,11 +243,11 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
              font=("Segoe UI", 9), bg=_PRIMARY, fg="#90CAF9",
              ).pack(anchor=tk.W, pady=(4, 12))
 
-    tk.Label(id_body, text=APP_EMAIL,
-             font=("Segoe UI", 9), bg=_PRIMARY, fg="#90CAF9",
-             cursor="hand2",
-             ).pack(anchor=tk.W, pady=(0, 10)
-             ).bind("<Button-1>", lambda _: _open_url(f"mailto:{APP_EMAIL}"))
+    _email_lbl = tk.Label(id_body, text=APP_EMAIL,
+                          font=("Segoe UI", 9), bg=_PRIMARY, fg="#90CAF9",
+                          cursor="hand2")
+    _email_lbl.pack(anchor=tk.W, pady=(0, 10))
+    _email_lbl.bind("<Button-1>", lambda _: _open_url(f"mailto:{APP_EMAIL}"))
 
     btn_row = tk.Frame(id_body, bg=_PRIMARY)
     btn_row.pack(anchor=tk.W)
