@@ -4,6 +4,7 @@ Tab-based UI: Scan, Results (dynamic), History, Settings.
 """
 from __future__ import annotations
 
+import ctypes
 import datetime
 import json
 import os
@@ -66,6 +67,19 @@ _M_DIVIDER      = "#E0E0E0"   # Grey 300
 _M_TEXT1        = "#212121"   # Grey 900
 _M_TEXT2        = "#616161"   # Grey 700
 _MAT_DISABLED   = "#BDBDBD"   # Grey 400
+
+
+def _set_sleep_prevention(enable: bool) -> None:
+    """Ask Windows to keep the system awake while scanning (no-op on non-Windows)."""
+    try:
+        ES_CONTINUOUS      = 0x80000000
+        ES_SYSTEM_REQUIRED = 0x00000001
+        if enable:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS | ES_SYSTEM_REQUIRED)
+        else:
+            ctypes.windll.kernel32.SetThreadExecutionState(ES_CONTINUOUS)
+    except Exception:
+        pass
 
 
 def _darken_color(hex_color: str) -> str:
@@ -600,31 +614,22 @@ class App:
         )
         self._results_placeholder.pack(expand=True)
 
-        # Info card (hidden until scan completes)
-        self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=1, relief=tk.FLAT)
-        tk.Frame(self._results_info_card, height=3, bg=_ACCENT).pack(fill=tk.X)
-        tk.Label(
-            self._results_info_card, textvariable=self._results_info_var,
-            bg=_CARD_BG, fg=_M_TEXT1, font=("Segoe UI", 9),
-            justify=tk.LEFT, wraplength=700, padx=14, pady=10,
-            anchor=tk.W,
-        ).pack(fill=tk.X)
+        # Success card (hidden until scan completes; contents rebuilt dynamically)
+        self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
+                                           highlightbackground=_M_DIVIDER,
+                                           highlightthickness=1)
 
-        # Action buttons row
+        # Action buttons row (separate so _on_done can enable/disable each independently)
         self._results_btn_row = tk.Frame(sf, bg=_BG)
         btn_row = self._results_btn_row
 
-        self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _M_WARNING)
-        self.revert_all_btn.pack(side=tk.LEFT, padx=(0, 6))
-        _mat_disable(self.revert_all_btn)
-
-        self.inapp_report_btn = _mat_btn(btn_row, "📋  Review Results",
-                                         self._open_inapp_report, _ACCENT)
-        self.inapp_report_btn.pack(side=tk.LEFT, padx=4)
+        self.inapp_report_btn = _mat_btn(btn_row, "📋  View Report",
+                                         self._open_inapp_report, _ACCENT, font_size=10)
+        self.inapp_report_btn.pack(side=tk.LEFT, padx=(0, 6))
         _mat_disable(self.inapp_report_btn)
 
-        self.browser_report_btn = _mat_btn(btn_row, "Browser Report",
-                                           self._open_browser_report, "#757575")
+        self.browser_report_btn = _mat_btn(btn_row, "🌐  HTML Report",
+                                           self._open_browser_report, "#546E7A")
         self.browser_report_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.browser_report_btn)
 
@@ -632,6 +637,10 @@ class App:
                                    self._accept_and_move, _M_SUCCESS)
         self.accept_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.accept_btn)
+
+        self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _M_WARNING)
+        self.revert_all_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self.revert_all_btn)
 
         # Divider
         self._results_divider = tk.Frame(sf, height=1, bg=_M_DIVIDER)
@@ -694,33 +703,98 @@ class App:
             self._nb.forget(self._tab_results)
             self._results_tab_visible = False
 
-    def _update_results_tab_ui(self, info: "dict | None" = None) -> None:
-        """Refresh the info card text and button states on the Results tab."""
-        if info:
-            self._last_scan_info = info
+    def _update_results_tab_ui(self, extra: "dict | None" = None) -> None:
+        """Rebuild the success card and show/enable action buttons on the Results tab."""
+        if extra:
+            self._last_scan_info.update(extra)
         i = self._last_scan_info
         if not i:
-            self._results_info_var.set("No scan results available.")
             return
 
-        ts       = i.get("date", "")
-        src      = i.get("src_folder", "")
-        files    = i.get("total_files", 0)
-        groups   = i.get("groups", 0)
-        dups     = i.get("duplicates", 0)
-        dup_pct  = i.get("dup_pct", 0.0)
-        applied  = i.get("applied", False)
-        appl_tag = "  ✓ Applied." if applied else ""
+        ts         = i.get("date", "")
+        src        = i.get("src_folder", "–")
+        files      = i.get("total_files", 0)
+        n_groups   = i.get("groups", 0)
+        n_dupes    = i.get("duplicates", 0)
+        n_solo     = i.get("n_solo", 0)
+        n_ambig    = i.get("n_ambiguous", 0)
+        space_b    = i.get("space_saved", 0)
+        applied    = i.get("applied", False)
 
-        lines = [
-            f"Scan:   {ts}{appl_tag}",
-            f"Source: {src}",
-            f"Files scanned: {files}   ·   Groups: {groups}   ·   "
-            f"Duplicates: {dups}   ({dup_pct:.1f}%)",
-        ]
-        self._results_info_var.set("\n".join(lines))
+        # Space label
+        space_mb = space_b / (1024 * 1024) if space_b else 0.0
+        if space_mb >= 1024:
+            space_lbl = f"{space_mb / 1024:.1f} GB"
+        elif space_mb >= 1:
+            space_lbl = f"{space_mb:.1f} MB"
+        elif space_b > 0:
+            space_lbl = f"{space_b // 1024} KB"
+        else:
+            space_lbl = "–"
 
-        # Show summary widgets (hide placeholder)
+        # ── Rebuild card contents ─────────────────────────────────────────
+        for w in self._results_info_card.winfo_children():
+            w.destroy()
+
+        # Green top bar
+        bar_col = _M_SUCCESS if n_dupes > 0 else _ACCENT
+        tk.Frame(self._results_info_card, height=4, bg=bar_col).pack(fill=tk.X)
+
+        # Header row
+        hdr = tk.Frame(self._results_info_card, bg=_CARD_BG)
+        hdr.pack(fill=tk.X, padx=16, pady=(12, 4))
+        title = "✅  Scan Complete" + ("  ·  ✓ Applied" if applied else "")
+        tk.Label(hdr, text=title,
+                 font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
+        if ts:
+            tk.Label(hdr, text=ts, font=("Segoe UI", 8),
+                     bg=_CARD_BG, fg="#9E9E9E").pack(side=tk.RIGHT, pady=(2, 0))
+
+        # Source path
+        tk.Label(self._results_info_card,
+                 text=f"📁  {src}", font=("Segoe UI", 9),
+                 bg=_CARD_BG, fg=_M_TEXT2, anchor=tk.W,
+                 wraplength=900).pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        tk.Frame(self._results_info_card, height=1, bg=_M_DIVIDER).pack(
+            fill=tk.X, padx=16, pady=(0, 10))
+
+        # Stat cells row
+        stats_row = tk.Frame(self._results_info_card, bg=_CARD_BG)
+        stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _stat_cell(parent, value, label, fg=_M_TEXT1):
+            cell = tk.Frame(parent, bg=_CARD_BG)
+            cell.pack(side=tk.LEFT, padx=(0, 28))
+            vstr = f"{value:,}" if isinstance(value, int) else str(value)
+            tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
+                     bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
+            tk.Label(cell, text=label, font=("Segoe UI", 8),
+                     bg=_CARD_BG, fg="#9E9E9E").pack(anchor=tk.W)
+
+        _stat_cell(stats_row, files,   "files scanned")
+        _stat_cell(stats_row, n_groups, "dup groups",
+                   _M_ERROR if n_groups > 0 else _M_TEXT1)
+        _stat_cell(stats_row, n_dupes,  "duplicates",
+                   _M_ERROR if n_dupes > 0 else _M_TEXT1)
+        _stat_cell(stats_row, space_lbl, "space to free", _M_SUCCESS if space_b > 0 else _M_TEXT1)
+
+        # Summary line
+        parts: list[str] = []
+        if n_solo:
+            parts.append(f"✓  {n_solo:,} safe originals")
+        if n_ambig:
+            parts.append(f"⚠  {n_ambig} need review")
+        if n_groups == 0:
+            parts.append("No duplicates found — your collection looks clean!")
+        if parts:
+            tk.Label(self._results_info_card,
+                     text="   ·   ".join(parts),
+                     font=("Segoe UI", 9), bg=_CARD_BG,
+                     fg="#9E9E9E", anchor=tk.W).pack(
+                         fill=tk.X, padx=16, pady=(0, 14))
+
+        # Show card and buttons (hide placeholder)
         self._results_placeholder.pack_forget()
         self._results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
         self._results_btn_row.pack(fill=tk.X, padx=16, pady=6)
@@ -2328,8 +2402,11 @@ class App:
         except Exception:
             pass
 
-        n_groups = len(self.scan_groups)
-        n_prev   = sum(len(g.previews) for g in self.scan_groups)
+        n_groups    = len(self.scan_groups)
+        n_prev      = sum(len(g.previews) for g in self.scan_groups)
+        n_ambiguous = sum(1 for g in self.scan_groups if getattr(g, "is_ambiguous", False))
+        n_solo      = len(self._solo_originals)
+        space_saved = sum(r.file_size for g in self.scan_groups for r in g.previews)
 
         _mat_enable(self.browser_report_btn)
         _mat_enable(self.inapp_report_btn)
@@ -2345,6 +2422,9 @@ class App:
             "dup_pct":     n_prev / max(result.get("total_scanned", 1), 1) * 100,
             "dry_run":     result.get("dry_run", True),
             "applied":     False,
+            "n_solo":      n_solo,
+            "n_ambiguous": n_ambiguous,
+            "space_saved": space_saved,
         }
         self._show_results_tab()
         self._update_results_tab_ui()
@@ -2407,6 +2487,7 @@ class App:
         self._progress_bar["mode"]  = "indeterminate"
         self._progress_bar.start(12)
 
+        _set_sleep_prevention(True)
         threading.Thread(
             target=self._worker,
             args=(src_path, out_path, self.settings, resume_state),
@@ -2627,17 +2708,21 @@ class App:
             if _sp_file.exists():
                 _sp_file.unlink()
 
-            n_orig = sum(len(g.originals) for g in groups)
-            n_prev = sum(len(g.previews)  for g in groups)
-            dry_note = " (DRY RUN)" if settings.dry_run else ""
+            n_orig      = sum(len(g.originals) for g in groups)
+            n_prev      = sum(len(g.previews)  for g in groups)
+            n_ambiguous = sum(1 for g in groups if getattr(g, "is_ambiguous", False))
+            n_solo      = len(solo_originals)
+            space_saved = sum(r.file_size for g in groups for r in g.previews)
+            dry_note    = " (DRY RUN)" if settings.dry_run else ""
             msg = (
-                f"Done{dry_note}. {len(records)} scanned — "
+                f"Done{dry_note}. {len(records):,} scanned — "
                 f"{len(groups)} groups, {n_orig} kept, {n_prev} duplicates."
             )
             self.root.after(0, lambda: self._on_done(
                 msg, success=True, dry_run=settings.dry_run,
                 total_scanned=len(records), n_groups=len(groups),
                 n_prev=n_prev, src_folder=str(src),
+                n_solo=n_solo, n_ambiguous=n_ambiguous, space_saved=space_saved,
             ))
 
         except Exception as exc:
@@ -2666,7 +2751,9 @@ class App:
         dry_run: bool = False, paused: bool = False,
         total_scanned: int = 0, n_groups: int = 0,
         n_prev: int = 0, src_folder: str = "",
+        n_solo: int = 0, n_ambiguous: int = 0, space_saved: int = 0,
     ) -> None:
+        _set_sleep_prevention(False)
         self._progress_bar.stop()
         self._progress_bar["mode"]  = "determinate"
         self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
@@ -2710,14 +2797,16 @@ class App:
                 src_folder=src_folder,
                 applied=not dry_run,
             )
-            self._update_results_tab_ui()
+            self._update_results_tab_ui({
+                "n_solo":      n_solo,
+                "n_ambiguous": n_ambiguous,
+                "space_saved": space_saved,
+            })
             self._show_results_tab()
             self._nb.select(self._tab_results)
 
-            # Auto-open embedded review
-            self.root.after(200, self._open_inapp_report)
-
     def _on_error(self, msg: str, tb: str = "") -> None:
+        _set_sleep_prevention(False)
         self._progress_bar.stop()
         self._phase_label_var.set("Scan failed — see error message.")
         self._scanning = False

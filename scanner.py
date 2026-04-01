@@ -36,6 +36,62 @@ ProgressCb = Callable[[str, int, int, str], None]
 # ≥ 3 for genuinely different shots, so 2 is a clean separator.
 _EXACT_DUP_PHASH = 2
 
+# Use BK-tree candidate filtering when the collection exceeds this size.
+# Below this threshold the O(n²) brute-force is fast enough.
+_BKTREE_THRESHOLD = 200
+
+
+# ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────
+
+def _hamming(a: int, b: int) -> int:
+    """Popcount of XOR — counts differing bits between two integers."""
+    return bin(a ^ b).count('1')
+
+
+class _BKTree:
+    """Burkhard-Keller tree keyed by Hamming distance.
+
+    Reduces candidate lookup from O(n) to O(log n) average for small thresholds
+    in a 64-bit hash space.  For threshold=2 this eliminates >99% of unnecessary
+    _can_be_similar calls on large collections.
+    """
+    __slots__ = ("_root",)
+
+    def __init__(self) -> None:
+        # Each node is [hash_int, record_idx, {distance: child_node}]
+        self._root: "list | None" = None
+
+    def insert(self, hash_int: int, idx: int) -> None:
+        node: list = [hash_int, idx, {}]
+        if self._root is None:
+            self._root = node
+            return
+        cur = self._root
+        while True:
+            d = _hamming(hash_int, cur[0])
+            if d not in cur[2]:
+                cur[2][d] = node
+                return
+            cur = cur[2][d]
+
+    def query(self, hash_int: int, threshold: int) -> list:
+        """Return indices of all entries within Hamming distance ≤ threshold."""
+        if self._root is None:
+            return []
+        results: list = []
+        stack = [self._root]
+        while stack:
+            cur = stack.pop()
+            d = _hamming(hash_int, cur[0])
+            if d <= threshold:
+                results.append(cur[1])
+            lo = d - threshold
+            hi = d + threshold
+            for dist, child in cur[2].items():
+                if lo <= dist <= hi:
+                    stack.append(child)
+        return results
+
 
 @dataclass
 class ImageRecord:
@@ -406,35 +462,85 @@ def find_groups(
         if px != py:
             parent[px] = py
 
-    total_comparisons = n * (n - 1) // 2
-    done_comparisons = start_i * (n - start_i) + start_i * (start_i - 1) // 2 if start_i else 0
+    # Maximum effective threshold used across all pair types (series pairs use
+    # a multiplied threshold, so we query the BK-tree with that wider radius
+    # and let _can_be_similar apply the exact per-pair logic).
+    _max_query_thr = max(
+        settings.threshold,
+        int(settings.threshold * getattr(settings, "series_threshold_factor", 2.0)),
+    )
 
-    for i in range(start_i, n):
-        if stop_flag and stop_flag[0]:
-            return [], None
-        if pause_flag and pause_flag[0]:
-            # Build partial state for resume
-            from scan_state import ScanState, serialize_record
-            from dataclasses import asdict
-            partial = ScanState(
-                phase="comparing",
-                records=[serialize_record(r) for r in records],
-                compare_i=i,
-                union_parent=list(parent),
-            )
-            return [], partial
+    if n > _BKTREE_THRESHOLD:
+        # ── BK-tree fast path ─────────────────────────────────────────────
+        # Pre-compute integer hash values once; str(phash) yields hex.
+        hash_ints = [int(str(r.phash), 16) for r in records]
 
-        if progress_cb and i % 10 == 0:
-            pct_done = done_comparisons
-            progress_cb(f"Comparing image {i + 1}/{n}...", pct_done, total_comparisons, "Comparing")
+        bk = _BKTree()
+        for i, h in enumerate(hash_ints):
+            bk.insert(h, i)
 
-        for j in range(i + 1, n):
-            done_comparisons += 1
-            if _can_be_similar(records[i], records[j], settings):
-                union(i, j)
+        for i in range(start_i, n):
+            if stop_flag and stop_flag[0]:
+                return [], None
+            if pause_flag and pause_flag[0]:
+                from scan_state import ScanState, serialize_record
+                partial = ScanState(
+                    phase="comparing",
+                    records=[serialize_record(r) for r in records],
+                    compare_i=i,
+                    union_parent=list(parent),
+                )
+                return [], partial
 
-    if progress_cb:
-        progress_cb("Comparing complete.", total_comparisons, total_comparisons, "Comparing")
+            if progress_cb and i % 200 == 0:
+                progress_cb(
+                    f"Comparing {i + 1:,} / {n:,}…",
+                    i, n, "Comparing",
+                )
+
+            for j in bk.query(hash_ints[i], _max_query_thr):
+                if j <= i:
+                    continue
+                if _can_be_similar(records[i], records[j], settings):
+                    union(i, j)
+
+        if progress_cb:
+            progress_cb("Comparing complete.", n, n, "Comparing")
+
+    else:
+        # ── O(n²) brute-force for small collections / resumed scans ───────
+        total_comparisons = n * (n - 1) // 2
+        done_comparisons  = (
+            start_i * (n - start_i) + start_i * (start_i - 1) // 2
+            if start_i else 0
+        )
+
+        for i in range(start_i, n):
+            if stop_flag and stop_flag[0]:
+                return [], None
+            if pause_flag and pause_flag[0]:
+                from scan_state import ScanState, serialize_record
+                partial = ScanState(
+                    phase="comparing",
+                    records=[serialize_record(r) for r in records],
+                    compare_i=i,
+                    union_parent=list(parent),
+                )
+                return [], partial
+
+            if progress_cb and i % 10 == 0:
+                progress_cb(
+                    f"Comparing image {i + 1}/{n}…",
+                    done_comparisons, total_comparisons, "Comparing",
+                )
+
+            for j in range(i + 1, n):
+                done_comparisons += 1
+                if _can_be_similar(records[i], records[j], settings):
+                    union(i, j)
+
+        if progress_cb:
+            progress_cb("Comparing complete.", total_comparisons, total_comparisons, "Comparing")
 
     # ── bucket by union-find root ────────────────────────────────────────
     buckets: dict[int, list[int]] = defaultdict(list)
@@ -480,20 +586,33 @@ def find_groups(
                 if px != py:
                     amb_parent[px] = py
 
-            for si in range(m):
-                for sj in range(si + 1, m):
-                    a, b = records[singletons[si]], records[singletons[sj]]
-                    # Apply AR and brightness guards, but skip histogram/dHash
-                    ar_a = a.width / a.height if a.height else 1.0
-                    ar_b = b.width / b.height if b.height else 1.0
-                    ar_diff = abs(ar_a - ar_b) / max(ar_a, ar_b, 0.001)
-                    if ar_diff > settings.ar_tolerance_pct / 100:
-                        continue
-                    if abs(a.brightness - b.brightness) > settings.brightness_max_diff:
-                        continue
-                    pdist = a.phash - b.phash
-                    if settings.threshold < pdist <= amb_threshold:
-                        amb_union(si, sj)
+            def _amb_pair_ok(a: ImageRecord, b: ImageRecord) -> bool:
+                ar_a = a.width / a.height if a.height else 1.0
+                ar_b = b.width / b.height if b.height else 1.0
+                if abs(ar_a - ar_b) / max(ar_a, ar_b, 0.001) > settings.ar_tolerance_pct / 100:
+                    return False
+                if abs(a.brightness - b.brightness) > settings.brightness_max_diff:
+                    return False
+                pdist = a.phash - b.phash
+                return settings.threshold < pdist <= amb_threshold
+
+            if m > _BKTREE_THRESHOLD:
+                # BK-tree fast path for ambiguous detection
+                sing_hashes = [int(str(records[singletons[si]].phash), 16) for si in range(m)]
+                amb_bk = _BKTree()
+                for si, h in enumerate(sing_hashes):
+                    amb_bk.insert(h, si)
+                for si in range(m):
+                    for sj in amb_bk.query(sing_hashes[si], int(amb_threshold)):
+                        if sj <= si:
+                            continue
+                        if _amb_pair_ok(records[singletons[si]], records[singletons[sj]]):
+                            amb_union(si, sj)
+            else:
+                for si in range(m):
+                    for sj in range(si + 1, m):
+                        if _amb_pair_ok(records[singletons[si]], records[singletons[sj]]):
+                            amb_union(si, sj)
 
             amb_buckets: dict[int, list[int]] = defaultdict(list)
             for si in range(m):

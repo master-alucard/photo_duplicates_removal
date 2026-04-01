@@ -116,6 +116,9 @@ def _preview_card(rec, extended: bool = False) -> str:
 
 # ── main entry ────────────────────────────────────────────────────────────────
 
+_THUMB_GROUP_LIMIT = 500  # groups above this get no embedded thumbnails
+
+
 def generate_report(
     groups: List,
     output_folder: Path,
@@ -135,12 +138,38 @@ def generate_report(
     format_label = "Yes" if settings.keep_all_formats else "No"
     dry_run = settings.dry_run
 
+    # For very large scans, skip embedded base64 thumbnails to keep the HTML
+    # file size manageable.  Thumbnails are still viewable in the in-app viewer.
+    embed_thumbs = len(groups) <= _THUMB_GROUP_LIMIT
+
+    def _orig_card_maybe(rec, extended=False):
+        if embed_thumbs:
+            return _orig_card(rec, extended=extended)
+        name = html.escape(rec.path.name)
+        return (
+            f'<div class="img-wrap">'
+            f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
+            f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
+            f'<span class="dt">{rec.date_label()}</span></div></div>'
+        )
+
+    def _preview_card_maybe(rec, extended=False):
+        if embed_thumbs:
+            return _preview_card(rec, extended=extended)
+        name = html.escape(rec.path.name)
+        return (
+            f'<div class="img-wrap">'
+            f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
+            f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
+            f'<span class="dt">{rec.date_label()}</span></div></div>'
+        )
+
     # ── group cards ──────────────────────────────────────────────────────
     cards: list[str] = []
     for idx, group in enumerate(groups, 1):
         is_ambiguous = getattr(group, "is_ambiguous", False)
-        orig_html = "".join(_orig_card(o, extended=settings.extended_report) for o in group.originals)
-        prev_html = "".join(_preview_card(p, extended=settings.extended_report) for p in group.previews)
+        orig_html = "".join(_orig_card_maybe(o, extended=settings.extended_report) for o in group.originals)
+        prev_html = "".join(_preview_card_maybe(p, extended=settings.extended_report) for p in group.previews)
 
         n_kept = len(group.originals)
         n_trashed = len(group.previews)
@@ -195,6 +224,14 @@ def generate_report(
         if dry_run else
         '<span class="tag live">FILES MOVED</span>'
     )
+
+    no_thumbs_note = (
+        f'<div style="background:#fff8e1;border-left:4px solid #f9a825;'
+        f'padding:10px 18px;margin:0 32px 16px;border-radius:4px;font-size:.85rem;">'
+        f'&#9432; Thumbnails are not embedded in this report because the scan produced '
+        f'{len(groups):,} groups (limit: {_THUMB_GROUP_LIMIT:,}). '
+        f'Use the <strong>In-App Viewer</strong> to browse groups with full previews.</div>'
+    ) if not embed_thumbs else ""
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -314,6 +351,7 @@ body{{font-family:"Segoe UI",Arial,sans-serif;background:#f0f2f5;color:#1f1f1f;f
   <div class="stat"><div class="val">{saved_mb:.1f} MB</div><div class="lbl">Space reclaimed</div></div>
 </div>
 
+{no_thumbs_note}
 <div class="content">
 {cards_html}
 </div>
