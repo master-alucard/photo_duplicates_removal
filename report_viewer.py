@@ -915,15 +915,6 @@ class ReportViewer(tk.Frame):
         _mat_btn(back_bar, "◀  Back to Review", self._restore_review,
                  "#455A64").pack(side=tk.LEFT, padx=10, pady=6)
 
-        # Revert buttons — show on results page if ops log is available
-        if self._ops_log_path and self._ops_log_path.exists():
-            tk.Frame(back_bar, width=1, bg=_M_DIVIDER).pack(
-                side=tk.LEFT, fill=tk.Y, padx=8, pady=4)
-            _mat_btn(back_bar, "↩  Revert Selected", self._on_revert_selected,
-                     "#455A64").pack(side=tk.LEFT, padx=4, pady=6)
-            _mat_btn(back_bar, "↩  Revert All", self._on_revert_all,
-                     "#455A64").pack(side=tk.LEFT, padx=4, pady=6)
-
         # ── Results card ──────────────────────────────────────────────────
         scroll_host = tk.Canvas(self._results_frame, bg=_M_BG, highlightthickness=0)
         scroll_host.pack(fill=tk.BOTH, expand=True)

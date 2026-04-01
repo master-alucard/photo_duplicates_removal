@@ -123,13 +123,26 @@ def _mat_disable(btn: tk.Button) -> None:
 
 # ── app icon ─────────────────────────────────────────────────────────────────
 
+def _find_ico() -> "Path | None":
+    """Return the path to assets/app.ico, handling both source and PyInstaller bundle."""
+    # PyInstaller frozen: assets live next to the EXE
+    if getattr(sys, "frozen", False):
+        p = Path(sys.executable).parent / "assets" / "app.ico"
+        if p.exists():
+            return p
+    # Running from source
+    for candidate in [
+        Path(__file__).parent / "assets" / "app.ico",
+        Path(__file__).with_name("assets") / "app.ico",
+    ]:
+        if candidate.exists():
+            return candidate
+    return None
+
+
 def _make_icon(size: int = 64) -> ImageTk.PhotoImage:
-    # Try loading the high-quality .ico from assets/ first
-    _ico = Path(__file__).with_name("assets") / "app.ico"
-    if not _ico.exists():
-        # PyInstaller bundle: assets sit next to the exe
-        _ico = Path(__file__).parent / "assets" / "app.ico"
-    if _ico.exists():
+    _ico = _find_ico()
+    if _ico:
         try:
             img = Image.open(_ico).convert("RGBA").resize((size, size), Image.LANCZOS)
             return ImageTk.PhotoImage(img)
@@ -253,8 +266,11 @@ class App:
         self.root.minsize(700, 520)
 
         try:
+            _ico = _find_ico()
+            if _ico:
+                root.iconbitmap(str(_ico))   # Windows: sets taskbar + title bar icon
             self._icon = _make_icon(64)
-            root.wm_iconphoto(True, self._icon)
+            root.wm_iconphoto(True, self._icon)  # fallback / Linux / macOS
         except Exception:
             pass
 
@@ -329,7 +345,7 @@ class App:
         self._tab_about    = ttk.Frame(self._nb)
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
-        self._nb.add(self._tab_custom,   text="  Custom Scan  ")
+        self._nb.add(self._tab_custom,   text="  Compare Scan  ")
         self._nb.add(self._tab_history,  text="  History  ")
         self._nb.add(self._tab_settings, text="  Settings  ")
         self._nb.add(self._tab_about,    text="  About  ")
@@ -1124,7 +1140,7 @@ class App:
             variable=self.developer_mode_var,
         ).pack(anchor=tk.W)
 
-    # ── Custom Scan tab ───────────────────────────────────────────────────
+    # ── Compare Scan tab ──────────────────────────────────────────────────
 
     def _build_custom_scan_tab(self) -> None:
         """Cross-folder duplicate finder: main folder (read-only) vs check folder."""
@@ -1138,7 +1154,7 @@ class App:
         tk.Label(
             banner,
             text=(
-                "Custom Scan compares a reference folder against a second folder.\n"
+                "Compare Scan compares a reference folder against a second folder.\n"
                 "Files in the Main folder are never moved or deleted.\n"
                 "Only duplicates found in the Check folder are moved to trash."
             ),
@@ -1401,7 +1417,7 @@ class App:
 
         # Right side: Start + Accept + Review + Browser
         self._custom_scan_btn = _mat_btn(
-            self._custom_idle_frame, "▶  Start Custom Scan",
+            self._custom_idle_frame, "▶  Start Compare Scan",
             self._start_custom_scan, _M_SUCCESS)
         self._custom_scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
 
