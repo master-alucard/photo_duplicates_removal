@@ -14,9 +14,8 @@ Built with Python + Tkinter — runs entirely offline on your PC.
 1. [Install on Windows (end-user)](#install-on-windows-end-user)
 2. [Run from source (developers)](#run-from-source-developers)
 3. [Requirements](#requirements)
-4. [Build the Windows installer yourself](#build-the-windows-installer-yourself)
-5. [Project structure](#project-structure)
-6. [How it works](#how-it-works)
+4. [Project structure](#project-structure)
+5. [How it works](#how-it-works)
 
 ---
 
@@ -120,55 +119,6 @@ pip install --upgrade -r requirements.txt
 
 > **RAW files:** rawpy supports `.CR2`, `.NEF`, `.ARW`, `.DNG`, and 200+ other
 > RAW formats. Enable it in the **Settings → RAW Files** section after launch.
-
----
-
-## Build the Windows installer yourself
-
-### Tools needed
-
-| Tool | Version | Download |
-|------|---------|---------|
-| Python | **3.11 or 3.12** | https://python.org |
-| PyInstaller | ≥ 6.0 | `pip install pyinstaller` |
-| Inno Setup | 6 | https://jrsoftware.org/isinfo.php |
-
-### Step 1 — Install dependencies + PyInstaller
-
-```bash
-pip install -r requirements.txt
-pip install pyinstaller
-```
-
-### Step 2 — Bundle the app with PyInstaller
-
-```bash
-pyinstaller image_deduper.spec
-```
-
-This produces a `dist\ImageDeduper\` folder containing `ImageDeduper.exe`
-and all required libraries (~80–120 MB depending on optional packages).
-
-### Step 3 — Build the installer with Inno Setup
-
-```bash
-"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" installer.iss
-```
-
-Output: `installer_output\ImageDeduper-Setup-1.0.0.exe` — a single file
-you can distribute.
-
-### Automated builds via GitHub Actions
-
-Pushing a version tag triggers the CI pipeline which builds and publishes
-the installer to the Releases page automatically:
-
-```bash
-git tag v1.0.1
-git push origin v1.0.1
-```
-
-See `.github/workflows/build.yml` for the full pipeline definition.
 
 ---
 
