@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.0.1"
+APP_VERSION   = "1.0.2"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
