@@ -1,10 +1,8 @@
 """
-calibration_window.py — Four-tab calibration wizard (Toplevel window).
+calibration_window.py — Four-tab calibration wizard.
 
-Tab 1 – Instructions : how to prepare the calibration data folder.
-Tab 2 – Run          : folder picker, start/stop, progress bar.
-Tab 3 – Results      : sortable table with round labels + apply buttons.
-Tab 4 – Log          : full per-pair diagnostic text, copyable for bug reports.
+CalibrationPanel  – embeddable tk.Frame (all logic lives here).
+CalibrationWindow – standalone tk.Toplevel that wraps the panel.
 """
 from __future__ import annotations
 
@@ -113,8 +111,13 @@ All other settings are kept at their current values during calibration.
 """
 
 
-class CalibrationWindow(tk.Toplevel):
-    """Four-tab wizard: Instructions → Run → Results → Log."""
+# ── Embeddable panel (all UI + logic) ────────────────────────────────────────
+
+class CalibrationPanel(tk.Frame):
+    """
+    Four-tab calibration wizard as an embeddable tk.Frame.
+    Can be placed inside any parent widget (Toplevel, Frame, etc.).
+    """
 
     def __init__(
         self,
@@ -123,33 +126,27 @@ class CalibrationWindow(tk.Toplevel):
         apply_cb: Callable[[int, float], None],
         folder_cb: "Callable[[str], None] | None" = None,
         calibration_applied_cb: "Callable[[int, float], None] | None" = None,
+        on_close_cb: "Callable | None" = None,
+        start_on_run_tab: bool = False,
     ) -> None:
-        super().__init__(parent)
-        self.title("Calibrate Detection Settings")
-        self.settings              = settings
-        self.apply_cb              = apply_cb
-        self.folder_cb             = folder_cb             # called whenever folder changes
-        self.calibration_applied_cb = calibration_applied_cb  # called when result applied
-        self.results   = []          # list[CalibrationResult]
-        self._stop_flag = [False]
+        super().__init__(parent, bg=_BG)
+        self.settings               = settings
+        self.apply_cb               = apply_cb
+        self.folder_cb              = folder_cb
+        self.calibration_applied_cb = calibration_applied_cb
+        self._on_close_cb           = on_close_cb
+        self._start_on_run_tab      = start_on_run_tab
+        self.results                = []
+        self._stop_flag             = [False]
 
         self._calib_folder = tk.StringVar(value=settings.calib_folder or "")
         self._status_var   = tk.StringVar(value="Ready.")
         self._apply_var    = tk.StringVar()
-        self._log_text: str = ""          # full diagnostic text for the Log tab
+        self._log_text: str = ""
 
-        self.geometry("760x600")
-        self.minsize(640, 480)
-        self.resizable(True, True)
-        self.grab_set()
-        self.configure(bg=_BG)
-        self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-        # Use a custom style name to avoid polluting the global TNotebook style.
-        # White-selected + blue text is more reliable on Windows (vista theme
-        # can override foreground for "selected" tabs when using dark bg colours).
-        style = ttk.Style(self)
+        # Style — use winfo_toplevel() so it works from any parent depth
         try:
+            style = ttk.Style(self.winfo_toplevel())
             style.configure("Calib.TNotebook", background=_BG)
             style.configure("Calib.TNotebook.Tab",
                             font=("Segoe UI", 9, "bold"),
@@ -161,6 +158,10 @@ class CalibrationWindow(tk.Toplevel):
             pass
 
         self._build_ui()
+
+        if self._start_on_run_tab:
+            # Start on tab 2 (Run) when calibration data is pre-loaded
+            self.after(50, lambda: self._nb.select(1))
 
     # ── UI construction ───────────────────────────────────────────────────────
 
@@ -307,7 +308,7 @@ class CalibrationWindow(tk.Toplevel):
     def _browse(self) -> None:
         path = filedialog.askdirectory(
             title="Select calibration data folder",
-            parent=self,
+            parent=self.winfo_toplevel(),
         )
         if path:
             self._calib_folder.set(path)
@@ -393,7 +394,6 @@ class CalibrationWindow(tk.Toplevel):
         self._progress["value"] = 100
         self._populate_results(results)
 
-        # Populate log tab
         if log is not None:
             from calibrator import format_log
             self._log_text = format_log(log)
@@ -490,14 +490,14 @@ class CalibrationWindow(tk.Toplevel):
         text = self._log_text or self._log_widget.get("1.0", "end")
         self.clipboard_clear()
         self.clipboard_append(text)
-        # Brief visual confirmation
         self._apply_var.set("Log copied to clipboard.")
 
     # ── apply ─────────────────────────────────────────────────────────────────
 
     def _apply_best(self) -> None:
         if not self.results:
-            messagebox.showinfo("No results", "Run calibration first.", parent=self)
+            messagebox.showinfo("No results", "Run calibration first.",
+                                parent=self.winfo_toplevel())
             return
         r = self.results[0]
         self._do_apply(r.threshold, r.preview_ratio)
@@ -523,8 +523,44 @@ class CalibrationWindow(tk.Toplevel):
             f"Applied: threshold={threshold},  preview_ratio={preview_ratio:.2f}"
         )
 
-    # ── window close ──────────────────────────────────────────────────────────
+    # ── close / stop ──────────────────────────────────────────────────────────
+
+    def stop_calibration(self) -> None:
+        """Signal the running calibration thread to stop."""
+        self._stop_flag[0] = True
+
+
+# ── Standalone Toplevel window wrapping the panel ────────────────────────────
+
+class CalibrationWindow(tk.Toplevel):
+    """Standalone calibration window (wraps CalibrationPanel)."""
+
+    def __init__(
+        self,
+        parent: tk.Widget,
+        settings: Settings,
+        apply_cb: Callable[[int, float], None],
+        folder_cb: "Callable[[str], None] | None" = None,
+        calibration_applied_cb: "Callable[[int, float], None] | None" = None,
+    ) -> None:
+        super().__init__(parent)
+        self.title("Calibrate Detection Settings")
+        self.geometry("760x600")
+        self.minsize(640, 480)
+        self.resizable(True, True)
+        self.grab_set()
+        self.configure(bg=_BG)
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        self._panel = CalibrationPanel(
+            self,
+            settings,
+            apply_cb=apply_cb,
+            folder_cb=folder_cb,
+            calibration_applied_cb=calibration_applied_cb,
+        )
+        self._panel.pack(fill="both", expand=True)
 
     def _on_close(self) -> None:
-        self._stop_flag[0] = True
+        self._panel.stop_calibration()
         self.destroy()

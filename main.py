@@ -43,6 +43,7 @@ from scanner import collect_images, find_groups, IMAGE_EXTENSIONS
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
+from about_tab import build_about_tab
 
 
 # ── constants ────────────────────────────────────────────────────────────────
@@ -297,11 +298,13 @@ class App:
         self._tab_custom   = ttk.Frame(self._nb)
         self._tab_history  = ttk.Frame(self._nb)
         self._tab_settings = ttk.Frame(self._nb)
+        self._tab_about    = ttk.Frame(self._nb)
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
         self._nb.add(self._tab_custom,   text="  Custom Scan  ")
         self._nb.add(self._tab_history,  text="  History  ")
         self._nb.add(self._tab_settings, text="  Settings  ")
+        self._nb.add(self._tab_about,    text="  About  ")
 
         # Results tab inserted dynamically at position 1 after a scan completes
         self._results_tab_visible = False
@@ -314,6 +317,7 @@ class App:
         self._build_custom_scan_tab()
         self._build_history_tab()
         self._build_settings_tab()
+        self._build_about_tab()
 
     def _init_setting_vars(self) -> None:
         """Create all tkinter data vars from current settings. Called once before building tabs."""
@@ -363,6 +367,12 @@ class App:
         self._date_order_idx_val  = init_order_idx
         self._date_sep_var        = tk.StringVar(value=init_sep)
         self._date_fmt_example    = tk.StringVar()
+
+        # Auto-update
+        self.auto_update_var = tk.BooleanVar(value=s.auto_update)
+        self.auto_update_var.trace_add("write", self._on_setting_change)
+
+        self._calib_info_var = tk.StringVar(value=self._calib_info_text())
 
         # Custom scan folder vars
         s2 = self.settings
@@ -774,6 +784,11 @@ class App:
         if self.settings.calibrated_threshold == 0:
             _mat_disable(self._calib_apply_btn)
 
+        self._calib_info_lbl = ttk.Label(calib_sec, textvariable=self._calib_info_var,
+                                         foreground=_M_SUCCESS if self.settings.calibrated_threshold > 0 else "#999",
+                                         font=("Segoe UI", 8, "bold"))
+        self._calib_info_lbl.pack(anchor=tk.W, pady=(2, 2))
+
         ttk.Label(calib_sec,
                   text="Calibration finds the best threshold and ratio for your specific photo library.",
                   foreground="#666", font=("Segoe UI", 8)).pack(anchor=tk.W, pady=(0, 2))
@@ -1000,9 +1015,15 @@ class App:
         ttk.Checkbutton(r, text="Ambiguous Match Detection",
                         variable=self.ambig_var).pack(side=tk.LEFT)
         _info_btn(r, "ambiguous_detection").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="  ", width=3).pack(side=tk.LEFT)
+        self._slider_row(det, "  Ambiguous Threshold Factor", self.ambig_factor_var,
+                         1.0, 3.0, 1.3, 2.0, 1.5, "ambiguous_threshold_factor", 0.1,
+                         lambda v: f"{v:.1f}\u00d7")
+
+        r = _row(det)
         ttk.Checkbutton(r, text="Disable Series Detection",
                         variable=self.disable_series_var).pack(side=tk.LEFT)
+        ttk.Label(r, text="Treat all same-size duplicates normally instead of keeping burst shots",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         r = _row(det)
         ttk.Checkbutton(r, text="Scan subfolders recursively",
@@ -1024,10 +1045,71 @@ class App:
                          0, 2000, 100, 300, 0, "min_dimension", 50,
                          lambda v: f"{int(round(v))} px" if v > 0 else "off")
 
-        # ── Keep & Match options ──────────────────────────────────────────
-        km = _section(body, "Keep & Match")
+        # ── Show Advanced toggle ──────────────────────────────────────────
+        self._custom_advanced_frames: list[tk.Widget] = []
+        self._custom_all_settings_visible = False
 
-        r = _row(km)
+        self._custom_show_all_btn = ttk.Button(
+            body, text="▼  Show Advanced Settings",
+            command=self._toggle_custom_show_all,
+        )
+        self._custom_show_all_btn.pack(anchor=tk.W, padx=2, pady=(4, 6))
+
+        def _cadv(title: str) -> ttk.LabelFrame:
+            f = ttk.LabelFrame(body, text=title, padding=(10, 6, 10, 8))
+            self._custom_advanced_frames.append(f)
+            return f
+
+        # Advanced: Series Detection
+        series_sec = _cadv("Series Detection")
+
+        self._slider_row(series_sec, "Series Dimension Tolerance %", self.series_tol_var,
+                         0.0, 10.0, 0.0, 2.0, 0.0, "series_tolerance_pct", 0.1,
+                         lambda v: f"{v:.1f}%")
+        self._slider_row(series_sec, "Series Grouping Leniency", self.series_thresh_var,
+                         1.0, 5.0, 1.5, 2.5, 2.0, "series_threshold_factor", 0.1,
+                         lambda v: f"{v:.1f}\u00d7")
+
+        # Advanced: Hash & Match Options
+        hash_sec = _cadv("Hash & Match Options")
+
+        self._slider_row(hash_sec, "Aspect Ratio Tolerance %", self.ar_tol_var,
+                         0.0, 20.0, 3.0, 8.0, 5.0, "ar_tolerance_pct", 0.5,
+                         lambda v: f"{v:.1f}%")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dark Image Protection",
+                        variable=self.dark_var).pack(side=tk.LEFT)
+        _info_btn(r, "dark_protection").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Dark Image Threshold (brightness 0–255)",
+                         self.dark_thresh_var,
+                         0.0, 128.0, 30.0, 50.0, 40.0, "dark_threshold", 1.0,
+                         lambda v: f"{int(round(v))}")
+        self._slider_row(hash_sec, "  Dark Tighten Factor", self.dark_factor_var,
+                         0.1, 1.0, 0.4, 0.6, 0.5, "dark_tighten_factor", 0.05,
+                         lambda v: f"{v:.2f}")
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Dual Hash (dHash)",
+                        variable=self.dual_hash_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_dual_hash").pack(side=tk.LEFT, padx=2)
+
+        r = _row(hash_sec)
+        ttk.Checkbutton(r, text="Histogram Intersection Guard",
+                        variable=self.hist_var).pack(side=tk.LEFT)
+        _info_btn(r, "use_histogram").pack(side=tk.LEFT, padx=2)
+        self._slider_row(hash_sec, "  Minimum Histogram Similarity", self.hist_sim_var,
+                         0.0, 1.0, 0.65, 0.80, 0.70, "hist_min_similarity", 0.05,
+                         lambda v: f"{v:.2f}")
+        self._slider_row(hash_sec, "Max Brightness Difference (0–255)",
+                         self.brightness_diff_var,
+                         0.0, 200.0, 40.0, 80.0, 60.0, "brightness_max_diff", 5.0,
+                         lambda v: f"{int(round(v))}")
+
+        # Advanced: Keep Strategy
+        keep_sec = _cadv("Keep Strategy")
+
+        r = _row(keep_sec)
         _label(r, "Prefer to keep:")
         ttk.Radiobutton(r, text="Largest resolution",
                         variable=self.strategy_var, value="pixels").pack(side=tk.LEFT)
@@ -1035,19 +1117,59 @@ class App:
                         variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
         _info_btn(r, "keep_strategy").pack(side=tk.LEFT, padx=2)
 
-        r = _row(km)
-        ttk.Checkbutton(r, text="Dark Image Protection",
-                        variable=self.dark_var).pack(side=tk.LEFT)
-        _info_btn(r, "dark_protection").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="  ", width=3).pack(side=tk.LEFT)
-        ttk.Checkbutton(r, text="Dual Hash (dHash)",
-                        variable=self.dual_hash_var).pack(side=tk.LEFT)
-        _info_btn(r, "use_dual_hash").pack(side=tk.LEFT, padx=2)
+        r = _row(keep_sec)
+        ttk.Checkbutton(r, text="Keep all formats (best per extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
+        _info_btn(r, "keep_all_formats").pack(side=tk.LEFT, padx=2)
 
-        r = _row(km)
-        ttk.Checkbutton(r, text="Histogram Intersection Guard",
-                        variable=self.hist_var).pack(side=tk.LEFT)
-        _info_btn(r, "use_histogram").pack(side=tk.LEFT, padx=2)
+        r = _row(keep_sec)
+        ttk.Checkbutton(r, text="Prefer image with richer EXIF metadata",
+                        variable=self.prefer_meta_var).pack(side=tk.LEFT)
+        _info_btn(r, "prefer_rich_metadata").pack(side=tk.LEFT, padx=2)
+
+        # Advanced: Metadata
+        meta_sec = _cadv("Metadata")
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Collect EXIF metadata",
+                        variable=self.collect_meta_var).pack(side=tk.LEFT)
+        _info_btn(r, "collect_metadata").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Export metadata CSV",
+                        variable=self.export_csv_var).pack(side=tk.LEFT)
+        _info_btn(r, "export_csv").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Extended report (EXIF per image)",
+                        variable=self.ext_report_var).pack(side=tk.LEFT)
+        _info_btn(r, "extended_report").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Sort by filename date",
+                        variable=self.sort_fname_var).pack(side=tk.LEFT)
+        _info_btn(r, "sort_by_filename_date").pack(side=tk.LEFT, padx=2)
+
+        r = _row(meta_sec)
+        ttk.Checkbutton(r, text="Sort by EXIF date",
+                        variable=self.sort_exif_var).pack(side=tk.LEFT)
+        _info_btn(r, "sort_by_exif_date").pack(side=tk.LEFT, padx=2)
+
+        # Advanced: RAW Files
+        raw_sec = _cadv("RAW Files")
+
+        r = _row(raw_sec)
+        self._custom_rawpy_cb = ttk.Checkbutton(
+            r, text="Use rawpy for RAW files (CR2, NEF, ARW…)",
+            variable=self.rawpy_var,
+            state=tk.NORMAL if _RAWPY_AVAILABLE else tk.DISABLED,
+        )
+        self._custom_rawpy_cb.pack(side=tk.LEFT)
+        _info_btn(r, "use_rawpy").pack(side=tk.LEFT, padx=2)
+        if not _RAWPY_AVAILABLE:
+            ttk.Label(r, text="not installed", foreground="#e03").pack(side=tk.LEFT, padx=4)
+            ttk.Button(r, text="Install rawpy",
+                       command=self._install_rawpy).pack(side=tk.LEFT, padx=2)
 
         # ── Actions ───────────────────────────────────────────────────────
         act = _section(body, "Actions")
@@ -1058,6 +1180,28 @@ class App:
         _info_btn(r, "dry_run").pack(side=tk.LEFT, padx=2)
         ttk.Label(r, text="Report only — no files moved. Use 'Accept & Move' after reviewing.",
                   foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        r = _row(act)
+        ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
+        _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
+        ttk.Label(r, text="Create date subfolders in results/ and trash/",
+                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        # Date format
+        r = _row(act)
+        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
+        init_order_idx2, init_sep2 = self._guess_order_sep(self.settings.date_folder_format)
+        self._custom_date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
+                                                   width=14, state="readonly")
+        self._custom_date_order_cb.pack(side=tk.LEFT)
+        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
+        self._custom_date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
+                                                 values=self._DATE_SEPARATORS, width=4, state="readonly")
+        self._custom_date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
+        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
+        ttk.Label(r, textvariable=self._date_fmt_example,
+                  foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
+        self._refresh_date_order_choices(init_sep2, init_order_idx2)
 
         # Estimate
         self._custom_estimate_frame = ttk.Frame(body)
@@ -1082,9 +1226,23 @@ class App:
         c_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(c_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
+        _GR = "#757575"
+
         self._custom_idle_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
         self._custom_idle_frame.pack(fill=tk.X, padx=4)
 
+        # Left side: Reset Defaults + Last Calibration
+        _mat_btn(self._custom_idle_frame, "Reset Defaults",
+                 self._reset_defaults, _GR).pack(side=tk.LEFT, padx=(4, 4))
+
+        self._custom_last_calib_btn = _mat_btn(
+            self._custom_idle_frame, "↩ Last Calibration",
+            self._apply_last_calibration, _ACCENT)
+        self._custom_last_calib_btn.pack(side=tk.LEFT, padx=4)
+        if self.settings.calibrated_threshold == 0:
+            _mat_disable(self._custom_last_calib_btn)
+
+        # Right side: Start + Accept + Review + Browser
         self._custom_scan_btn = _mat_btn(
             self._custom_idle_frame, "▶  Start Custom Scan",
             self._start_custom_scan, _M_SUCCESS)
@@ -1093,19 +1251,19 @@ class App:
         self._custom_accept_btn = _mat_btn(
             self._custom_idle_frame, "✓  Accept & Move",
             self._custom_accept_and_move, _M_SUCCESS)
-        self._custom_accept_btn.pack(side=tk.LEFT, padx=(4, 4))
+        self._custom_accept_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_accept_btn)
 
         self._custom_inapp_btn = _mat_btn(
             self._custom_idle_frame, "Review In-App",
             self._custom_open_inapp_report, _ACCENT)
-        self._custom_inapp_btn.pack(side=tk.LEFT, padx=4)
+        self._custom_inapp_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_inapp_btn)
 
         self._custom_browser_btn = _mat_btn(
             self._custom_idle_frame, "Browser Report",
             self._custom_open_browser_report, "#757575")
-        self._custom_browser_btn.pack(side=tk.LEFT, padx=4)
+        self._custom_browser_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_browser_btn)
 
         self._custom_active_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
@@ -1457,9 +1615,8 @@ class App:
             return
         out = self._custom_out_var.get().strip()
 
-        def _apply_cb(groups: list) -> None:
-            move_groups(groups, Path(out), dry_run=False, settings=self.settings)
-            # Update history applied flag
+        def _apply_cb(_paths_trashed: list) -> None:
+            # File moving is handled inside ReportViewer; update history here.
             if self._scan_history:
                 for e in reversed(self._scan_history):
                     if "[Custom]" in e.get("src_folder", ""):
@@ -1549,6 +1706,19 @@ class App:
                 f.pack_forget()
             self._show_all_btn.configure(text="▼  Show Advanced Settings")
 
+    def _toggle_custom_show_all(self) -> None:
+        self._custom_all_settings_visible = not self._custom_all_settings_visible
+        if self._custom_all_settings_visible:
+            self._custom_show_all_btn.pack_forget()
+            for f in self._custom_advanced_frames:
+                f.pack(fill=tk.X, pady=(0, 6))
+            self._custom_show_all_btn.pack(anchor=tk.W, padx=2, pady=(0, 4))
+            self._custom_show_all_btn.configure(text="▲  Hide Advanced Settings")
+        else:
+            for f in self._custom_advanced_frames:
+                f.pack_forget()
+            self._custom_show_all_btn.configure(text="▼  Show Advanced Settings")
+
     def _on_mode_change(self) -> None:
         self.settings.mode = self._mode_var.get()
         self._apply_mode()
@@ -1581,8 +1751,92 @@ class App:
         ctrl = ttk.Frame(outer)
         ctrl.pack(fill=tk.X)
 
-        scale = ttk.Scale(ctrl, from_=min_v, to=max_v, variable=var, orient=tk.HORIZONTAL)
-        scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+        # ── Canvas slider: green recommended band drawn behind track & thumb ──
+        CANVAS_H = 26
+        PAD = 10
+        try:
+            _cbg = parent.cget("bg")
+        except Exception:
+            _cbg = _BG
+
+        scale_c = tk.Canvas(ctrl, height=CANVAS_H, highlightthickness=0,
+                            bg=_cbg, cursor="hand2")
+        scale_c.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 4))
+
+        def _eff_rec() -> tuple:
+            """Return (rec_lo, rec_hi), updated from calibration when available."""
+            if key == "threshold":
+                cv = getattr(self.settings, "calibrated_threshold", 0)
+                if cv > 0:
+                    return (max(float(min_v), cv - 1.0), min(float(max_v), cv + 1.0))
+            elif key == "preview_ratio":
+                cv = getattr(self.settings, "calibrated_preview_ratio", 0.0)
+                if cv > 0:
+                    return (max(float(min_v), cv - 0.02), min(float(max_v), cv + 0.02))
+            return (rec_lo, rec_hi)
+
+        def _px(v: float, w: int) -> float:
+            return PAD + (v - min_v) / max(float(max_v - min_v), 1e-9) * max(w - 2 * PAD, 1)
+
+        def _draw(*_):
+            scale_c.delete("all")
+            w = scale_c.winfo_width()
+            if w < 20:
+                return
+            cy = CANVAS_H // 2
+
+            rl, rh = _eff_rec()
+
+            # 1 — green recommended band (drawn first → visually behind everything)
+            scale_c.create_rectangle(
+                _px(rl, w), 1, _px(rh, w), CANVAS_H - 1,
+                fill="#c8e6c9", outline="",
+            )
+            # 2 — track line
+            scale_c.create_line(
+                PAD, cy, w - PAD, cy,
+                fill="#bdbdbd", width=2, capstyle=tk.ROUND,
+            )
+            # 3 — thumb knob (drawn last → on top)
+            tx = _px(var.get(), w)
+            r = 7
+            scale_c.create_oval(
+                tx - r, cy - r, tx + r, cy + r,
+                fill="#1565C0", outline="#FFFFFF", width=2,
+            )
+
+        def _on_input(event):
+            try:
+                t_w = max(scale_c.winfo_width() - 2 * PAD, 1)
+                frac = max(0.0, min(1.0, (event.x - PAD) / t_w))
+                raw  = min_v + frac * (max_v - min_v)
+                snap = round(round(raw / step) * step, 10)
+                var.set(max(min_v, min(max_v, snap)))
+            except Exception:
+                pass
+
+        def _snap(*_):
+            try:
+                v = var.get()
+                r = round(round(v / step) * step, 10)
+                if abs(r - v) > step * 0.001:
+                    var.set(r)
+            except Exception:
+                pass
+
+        scale_c.bind("<Button-1>",       _on_input)
+        scale_c.bind("<B1-Motion>",      _on_input)
+        scale_c.bind("<ButtonRelease-1>", _snap)
+        scale_c.bind("<Configure>",       _draw)
+        var.trace_add("write", _draw)
+        scale_c.after(50, _draw)
+
+        # Save draw-fn reference for calibration-triggered redraws
+        if key == "threshold":
+            self._thresh_slider_draw = _draw
+        elif key == "preview_ratio":
+            self._ratio_slider_draw  = _draw
+        # ─────────────────────────────────────────────────────────────────────
 
         disp_var = tk.StringVar()
 
@@ -1605,79 +1859,6 @@ class App:
         ttk.Button(ctrl, text="\u21ba", width=3, command=_reset).pack(side=tk.LEFT, padx=2)
         ttk.Button(ctrl, text="\u24d8", width=2,
                    command=lambda k=key: show_info(self.root, k)).pack(side=tk.LEFT, padx=2)
-
-        def _jump_to_click(event):
-            try:
-                w = scale.winfo_width()
-                PAD = 8
-                track_w = max(w - 2 * PAD, 1)
-                frac = max(0.0, min(1.0, (event.x - PAD) / track_w))
-                raw = min_v + frac * (max_v - min_v)
-                snapped = round(round(raw / step) * step, 10)
-                var.set(max(min_v, min(max_v, snapped)))
-            except Exception:
-                pass
-            return "break"
-
-        scale.bind("<Button-1>", _jump_to_click)
-
-        def _snap_on_release(*_):
-            try:
-                v = var.get()
-                rounded = round(round(v / step) * step, 10)
-                if abs(rounded - v) > step * 0.001:
-                    var.set(rounded)
-            except Exception:
-                pass
-
-        scale.bind("<ButtonRelease-1>", _snap_on_release)
-
-        # Marks canvas
-        canvas_h = 20
-        try:
-            _cbg = parent.cget("bg")
-        except Exception:
-            _cbg = _BG
-        marks_c = tk.Canvas(outer, height=canvas_h, highlightthickness=0, bg=_cbg)
-        marks_c.pack(fill=tk.X, pady=(1, 0))
-
-        def _draw_marks(event=None):
-            marks_c.delete("all")
-            scale.update_idletasks()
-            scale_x = scale.winfo_x()
-            scale_w = scale.winfo_width()
-            if scale_w < 20:
-                return
-            PAD = 8
-            t_start = scale_x + PAD
-            t_end   = scale_x + scale_w - PAD
-            t_w     = t_end - t_start
-            if t_w <= 0:
-                return
-
-            def px(v: float) -> float:
-                return t_start + (v - min_v) / (max_v - min_v) * t_w
-
-            marks_c.create_line(t_start, canvas_h // 2, t_end, canvas_h // 2,
-                                fill="#ddd", width=1)
-            marks_c.create_rectangle(
-                px(rec_lo), canvas_h // 2 - 3,
-                px(rec_hi), canvas_h // 2 + 3,
-                fill="#b3cfff", outline="",
-            )
-            for v, color, is_edge in [
-                (min_v,  "#999", True),
-                (rec_lo, "#1a73e8", False),
-                (rec_hi, "#1a73e8", False),
-                (max_v,  "#999", True),
-            ]:
-                x = px(v)
-                marks_c.create_line(x, 2, x, canvas_h - 4, fill=color, width=1)
-                marks_c.create_text(x, canvas_h - 2, text=fmt(v),
-                                    anchor=tk.S, fill=color, font=("Segoe UI", 7))
-
-        marks_c.bind("<Configure>", _draw_marks)
-        outer.after(80, _draw_marks)
 
         _, detail = INFO_TEXTS.get(key, ("", ""))
         if detail:
@@ -1758,6 +1939,13 @@ class App:
 
     # ── settings persistence ──────────────────────────────────────────────
 
+    def _calib_info_text(self) -> str:
+        t = self.settings.calibrated_threshold
+        r = self.settings.calibrated_preview_ratio
+        if t > 0:
+            return f"Last calibration: threshold = {t}  ·  ratio = {r:.2f}"
+        return "No calibration run yet."
+
     def _apply_last_calibration(self) -> None:
         if self.settings.calibrated_threshold > 0:
             self.thresh_var.set(self.settings.calibrated_threshold)
@@ -1817,6 +2005,11 @@ class App:
         s.custom_main_folder       = self._custom_main_var.get()
         s.custom_check_folder      = self._custom_check_var.get()
         s.custom_out_folder        = self._custom_out_var.get()
+        s.auto_update              = self.auto_update_var.get()
+
+    def _build_about_tab(self) -> None:
+        """Populate the About tab using the about_tab module."""
+        build_about_tab(self._tab_about, self)
 
     def _reset_defaults(self) -> None:
         d = DEFAULTS
@@ -1874,6 +2067,23 @@ class App:
             self.settings.calibrated_preview_ratio = preview_ratio
             _mat_enable(self._calib_apply_btn)
             _mat_enable(self._scan_last_calib_btn)
+            if hasattr(self, "_custom_last_calib_btn"):
+                _mat_enable(self._custom_last_calib_btn)
+            self._calib_info_var.set(self._calib_info_text())
+            try:
+                fg = _M_SUCCESS if self.settings.calibrated_threshold > 0 else "#999"
+                self._calib_info_lbl.configure(foreground=fg)
+            except Exception:
+                pass
+            # Redraw threshold and ratio slider canvases so their green
+            # recommended bands immediately reflect the new calibrated values.
+            for attr in ("_thresh_slider_draw", "_ratio_slider_draw"):
+                fn = getattr(self, attr, None)
+                if callable(fn):
+                    try:
+                        fn()
+                    except Exception:
+                        pass
             self._schedule_settings_save()
 
         CalibrationWindow(
@@ -2481,15 +2691,16 @@ class App:
         out      = self.settings.out_folder.strip()
         log_path = ops_log_path(Path(out)) if out else None
 
-        def _apply_cb(groups: list) -> None:
-            move_groups(groups, Path(out), dry_run=False, settings=self.settings)
-            report = generate_report(
-                self.scan_groups, Path(out),
-                Path(self.settings.src_folder),
-                len(self.scan_records), self.settings,
-            )
-            self.report_path = report
+        def _apply_cb(_paths_trashed: list) -> None:
+            # File moving is handled inside ReportViewer; this callback
+            # handles post-apply tasks: regenerate report and clean state.
             if out:
+                report = generate_report(
+                    self.scan_groups, Path(out),
+                    Path(self.settings.src_folder),
+                    len(self.scan_records), self.settings,
+                )
+                self.report_path = report
                 from scan_state import delete_results
                 delete_results(Path(out))
 

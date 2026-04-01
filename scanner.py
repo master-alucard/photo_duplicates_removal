@@ -635,11 +635,22 @@ def _classify_group(
 
 def _is_preview(member: ImageRecord, best: ImageRecord, ratio_gap: float) -> bool:
     """
-    Return True only if BOTH dimensions of member are strictly smaller than
-    best's dimensions by at least ratio_gap fraction.
+    Return True if member should be treated as a duplicate/preview of best.
+
+    Two cases:
+    1. Same resolution: all members other than best are previews (burst shots /
+       same-quality duplicates). The one with the most pixels (best) is kept;
+       the rest are sent to trash.  ratio_gap is ignored because there is no
+       meaningful size difference to measure.
+    2. Different resolution: member must be strictly smaller in BOTH dimensions
+       by at least ratio_gap fraction (original resize/compress workflow).
     """
     if best.width == 0 or best.height == 0:
         return False
+    # Same-resolution duplicates (burst shots, re-saves, same-quality copies)
+    if member is not best and member.width == best.width and member.height == best.height:
+        return True
+    # Downscaled / compressed copies
     w_threshold = best.width * (1.0 - ratio_gap)
     h_threshold = best.height * (1.0 - ratio_gap)
     return member.width < w_threshold and member.height < h_threshold

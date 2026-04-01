@@ -206,6 +206,15 @@ class ReportViewer(tk.Toplevel):
         self._group_vars: dict[int, tk.BooleanVar] = {}
         self._group_status: dict[int, str] = {}       # "confirmed" | "wrong" | ""
         self._group_border_frames: dict[int, tk.Frame] = {}  # only current page
+        self._group_frames: dict[int, tk.Frame] = {}  # outer frame per group card
+
+        # Applied state — paths successfully moved to trash (populated after apply)
+        self._trashed_paths: set[Path] = set()
+
+        # Manual trash selection (from originals / solo images)
+        self._manual_trash_selected: set[Path] = set()
+        self._manual_trashed_items: list[dict] = []   # {"original": Path, "trash": Path, "rec": Optional[ImageRecord]}
+        self._manual_trash_tile_frames: dict[Path, tk.Frame] = {}  # selectable tile refs
 
         # Per-image: belongs-to-group checkbox  (group_idx, role, img_idx) → BoolVar
         self._image_vars: dict[tuple, tk.BooleanVar] = {}
@@ -216,9 +225,12 @@ class ReportViewer(tk.Toplevel):
         # Manual calibration groups (list of path lists, created by user in the review)
         self._manual_calib_groups: list[list[Path]] = []
         self._manual_group_vars: dict[int, tk.BooleanVar] = {}    # per-manual-group include checkbox
-        self._manual_used_paths: set[Path] = set()                 # paths assigned to manual groups
+        self._manual_used_paths: set[Path] = set()                 # paths assigned to manual groups or unsorted
         self._manual_selected_paths: set[Path] = set()             # currently selected tile paths
         self._manual_tile_frames: dict[Path, tk.Frame] = {}        # path → tile frame
+        self._unsorted_paths: list[Path] = []                      # images removed from manual groups
+        self._solo_visible_paths: list[Path] = []                  # ordered visible solo paths (for shift-select)
+        self._last_solo_click_path: Optional[Path] = None          # anchor for shift-click range
 
         # Pagination
         self._current_page: int = 0
@@ -271,14 +283,20 @@ class ReportViewer(tk.Toplevel):
                        highlightbackground=_M_DIVIDER, highlightthickness=1)
         act.pack(fill=tk.X)
 
-        self._apply_btn = _mat_btn(act, "▶  Apply Selected", self._on_apply, _M_PRIMARY)
+        self._apply_btn = _mat_btn(act, "🗑  Trash Duplicates", self._on_apply, _M_PRIMARY)
         self._apply_btn.pack(side=tk.LEFT, padx=(12, 4))
 
+        # Revert buttons — always created, revealed after first successful apply
+        self._revert_frame = tk.Frame(act, bg=_M_SURFACE)
+        self._revert_selected_btn = _mat_btn(
+            self._revert_frame, "↩  Revert Selected", self._on_revert_selected, "#455A64")
+        self._revert_selected_btn.pack(side=tk.LEFT, padx=4)
+        self._revert_all_btn = _mat_btn(
+            self._revert_frame, "↩  Revert All", self._on_revert_all, "#455A64")
+        self._revert_all_btn.pack(side=tk.LEFT, padx=4)
+        # Show immediately if an ops log already exists (previous session apply)
         if self._ops_log_path and self._ops_log_path.exists():
-            _mat_btn(act, "↩  Revert Selected", self._on_revert_selected,
-                     "#455A64").pack(side=tk.LEFT, padx=4)
-            _mat_btn(act, "↩  Revert All", self._on_revert_all,
-                     "#455A64").pack(side=tk.LEFT, padx=4)
+            self._revert_frame.pack(side=tk.LEFT, padx=(0, 4))
 
         # Calibrate from Review
         tk.Frame(act, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y,
@@ -287,18 +305,20 @@ class ReportViewer(tk.Toplevel):
                  self._show_calibration_info, "#5C6BC0").pack(side=tk.LEFT, padx=4)
         _info_btn(act, "calibrate_review", bg=_M_SURFACE).pack(side=tk.LEFT, padx=0)
 
-        # Manual group creation (only shown when there are solo originals)
-        if self._solo_originals:
-            tk.Frame(act, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y,
-                                                        padx=8, pady=4)
-            self._manual_sel_lbl = tk.Label(
-                act, text="0 selected",
-                font=("Segoe UI", 8), bg=_M_SURFACE, fg=_M_TEXT3,
-            )
-            self._manual_sel_lbl.pack(side=tk.LEFT, padx=(4, 2))
-            _mat_btn(act, "+  Create Manual Group",
-                     self._manual_create_group, _M_MANUAL,
-                     font_size=8).pack(side=tk.LEFT, padx=4)
+        # Manual trash selection — always shown
+        tk.Frame(act, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y,
+                                                    padx=8, pady=4)
+        self._trash_sel_count_lbl = tk.Label(
+            act, text="0 selected",
+            font=("Segoe UI", 8), bg=_M_SURFACE, fg=_M_TEXT3,
+        )
+        self._trash_sel_count_lbl.pack(side=tk.LEFT, padx=(4, 2))
+        self._trash_sel_btn = _mat_btn(
+            act, "🗑  Move to Trash",
+            self._on_trash_selected, _M_ERROR, font_size=8,
+        )
+        self._trash_sel_btn.pack(side=tk.LEFT, padx=4)
+        self._trash_sel_btn.configure(state=tk.DISABLED)
 
         self._status_lbl = tk.Label(act, text="", bg=_M_SURFACE,
                                     fg=_M_TEXT2, font=("Segoe UI", 9))
@@ -308,6 +328,15 @@ class ReportViewer(tk.Toplevel):
         nav = tk.Frame(self, bg=_M_SURFACE,
                        highlightbackground=_M_DIVIDER, highlightthickness=1)
         nav.pack(fill=tk.X)
+        self._nav_bar_frame = nav   # saved for show/hide during inline panels
+
+        # Prev / Next buttons (left side)
+        self._prev_btn = _mat_btn(nav, "◀  Prev", self._prev_page,
+                                  _M_PRIMARY, font_size=8, state=tk.DISABLED)
+        self._prev_btn.pack(side=tk.LEFT, padx=(10, 2), pady=4)
+        self._next_btn = _mat_btn(nav, "Next  ▶", self._next_page,
+                                  _M_PRIMARY, font_size=8)
+        self._next_btn.pack(side=tk.LEFT, padx=(2, 10), pady=4)
 
         self._page_info_var = tk.StringVar(value="")
         tk.Label(nav, textvariable=self._page_info_var,
@@ -328,6 +357,7 @@ class ReportViewer(tk.Toplevel):
         # ── Scrollable canvas ─────────────────────────────────────────────
         container = tk.Frame(self, bg=_M_BG)
         container.pack(fill=tk.BOTH, expand=True)
+        self._canvas_container = container   # saved for show/hide during inline panels
 
         self._canvas = tk.Canvas(container, bg=_M_BG, highlightthickness=0)
         scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL,
@@ -344,10 +374,11 @@ class ReportViewer(tk.Toplevel):
         self._inner_frame.bind("<Configure>", self._on_frame_configure)
         self._canvas.bind("<Configure>", self._on_canvas_configure)
 
-        # Scroll: use bind_all only while mouse is inside the canvas area so
-        # that popups / calibration window don't also scroll this canvas.
-        self._canvas.bind("<Enter>", self._on_canvas_enter)
-        self._canvas.bind("<Leave>", self._on_canvas_leave)
+        # Bind mousewheel directly on the canvas and container — no bind_all so
+        # the global mouse input is never intercepted (fixes sensitivity on Windows).
+        self._canvas.bind("<MouseWheel>", self._on_mousewheel)
+        self._canvas_container.bind("<MouseWheel>", self._on_mousewheel)
+        self._inner_frame.bind("<MouseWheel>", self._on_mousewheel)
 
         # Pre-create ALL checkbox vars so state persists across page changes
         self._init_vars()
@@ -368,12 +399,41 @@ class ReportViewer(tk.Toplevel):
         outer.pack(fill=tk.X)
         self._group_frames[idx] = outer
 
+        # ── Calculate applied state for this group ───────────────────────
+        prev_paths = [rec.path for rec in group.previews]
+        n_prev     = len(prev_paths)
+        n_trashed  = sum(1 for p in prev_paths if p in self._trashed_paths)
+        # Only count previews whose checkbox is checked (the ones selected for trash)
+        n_checked  = sum(
+            1 for img_idx, rec in enumerate(group.previews)
+            if self._image_vars.get((idx, "prev", img_idx), tk.BooleanVar(value=True)).get()
+        )
+        if n_trashed > 0 and n_trashed >= n_checked and n_checked > 0:
+            apply_state = "full"    # all selected previews trashed
+        elif n_trashed > 0:
+            apply_state = "partial" # some selected previews trashed
+        else:
+            apply_state = "none"
+
         # Card with left-colour border
+        # Priority: wrong > confirmed > applied (full) > default blue
+        status = self._group_status.get(idx, "")
+        if status == "wrong":
+            border_color = _M_ERROR
+        elif status == "confirmed":
+            border_color = _M_SUCCESS
+        elif apply_state == "full":
+            border_color = _M_SUCCESS
+        elif apply_state == "partial":
+            border_color = _M_WARNING
+        else:
+            border_color = _M_PRIMARY
+
         card_wrap = tk.Frame(outer, bg=_M_SURFACE,
                              highlightbackground=_M_DIVIDER, highlightthickness=1)
         card_wrap.pack(fill=tk.X)
 
-        left_border = tk.Frame(card_wrap, width=5, bg=_M_PRIMARY)
+        left_border = tk.Frame(card_wrap, width=5, bg=border_color)
         left_border.pack(side=tk.LEFT, fill=tk.Y)
         self._group_border_frames[idx] = left_border
 
@@ -392,7 +452,6 @@ class ReportViewer(tk.Toplevel):
         ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
         n_orig = len(group.originals)
-        n_prev = len(group.previews)
         lbl = (
             f"Group #{idx + 1}  ·  {n_orig} original{'s' if n_orig != 1 else ''}"
             f"  ·  {n_prev} preview{'s' if n_prev != 1 else ''}"
@@ -406,6 +465,20 @@ class ReportViewer(tk.Toplevel):
             tk.Label(
                 head, text=" SERIES — all kept ",
                 font=("Segoe UI", 8, "bold"), bg=_M_PURPLE, fg="#FFFFFF",
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+
+        # Applied state badge
+        if apply_state == "full":
+            tk.Label(
+                head, text=f" ✓ {n_trashed} trashed ",
+                font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS, fg="#FFFFFF",
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+        elif apply_state == "partial":
+            tk.Label(
+                head, text=f" ⚠ {n_trashed}/{n_checked} trashed ",
+                font=("Segoe UI", 8, "bold"), bg=_M_WARNING, fg="#FFFFFF",
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
@@ -433,10 +506,12 @@ class ReportViewer(tk.Toplevel):
         body = tk.Frame(card, bg=_M_SURFACE)
         body.pack(fill=tk.X)
 
+        # Originals column — label changes after apply
         orig_col = tk.Frame(body, bg=_M_SUCCESS_TINT, padx=10, pady=8)
         orig_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        orig_lbl_text = "Originals — kept in place ✓" if apply_state != "none" else "Originals — kept in place"
         tk.Label(
-            orig_col, text="Originals  →  results/",
+            orig_col, text=orig_lbl_text,
             font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS_TINT, fg=_M_SUCCESS,
         ).pack(anchor=tk.W, pady=(0, 6))
 
@@ -445,25 +520,42 @@ class ReportViewer(tk.Toplevel):
         for img_idx, rec in enumerate(group.originals):
             key = (idx, "orig", img_idx)
             v = self._image_vars[key]  # pre-created by _init_vars
-            self._build_image_tile(orig_grid, rec, v, img_idx % 3, img_idx // 3,
-                                   bg=_M_SUCCESS_TINT)
+            tile = self._build_image_tile(orig_grid, rec, v, img_idx % 3, img_idx // 3,
+                                          bg=_M_SUCCESS_TINT)
+            if rec.path not in self._trashed_paths:
+                self._manual_trash_tile_frames[rec.path] = tile
+                self._bind_trash_select(tile, rec.path)
 
         tk.Frame(body, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y)
 
-        prev_col = tk.Frame(body, bg=_M_ERROR_TINT, padx=10, pady=8)
+        # Previews column — label and tile state change after apply
+        prev_col_bg = "#EEEEEE" if apply_state == "full" else _M_ERROR_TINT
+        prev_col = tk.Frame(body, bg=prev_col_bg, padx=10, pady=8)
         prev_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        if apply_state == "full":
+            prev_lbl_text = f"Duplicates trashed ✓  →  trash/"
+            prev_lbl_fg   = _M_SUCCESS
+        elif apply_state == "partial":
+            prev_lbl_text = f"Duplicates — {n_trashed}/{n_checked} trashed  →  trash/"
+            prev_lbl_fg   = _M_WARNING
+        else:
+            prev_lbl_text = "Duplicates to trash  →  trash/"
+            prev_lbl_fg   = _M_ERROR
         tk.Label(
-            prev_col, text="Duplicates to trash  →  trash/",
-            font=("Segoe UI", 8, "bold"), bg=_M_ERROR_TINT, fg=_M_ERROR,
+            prev_col, text=prev_lbl_text,
+            font=("Segoe UI", 8, "bold"), bg=prev_col_bg, fg=prev_lbl_fg,
         ).pack(anchor=tk.W, pady=(0, 6))
 
-        prev_grid = tk.Frame(prev_col, bg=_M_ERROR_TINT)
+        prev_grid = tk.Frame(prev_col, bg=prev_col_bg)
         prev_grid.pack(fill=tk.X)
         for img_idx, rec in enumerate(group.previews):
             key = (idx, "prev", img_idx)
             v = self._image_vars[key]  # pre-created by _init_vars
+            trashed = rec.path in self._trashed_paths
+            tile_bg = "#E0E0E0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
-                                   bg=_M_ERROR_TINT, max_thumb=120)
+                                   bg=tile_bg, max_thumb=120, trashed=trashed)
 
     # ── solo & broken sections ────────────────────────────────────────────────
 
@@ -508,22 +600,28 @@ class ReportViewer(tk.Toplevel):
 
         grid_frame = tk.Frame(card, bg=_M_SOLO_TINT, padx=10, pady=8)
         grid_frame.pack(fill=tk.X)
-        # Rebuild tile frame dict so selection clicks work from this section
+        # Rebuild tile frame dict and ordered path list for shift-click selection
         self._manual_tile_frames = {}
+        self._solo_visible_paths = []
         col = 0
         row = 0
         for img_idx, rec in enumerate(self._solo_originals):
             if rec.path in self._manual_used_paths:
                 continue
+            self._solo_visible_paths.append(rec.path)
             v = self._solo_vars[img_idx]
             tile = self._build_image_tile(grid_frame, rec, v, col, row, bg=_M_SOLO_TINT)
             self._manual_tile_frames[rec.path] = tile
-            # Bind click on tile and non-interactive children for manual group selection
-            self._bind_tile_select(tile, rec.path)
+            if rec.path not in [item["original"] for item in self._manual_trashed_items]:
+                self._manual_trash_tile_frames[rec.path] = tile
+                self._bind_trash_select(tile, rec.path)
             col += 1
             if col >= 5:
                 col = 0
                 row += 1
+        # Reset anchor if it left the visible set
+        if self._last_solo_click_path not in self._solo_visible_paths:
+            self._last_solo_click_path = None
 
     def _build_broken_section(self) -> None:
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
@@ -567,57 +665,77 @@ class ReportViewer(tk.Toplevel):
         col: int, row: int,
         bg: str,
         max_thumb: int = _THUMB_SIZE,
-    ) -> None:
+        trashed: bool = False,
+    ) -> tk.Frame:
         tile = tk.Frame(parent, bg=bg, padx=4, pady=4)
         tile.grid(row=row, column=col, padx=4, pady=4, sticky=tk.NW)
 
-        # Thumbnail
+        # Thumbnail (grayscale when trashed)
         thumb_lbl = tk.Label(tile, bg=bg)
         thumb_lbl.pack()
-        self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb)
+        self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed)
 
-        # Checkbox: "part of this group" (unchecked = different image)
-        cb_frame = tk.Frame(tile, bg=bg)
-        cb_frame.pack(fill=tk.X)
+        if trashed:
+            # ── Trashed tile: show badge, gray out, disable checkbox ─────
+            tk.Label(
+                tile, text="🗑  Trashed",
+                font=("Segoe UI", 8, "bold"), bg=bg, fg="#757575",
+            ).pack(pady=(2, 0))
 
-        cb = tk.Checkbutton(
-            cb_frame, variable=var,
-            bg=bg, activebackground=bg,
-            command=lambda lbl=None, v=var: self._update_tile_label(v, lbl),
-        )
-        cb.pack(side=tk.LEFT)
+            fname = rec.path.name
+            fname_short = fname[:15] + "…" if len(fname) > 16 else fname
+            tk.Label(
+                tile, text=fname_short,
+                font=("Segoe UI", 7), bg=bg, fg="#9E9E9E",
+                wraplength=max_thumb,
+            ).pack()
+            tk.Label(
+                tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                font=("Segoe UI", 7), bg=bg, fg="#BDBDBD",
+            ).pack()
+        else:
+            # ── Normal tile ───────────────────────────────────────────────
+            cb_frame = tk.Frame(tile, bg=bg)
+            cb_frame.pack(fill=tk.X)
 
-        fname = rec.path.name
-        fname_short = fname[:15] + "…" if len(fname) > 16 else fname
-        tk.Label(
-            cb_frame, text=fname_short,
-            font=("Segoe UI", 7), bg=bg, fg=_M_TEXT1,
-            wraplength=max_thumb,
-        ).pack(side=tk.LEFT)
+            cb = tk.Checkbutton(
+                cb_frame, variable=var,
+                bg=bg, activebackground=bg,
+                command=lambda lbl=None, v=var: self._update_tile_label(v, lbl),
+            )
+            cb.pack(side=tk.LEFT)
 
-        _info_btn(cb_frame, "different_image", bg=bg).pack(side=tk.LEFT, padx=0)
+            fname = rec.path.name
+            fname_short = fname[:15] + "…" if len(fname) > 16 else fname
+            tk.Label(
+                cb_frame, text=fname_short,
+                font=("Segoe UI", 7), bg=bg, fg=_M_TEXT1,
+                wraplength=max_thumb,
+            ).pack(side=tk.LEFT)
 
-        tk.Label(
-            tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-            font=("Segoe UI", 7), bg=bg, fg=_M_TEXT2,
-        ).pack()
-        tk.Label(
-            tile, text=rec.date_label(),
-            font=("Segoe UI", 7), bg=bg, fg=_M_TEXT3,
-        ).pack()
+            _info_btn(cb_frame, "different_image", bg=bg).pack(side=tk.LEFT, padx=0)
 
-        # "Different image" badge (shown when unchecked)
-        diff_badge = tk.Label(
-            tile, text="≠ different image",
-            font=("Segoe UI", 7, "italic"), bg=bg, fg=_M_WARNING,
-        )
-        # Patch checkbox to also toggle badge
-        def _toggle_badge(*_):
-            if var.get():
-                diff_badge.pack_forget()
-            else:
-                diff_badge.pack(pady=(0, 2))
-        var.trace_add("write", _toggle_badge)
+            tk.Label(
+                tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                font=("Segoe UI", 7), bg=bg, fg=_M_TEXT2,
+            ).pack()
+            tk.Label(
+                tile, text=rec.date_label(),
+                font=("Segoe UI", 7), bg=bg, fg=_M_TEXT3,
+            ).pack()
+
+            # "Different image" badge (shown when unchecked)
+            diff_badge = tk.Label(
+                tile, text="≠ different image",
+                font=("Segoe UI", 7, "italic"), bg=bg, fg=_M_WARNING,
+            )
+            def _toggle_badge(*_):
+                if var.get():
+                    diff_badge.pack_forget()
+                else:
+                    diff_badge.pack(pady=(0, 2))
+            var.trace_add("write", _toggle_badge)
+
         return tile
 
     def _update_tile_label(self, var: tk.BooleanVar, lbl) -> None:
@@ -626,11 +744,12 @@ class ReportViewer(tk.Toplevel):
     def _bind_tile_select(self, widget: tk.Widget, path: Path) -> None:
         """Recursively bind <Button-1> for manual-group selection, skipping Checkbutton."""
         if not isinstance(widget, tk.Checkbutton):
-            widget.bind("<Button-1>", lambda e, p=path: self._manual_toggle(p))
+            widget.bind("<Button-1>", lambda e, p=path: self._manual_toggle_shift(e, p))
         for child in widget.winfo_children():
             self._bind_tile_select(child, path)
 
-    def _load_thumbnail_async(self, path: Path, label: tk.Label, max_px: int) -> None:
+    def _load_thumbnail_async(self, path: Path, label: tk.Label, max_px: int,
+                              grayscale: bool = False) -> None:
         def _load() -> None:
             if not _PIL_AVAILABLE:
                 return
@@ -638,7 +757,9 @@ class ReportViewer(tk.Toplevel):
                 try:
                     with PILImage.open(path) as img:
                         img.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                        if img.mode not in ("RGB", "RGBA"):
+                        if grayscale:
+                            img = img.convert("L").convert("RGB")
+                        elif img.mode not in ("RGB", "RGBA"):
                             img = img.convert("RGB")
                         photo = ImageTk.PhotoImage(img)
                         self._photo_refs.append(photo)
@@ -697,40 +818,209 @@ class ReportViewer(tk.Toplevel):
     # ── apply / revert ────────────────────────────────────────────────────────
 
     def _on_apply(self) -> None:
-        if self._on_apply_cb is None:
-            messagebox.showinfo("Apply", "No apply callback configured.", parent=self)
+        """Collect checked-preview paths and move them to trash. Originals stay."""
+        # Collect only previews from checked groups whose per-image checkbox is also checked
+        paths_to_trash: list[Path] = []
+        for idx, g_var in self._group_vars.items():
+            if not g_var.get() or idx >= len(self._groups):
+                continue
+            grp = self._groups[idx]
+            for img_idx, rec in enumerate(grp.previews):
+                key = (idx, "prev", img_idx)
+                if self._image_vars.get(key, tk.BooleanVar(value=True)).get():
+                    paths_to_trash.append(rec.path)
+
+        if not paths_to_trash:
+            self._show_results_panel(0, 0, [],
+                note="No duplicates selected for trashing.\n"
+                     "Check at least one group to move its duplicates to trash.")
             return
-        selected = [
-            self._groups[idx].group_id
-            for idx, var in self._group_vars.items() if var.get()
-        ]
-        if not selected:
-            messagebox.showwarning("Apply", "No groups selected.", parent=self)
-            return
-        groups_to_apply = [g for g in self._groups if g.group_id in selected]
-        self._apply_btn.config(state=tk.DISABLED)
-        self._status_lbl.config(text="Applying…")
+
+        # Determine trash directory
+        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        if out:
+            trash_dir = Path(out) / "trash"
+        else:
+            trash_dir = paths_to_trash[0].parent / "trash"
+
+        dry = bool(self._settings.dry_run) if self._settings else False
+
+        self._apply_btn.configure(state=tk.DISABLED)
+        self._status_lbl.configure(text="Moving to trash…")
         self.update_idletasks()
 
         def _do() -> None:
+            from mover import trash_files
             try:
-                self._on_apply_cb(groups_to_apply)
-                self.after(0, lambda: self._status_lbl.config(
-                    text=f"Applied {len(groups_to_apply)} groups."))
+                moved, errors = trash_files(paths_to_trash, trash_dir, dry_run=dry)
             except Exception as exc:
-                self.after(0, lambda: messagebox.showerror("Error", str(exc), parent=self))
-            finally:
-                self.after(0, lambda: self._apply_btn.config(state=tk.NORMAL))
+                moved, errors = 0, [str(exc)]
+            kept = len(paths_to_trash) - moved - len(errors)
+            # Record which paths were actually moved (or dry-run "moved")
+            error_names = {e.split(":")[0] for e in errors}
+            newly_trashed = {
+                p for p in paths_to_trash
+                if p.name not in error_names
+            }
+            # Notify main.py (e.g. for report generation / history update)
+            if self._on_apply_cb:
+                try:
+                    self._on_apply_cb(paths_to_trash)
+                except Exception:
+                    pass
+            self.after(0, lambda t=newly_trashed: self._on_apply_done(
+                t, moved, kept, errors, trash_dir, dry))
 
         threading.Thread(target=_do, daemon=True).start()
+
+    def _on_apply_done(
+        self,
+        newly_trashed: set,
+        moved: int,
+        kept: int,
+        errors: list,
+        trash_dir: Optional[Path],
+        dry: bool,
+    ) -> None:
+        """Store applied state, re-render the review with status badges, then show results."""
+        self._trashed_paths.update(newly_trashed)
+        # Update ops log path so revert works against the log just written
+        if trash_dir and not dry and moved > 0:
+            from mover import ops_log_path as _ops_log_path_fn
+            self._ops_log_path = _ops_log_path_fn(trash_dir.parent)
+            self._show_revert_buttons()
+        # Re-render so cards immediately reflect trashed state
+        self._render_page(self._current_page)
+        self._show_results_panel(moved, kept, errors, trash_dir=trash_dir, dry=dry)
+
+    def _show_revert_buttons(self) -> None:
+        """Reveal the revert buttons in the action bar (idempotent)."""
+        if hasattr(self, "_revert_frame") and not self._revert_frame.winfo_ismapped():
+            self._revert_frame.pack(side=tk.LEFT, padx=(0, 4))
+
+    def _show_results_panel(
+        self,
+        moved: int,
+        kept: int,
+        errors: list,
+        trash_dir: Optional[Path] = None,
+        dry: bool = False,
+        note: str = "",
+    ) -> None:
+        """Hide the canvas/nav and show an inline results card with a Back button."""
+        # Re-enable apply button for when the user returns
+        self._apply_btn.configure(state=tk.NORMAL)
+        self._status_lbl.configure(text="")
+
+        # Hide scrollable area
+        self._nav_bar_frame.pack_forget()
+        self._canvas_container.pack_forget()
+
+        self._results_frame = tk.Frame(self, bg=_M_BG)
+        self._results_frame.pack(fill=tk.BOTH, expand=True)
+
+        # ── Back bar ──────────────────────────────────────────────────────
+        back_bar = tk.Frame(self._results_frame, bg=_M_SURFACE,
+                            highlightbackground=_M_DIVIDER, highlightthickness=1)
+        back_bar.pack(fill=tk.X)
+        _mat_btn(back_bar, "◀  Back to Review", self._restore_review,
+                 "#455A64").pack(side=tk.LEFT, padx=10, pady=6)
+
+        # Revert buttons — show on results page if ops log is available
+        if self._ops_log_path and self._ops_log_path.exists():
+            tk.Frame(back_bar, width=1, bg=_M_DIVIDER).pack(
+                side=tk.LEFT, fill=tk.Y, padx=8, pady=4)
+            _mat_btn(back_bar, "↩  Revert Selected", self._on_revert_selected,
+                     "#455A64").pack(side=tk.LEFT, padx=4, pady=6)
+            _mat_btn(back_bar, "↩  Revert All", self._on_revert_all,
+                     "#455A64").pack(side=tk.LEFT, padx=4, pady=6)
+
+        # ── Results card ──────────────────────────────────────────────────
+        scroll_host = tk.Canvas(self._results_frame, bg=_M_BG, highlightthickness=0)
+        scroll_host.pack(fill=tk.BOTH, expand=True)
+        inner = tk.Frame(scroll_host, bg=_M_BG)
+        scroll_host.create_window((0, 0), window=inner, anchor=tk.NW)
+        inner.bind("<Configure>",
+                   lambda _: scroll_host.configure(scrollregion=scroll_host.bbox("all")))
+
+        card_wrap = tk.Frame(inner, bg=_M_BG)
+        card_wrap.pack(fill=tk.X, padx=30, pady=24)
+
+        card = tk.Frame(card_wrap, bg=_M_SURFACE,
+                        highlightbackground=_M_DIVIDER, highlightthickness=1,
+                        padx=24, pady=20)
+        card.pack(fill=tk.X)
+
+        if note:
+            title = note
+            title_color = _M_TEXT2
+        elif dry:
+            title = "Dry Run — no files were moved"
+            title_color = _M_WARNING
+        elif errors and moved == 0:
+            title = "Failed — no files moved"
+            title_color = _M_ERROR
+        else:
+            title = "Done — duplicates moved to trash"
+            title_color = _M_SUCCESS
+
+        tk.Label(card, text=title,
+                 font=("Segoe UI", 13, "bold"),
+                 bg=_M_SURFACE, fg=title_color).pack(anchor=tk.W, pady=(0, 12))
+        tk.Frame(card, height=1, bg=_M_DIVIDER).pack(fill=tk.X, pady=(0, 14))
+
+        def _stat_row(label: str, value: str, fg: str = _M_TEXT1) -> None:
+            row = tk.Frame(card, bg=_M_SURFACE)
+            row.pack(fill=tk.X, pady=3)
+            tk.Label(row, text=label, font=("Segoe UI", 9),
+                     bg=_M_SURFACE, fg=_M_TEXT2, width=26, anchor=tk.W).pack(side=tk.LEFT)
+            tk.Label(row, text=value, font=("Segoe UI", 9, "bold"),
+                     bg=_M_SURFACE, fg=fg).pack(side=tk.LEFT)
+
+        action = "Would move" if dry else "Moved to trash"
+        _stat_row(f"{action}:", f"{moved} file{'s' if moved != 1 else ''}",
+                  fg=_M_SUCCESS if moved > 0 else _M_TEXT2)
+        if trash_dir:
+            _stat_row("Trash folder:", str(trash_dir), fg=_M_TEXT2)
+        if kept > 0:
+            _stat_row("Kept (unchecked):", f"{kept} file{'s' if kept != 1 else ''}")
+        if errors:
+            _stat_row("Errors:", f"{len(errors)}", fg=_M_ERROR)
+            tk.Frame(card, height=1, bg=_M_DIVIDER).pack(fill=tk.X, pady=(10, 6))
+            for msg in errors[:15]:
+                tk.Label(card, text=f"  • {msg}",
+                         font=("Segoe UI", 8), bg=_M_SURFACE, fg=_M_ERROR,
+                         anchor=tk.W).pack(fill=tk.X)
+
+    def _restore_review(self) -> None:
+        """Destroy any inline panel and restore the scrollable review canvas."""
+        for attr in ("_results_frame", "_calib_inline_frame"):
+            frame = getattr(self, attr, None)
+            if frame and frame.winfo_exists():
+                frame.destroy()
+        self._nav_bar_frame.pack(fill=tk.X)
+        self._canvas_container.pack(fill=tk.BOTH, expand=True)
+        self._render_page(self._current_page)
 
     def _on_revert_selected(self) -> None:
         if not self._ops_log_path:
             return
-        selected = [
-            self._groups[idx].group_id
-            for idx, var in self._group_vars.items() if var.get()
-        ]
+        # If the results panel is open, "selected" means all trashed groups from this apply
+        results_open = (
+            hasattr(self, "_results_frame") and self._results_frame.winfo_exists()
+        )
+        if results_open:
+            # Revert groups that had any paths trashed in this session
+            selected = [
+                grp.group_id
+                for grp in self._groups
+                if any(rec.path in self._trashed_paths for rec in grp.previews)
+            ]
+        else:
+            selected = [
+                self._groups[idx].group_id
+                for idx, var in self._group_vars.items() if var.get()
+            ]
         if not selected:
             messagebox.showwarning("Revert", "No groups selected.", parent=self)
             return
@@ -752,61 +1042,40 @@ class ReportViewer(tk.Toplevel):
         def _worker() -> None:
             from mover import revert_operations
             reverted, errors = revert_operations(self._ops_log_path, group_ids)
-            msg = f"Reverted {reverted} files."
+            msg = f"Reverted {reverted} file{'s' if reverted != 1 else ''}."
             if errors:
-                msg += f" ({errors} errors)"
-            self.after(0, lambda: self._status_lbl.config(text=msg))
+                msg += f" ({errors} error{'s' if errors != 1 else ''})"
+            self.after(0, lambda: self._on_revert_done(msg, group_ids))
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_revert_done(self, msg: str, group_ids) -> None:
+        """After revert: clear trashed state for the reverted paths and re-render."""
+        if group_ids is None:
+            # Revert all — clear everything
+            self._trashed_paths.clear()
+        else:
+            # Revert selected groups — remove their preview paths from trashed set
+            reverted_ids = set(group_ids)
+            for idx, grp in enumerate(self._groups):
+                if getattr(grp, "group_id", None) in reverted_ids:
+                    for rec in grp.previews:
+                        self._trashed_paths.discard(rec.path)
+        self._status_lbl.config(text=msg)
+        # If we're on the results panel, go back to review; otherwise just re-render
+        results_open = (
+            hasattr(self, "_results_frame")
+            and self._results_frame.winfo_exists()
+        )
+        if results_open:
+            self._restore_review()
+        else:
+            self._render_page(self._current_page)
 
     # ── calibrate from review ─────────────────────────────────────────────────
 
     def _show_calibration_info(self) -> None:
-        """Show instruction popup then open calibration with data from review."""
-        win = tk.Toplevel(self)
-        win.title("Calibrate from Review")
-        win.geometry("540x380")
-        win.grab_set()
-        win.resizable(False, False)
-        win.configure(bg=_M_SURFACE)
-
-        tk.Label(
-            win, text="Calibrate from your review",
-            font=("Segoe UI", 13, "bold"), bg=_M_SURFACE, fg=_M_TEXT1,
-        ).pack(anchor=tk.W, padx=20, pady=(18, 6))
-
-        tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=20, pady=(0, 10))
-
-        instructions = (
-            "Before clicking 'Start Calibration', make sure your review is correct:\n\n"
-            "  ✓  Groups with checkbox CHECKED  →  treated as confirmed duplicates\n"
-            "        (used as positive examples in calibration)\n\n"
-            "  ✗  Groups with checkbox UNCHECKED  →  treated as wrong matches\n"
-            "        (used as negative examples — photos that should NOT be grouped)\n\n"
-            "  ✗  Images unchecked within a group  →  treated as unrelated singles\n"
-            "        (will not be placed in any calibration group)\n\n"
-            "You can also use the '✓ Same Image' and '✗ Wrong Group' buttons on each\n"
-            "card to quickly set group status before running calibration.\n\n"
-            "Calibration will run 3 rounds and find the best threshold + ratio for\n"
-            "your photo library based on your manual corrections."
-        )
-        txt = tk.Text(win, wrap=tk.WORD, padx=14, pady=6, relief=tk.FLAT,
-                      bg=_M_SURFACE, fg=_M_TEXT2, font=("Segoe UI", 9), height=14)
-        txt.insert("1.0", instructions)
-        txt.config(state=tk.DISABLED)
-        txt.pack(fill=tk.BOTH, expand=True, padx=8)
-
-        btn_row = tk.Frame(win, bg=_M_SURFACE)
-        btn_row.pack(fill=tk.X, padx=16, pady=12)
-        _mat_btn(btn_row, "Cancel", win.destroy, "#757575").pack(side=tk.RIGHT, padx=4)
-        _mat_btn(
-            btn_row, "Start Calibration ▶",
-            lambda: (win.destroy(), self._run_review_calibration()),
-            _M_PRIMARY,
-        ).pack(side=tk.RIGHT, padx=4)
-
-    def _run_review_calibration(self) -> None:
-        """Build calibration data from review choices and open calibration window."""
+        """Build calibration data and show the calibration panel inline."""
         has_checked   = any(v.get() for v in self._group_vars.values())
         has_unchecked = any(not v.get() for v in self._group_vars.values())
         has_manual    = any(v.get() for v in self._manual_group_vars.values())
@@ -848,7 +1117,6 @@ class ReportViewer(tk.Toplevel):
             all_recs = grp.originals + grp.previews
 
             if g_var.get():
-                # Confirmed group: images with checkbox True → calibration group
                 confirmed_paths: list[Path] = []
                 skipped_paths:   list[Path] = []
                 for img_idx, rec in enumerate(grp.originals):
@@ -871,26 +1139,14 @@ class ReportViewer(tk.Toplevel):
                         _link(p, gdir / p.name)
                 elif len(confirmed_paths) == 1:
                     _link(confirmed_paths[0], singles_dir / confirmed_paths[0].name)
-
-                # Unchecked images within the group → singles
                 for p in skipped_paths:
                     _link(p, singles_dir / p.name)
             else:
-                # Wrong-match group: all images → negatives
                 ndir = neg_dir / f"n{idx:04d}"
                 ndir.mkdir(exist_ok=True)
                 for rec in all_recs:
                     _link(rec.path, ndir / rec.path.name)
 
-        if errors:
-            messagebox.showwarning(
-                "Some files skipped",
-                f"{len(errors)} file(s) could not be linked/copied:\n\n"
-                + "\n".join(errors[:10]),
-                parent=self,
-            )
-
-        # Add manually created calibration groups (only if their checkbox is checked)
         for gi, paths in enumerate(self._manual_calib_groups):
             if not self._manual_group_vars.get(gi, tk.BooleanVar(value=True)).get():
                 continue
@@ -901,12 +1157,18 @@ class ReportViewer(tk.Toplevel):
             for p in paths:
                 _link(p, gdir / p.name)
 
-        # Solo originals checked in the solo section → include as calibration singles
         for img_idx, rec in enumerate(self._solo_originals):
             if self._solo_vars.get(img_idx, tk.BooleanVar(value=False)).get():
                 _link(rec.path, singles_dir / rec.path.name)
 
-        # Check if we have anything useful
+        if errors:
+            messagebox.showwarning(
+                "Some files skipped",
+                f"{len(errors)} file(s) could not be linked/copied:\n\n"
+                + "\n".join(errors[:10]),
+                parent=self,
+            )
+
         n_groups = sum(1 for d in groups_dir.iterdir() if d.is_dir())
         n_negs   = sum(1 for d in neg_dir.iterdir() if d.is_dir())
         if n_groups == 0 and n_negs == 0:
@@ -919,21 +1181,42 @@ class ReportViewer(tk.Toplevel):
             shutil.rmtree(base, ignore_errors=True)
             return
 
-        # Open calibration window with the temp folder
-        from calibration_window import CalibrationWindow
+        # Build inline calibration panel
+        from calibration_window import CalibrationPanel
         from config import Settings
 
         calib_settings = copy.deepcopy(self._settings) if self._settings else Settings()
         calib_settings.calib_folder = str(base)
 
         def _apply_cb(threshold: int, preview_ratio: float) -> None:
-            pass  # caller (main.py) handles applying via folder_cb/calibration_applied_cb
+            pass  # main.py handles settings persistence via calibration_applied_cb
 
-        CalibrationWindow(
-            self,
+        # Hide scrollable area, show inline panel
+        self._nav_bar_frame.pack_forget()
+        self._canvas_container.pack_forget()
+
+        self._calib_inline_frame = tk.Frame(self, bg=_M_BG)
+        self._calib_inline_frame.pack(fill=tk.BOTH, expand=True)
+
+        # Back bar
+        back_bar = tk.Frame(self._calib_inline_frame, bg=_M_SURFACE,
+                            highlightbackground=_M_DIVIDER, highlightthickness=1)
+        back_bar.pack(fill=tk.X)
+        _mat_btn(back_bar, "◀  Back to Review", self._restore_review,
+                 "#455A64").pack(side=tk.LEFT, padx=10, pady=6)
+        tk.Label(back_bar,
+                 text=f"Dataset: {n_groups} group folder{'s' if n_groups != 1 else ''}",
+                 font=("Segoe UI", 8), bg=_M_SURFACE, fg=_M_TEXT2,
+                 ).pack(side=tk.LEFT, padx=12)
+
+        # Embed calibration panel (starts on "Run" tab since data is pre-loaded)
+        panel = CalibrationPanel(
+            self._calib_inline_frame,
             calib_settings,
             apply_cb=_apply_cb,
+            start_on_run_tab=True,
         )
+        panel.pack(fill=tk.BOTH, expand=True)
 
     # ── manual calibration groups section ────────────────────────────────────
 
@@ -997,19 +1280,31 @@ class ReportViewer(tk.Toplevel):
             rec = self._path_to_record(path)
             if rec is not None:
                 dummy_var = tk.BooleanVar(value=True)
-                self._build_image_tile(img_frame, rec, dummy_var, i % COLS, i // COLS,
-                                       bg=_M_MANUAL_TINT)
+                tile = self._build_image_tile(img_frame, rec, dummy_var, i % COLS, i // COLS,
+                                              bg=_M_MANUAL_TINT)
             else:
-                cell = tk.Frame(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
-                cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
-                lbl = tk.Label(cell, bg=_M_MANUAL_TINT)
+                tile = tk.Frame(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
+                tile.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
+                lbl = tk.Label(tile, bg=_M_MANUAL_TINT)
                 lbl.pack()
                 self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
                 tk.Label(
-                    cell,
+                    tile,
                     text=(path.name[:15] + "…" if len(path.name) > 16 else path.name),
                     font=("Segoe UI", 7), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
                 ).pack()
+            # Per-image remove button → sends image to Unsorted
+            _mat_btn(tile, "↩ Unsorted",
+                     lambda p=path, gi=mg_idx: self._remove_image_from_manual_group(gi, p),
+                     bg=_M_WARNING_TINT, fg=_M_WARNING, font_size=7).pack(pady=(2, 0))
+
+    def _update_manual_sel_count(self) -> None:
+        n = len(self._manual_selected_paths)
+        if hasattr(self, "_manual_sel_lbl") and self._manual_sel_lbl.winfo_exists():
+            self._manual_sel_lbl.configure(
+                text=f"{n} selected",
+                fg=_M_MANUAL if n > 0 else _M_TEXT3,
+            )
 
     def _manual_toggle(self, path: Path) -> None:
         cell = self._manual_tile_frames.get(path)
@@ -1021,12 +1316,112 @@ class ReportViewer(tk.Toplevel):
         else:
             self._manual_selected_paths.add(path)
             cell.configure(highlightbackground=_M_MANUAL, highlightthickness=3)
-        n = len(self._manual_selected_paths)
-        if hasattr(self, "_manual_sel_lbl") and self._manual_sel_lbl.winfo_exists():
-            self._manual_sel_lbl.configure(
-                text=f"{n} selected",
-                fg=_M_MANUAL if n > 0 else _M_TEXT3,
-            )
+        self._update_manual_sel_count()
+
+    def _manual_toggle_shift(self, event: tk.Event, path: Path) -> None:
+        """Handle click with optional Shift for range selection in the solo section."""
+        shift_held = bool(event.state & 0x0001)
+        if shift_held and self._last_solo_click_path is not None and self._solo_visible_paths:
+            try:
+                i1 = self._solo_visible_paths.index(self._last_solo_click_path)
+                i2 = self._solo_visible_paths.index(path)
+            except ValueError:
+                # Fallback to normal toggle if path not in visible list
+                self._manual_toggle(path)
+                self._last_solo_click_path = path
+                return
+            lo, hi = min(i1, i2), max(i1, i2)
+            for p in self._solo_visible_paths[lo:hi + 1]:
+                if p not in self._manual_selected_paths:
+                    self._manual_selected_paths.add(p)
+                    cell = self._manual_tile_frames.get(p)
+                    if cell and cell.winfo_exists():
+                        cell.configure(highlightbackground=_M_MANUAL, highlightthickness=3)
+            self._update_manual_sel_count()
+        else:
+            self._manual_toggle(path)
+            self._last_solo_click_path = path
+
+    def _remove_image_from_manual_group(self, mg_idx: int, path: Path) -> None:
+        """Remove a single image from a manual group; it goes to the Unsorted pool."""
+        if mg_idx >= len(self._manual_calib_groups):
+            return
+        group = self._manual_calib_groups[mg_idx]
+        if path not in group:
+            return
+        group.remove(path)
+        self._unsorted_paths.append(path)
+        # path stays in _manual_used_paths (now it's in unsorted, not solo)
+        if len(group) < 2:
+            # Group too small — dissolve it, send remaining to unsorted too
+            for p in list(group):
+                self._unsorted_paths.append(p)
+            self._manual_calib_groups.pop(mg_idx)
+        self._reinit_manual_vars()
+        self._render_page(self._current_page)
+
+    def _return_unsorted_to_solo(self, path: Path) -> None:
+        """Return an unsorted image back to the solo section."""
+        if path in self._unsorted_paths:
+            self._unsorted_paths.remove(path)
+            self._manual_used_paths.discard(path)
+            self._render_page(self._current_page)
+
+    def _build_unsorted_section(self) -> None:
+        """Card showing images removed from manual groups — staging area before re-grouping."""
+        if not self._unsorted_paths:
+            return
+
+        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer.pack(fill=tk.X)
+
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
+                             highlightbackground=_M_WARNING, highlightthickness=1)
+        card_wrap.pack(fill=tk.X)
+
+        tk.Frame(card_wrap, width=5, bg=_M_WARNING).pack(side=tk.LEFT, fill=tk.Y)
+        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        head = tk.Frame(card, bg=_M_WARNING_TINT, pady=0)
+        head.pack(fill=tk.X)
+        tk.Label(
+            head,
+            text=f"Unsorted  ({len(self._unsorted_paths)} image{'s' if len(self._unsorted_paths) != 1 else ''})",
+            font=("Segoe UI", 9, "bold"), bg=_M_WARNING_TINT, fg=_M_WARNING,
+        ).pack(side=tk.LEFT, padx=12, pady=8)
+        tk.Label(
+            head, text="Images removed from manual groups — return to Unique images to re-group",
+            font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT2,
+        ).pack(side=tk.LEFT, padx=4)
+
+        grid_frame = tk.Frame(card, bg=_M_WARNING_TINT, padx=10, pady=8)
+        grid_frame.pack(fill=tk.X)
+
+        COLS = 5
+        for i, path in enumerate(self._unsorted_paths):
+            rec = self._path_to_record(path)
+            cell = tk.Frame(grid_frame, bg=_M_WARNING_TINT, padx=4, pady=4)
+            cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
+
+            lbl = tk.Label(cell, bg=_M_WARNING_TINT)
+            lbl.pack()
+            self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
+
+            if rec is not None:
+                tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                         font=("Segoe UI", 7), bg=_M_WARNING_TINT, fg=_M_TEXT2).pack()
+
+            fname = path.name
+            tk.Label(
+                cell,
+                text=(fname[:14] + "…" if len(fname) > 15 else fname),
+                font=("Segoe UI", 7), bg=_M_WARNING_TINT, fg=_M_TEXT1,
+            ).pack()
+
+            _mat_btn(cell, "↩ Return to Unique",
+                     lambda p=path: self._return_unsorted_to_solo(p),
+                     bg=_M_SOLO_TINT, fg=_M_SOLO_BORDER, font_size=7).pack(pady=(3, 0))
 
     def _manual_create_group(self) -> None:
         if len(self._manual_selected_paths) < 2:
@@ -1044,13 +1439,207 @@ class ReportViewer(tk.Toplevel):
     def _manual_remove_group(self, idx: int) -> None:
         if 0 <= idx < len(self._manual_calib_groups):
             paths = self._manual_calib_groups.pop(idx)
-            # Restore paths to solo section if not used in any remaining manual group
-            still_used = {p for g in self._manual_calib_groups for p in g}
+            # Send all images in the removed group to Unsorted
+            still_in_other_groups = {p for g in self._manual_calib_groups for p in g}
             for p in paths:
-                if p not in still_used:
-                    self._manual_used_paths.discard(p)
+                if p not in still_in_other_groups and p not in self._unsorted_paths:
+                    self._unsorted_paths.append(p)
+                    # Keep in _manual_used_paths since it's now in unsorted
             self._reinit_manual_vars()
             self._render_page(self._current_page)
+
+    # ── manual trash selection ────────────────────────────────────────────────
+
+    def _bind_trash_select(self, widget: tk.Widget, path: Path) -> None:
+        """Recursively bind <Button-1> for manual trash selection, skipping Checkbutton."""
+        if not isinstance(widget, tk.Checkbutton):
+            widget.bind("<Button-1>", lambda e, p=path: self._manual_trash_toggle_shift(e, p))
+        for child in widget.winfo_children():
+            self._bind_trash_select(child, path)
+
+    def _manual_trash_toggle_shift(self, event: tk.Event, path: Path) -> None:
+        """Handle click with optional Shift for range selection."""
+        shift_held = bool(event.state & 0x0001)
+        if shift_held and self._last_solo_click_path is not None and self._solo_visible_paths:
+            try:
+                i1 = self._solo_visible_paths.index(self._last_solo_click_path)
+                i2 = self._solo_visible_paths.index(path)
+            except ValueError:
+                self._manual_trash_toggle(path)
+                self._last_solo_click_path = path
+                return
+            lo, hi = min(i1, i2), max(i1, i2)
+            for p in self._solo_visible_paths[lo:hi + 1]:
+                if p not in self._manual_trash_selected:
+                    self._manual_trash_selected.add(p)
+                    cell = self._manual_trash_tile_frames.get(p)
+                    if cell and cell.winfo_exists():
+                        cell.configure(highlightbackground=_M_ERROR, highlightthickness=3)
+            self._update_trash_sel_count()
+        else:
+            self._manual_trash_toggle(path)
+            self._last_solo_click_path = path
+
+    def _manual_trash_toggle(self, path: Path) -> None:
+        """Toggle a path's selection state for manual trash."""
+        cell = self._manual_trash_tile_frames.get(path)
+        if path in self._manual_trash_selected:
+            self._manual_trash_selected.discard(path)
+            if cell and cell.winfo_exists():
+                cell.configure(highlightthickness=0)
+        else:
+            self._manual_trash_selected.add(path)
+            if cell and cell.winfo_exists():
+                cell.configure(highlightbackground=_M_ERROR, highlightthickness=3)
+        self._update_trash_sel_count()
+
+    def _update_trash_sel_count(self) -> None:
+        n = len(self._manual_trash_selected)
+        if hasattr(self, "_trash_sel_count_lbl") and self._trash_sel_count_lbl.winfo_exists():
+            self._trash_sel_count_lbl.configure(
+                text=f"{n} selected",
+                fg=_M_ERROR if n > 0 else _M_TEXT3,
+            )
+        if hasattr(self, "_trash_sel_btn") and self._trash_sel_btn.winfo_exists():
+            self._trash_sel_btn.configure(state=tk.NORMAL if n > 0 else tk.DISABLED)
+
+    def _on_trash_selected(self) -> None:
+        """Move manually-selected images (from originals/solo) to trash."""
+        if not self._manual_trash_selected:
+            return
+        paths = list(self._manual_trash_selected)
+
+        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        trash_dir = Path(out) / "trash" if out else paths[0].parent / "trash"
+        dry = bool(self._settings.dry_run) if self._settings else False
+
+        self._trash_sel_btn.configure(state=tk.DISABLED)
+        self._status_lbl.configure(text="Moving selected to trash…")
+        self.update_idletasks()
+
+        def _do() -> None:
+            from mover import trash_files
+            try:
+                moved, errors = trash_files(paths, trash_dir, dry_run=dry)
+            except Exception as exc:
+                moved, errors = 0, [str(exc)]
+            # Build items list for the duplicates card
+            items: list[dict] = []
+            error_names = {e.split(":")[0] for e in errors}
+            for p in paths:
+                if p.name not in error_names:
+                    tp = trash_dir / p.name
+                    rec = self._path_to_record(p)
+                    items.append({"original": p, "trash": tp, "rec": rec})
+            self.after(0, lambda: self._on_trash_selected_done(items, moved, errors, trash_dir, dry))
+
+        threading.Thread(target=_do, daemon=True).start()
+
+    def _on_trash_selected_done(
+        self,
+        items: list[dict],
+        moved: int,
+        errors: list,
+        trash_dir: Path,
+        dry: bool,
+    ) -> None:
+        self._manual_trashed_items.extend(items)
+        newly = {it["original"] for it in items}
+        self._manual_trash_selected -= newly
+        self._trashed_paths.update(newly)
+        if trash_dir and not dry and moved > 0:
+            from mover import ops_log_path as _ops_log_path_fn
+            self._ops_log_path = _ops_log_path_fn(trash_dir.parent)
+            self._show_revert_buttons()
+        msg = f"Moved {moved} file{'s' if moved != 1 else ''} to trash."
+        if errors:
+            msg += f"  ({len(errors)} error{'s' if len(errors) != 1 else ''})"
+        if dry:
+            msg = f"Dry run: would move {moved} file{'s' if moved != 1 else ''}."
+        self._status_lbl.configure(text=msg)
+        self._render_page(self._current_page)
+        self._update_trash_sel_count()
+
+    def _on_revert_manual_item(self, item: dict) -> None:
+        """Move a single manually-trashed file back to its original location."""
+        original: Path = item["original"]
+        trash_path: Path = item["trash"]
+        if not trash_path.exists():
+            messagebox.showwarning("Revert", f"File not found in trash:\n{trash_path.name}", parent=self)
+            return
+        try:
+            original.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(trash_path), str(original))
+            self._manual_trashed_items.remove(item)
+            self._trashed_paths.discard(original)
+            self._status_lbl.configure(text=f"Reverted: {original.name}")
+            self._render_page(self._current_page)
+        except Exception as exc:
+            messagebox.showerror("Revert Failed", str(exc), parent=self)
+
+    def _build_manual_duplicates_section(self) -> None:
+        """Card showing images manually moved to trash, with per-item revert."""
+        if not self._manual_trashed_items:
+            return
+
+        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer.pack(fill=tk.X)
+
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
+                             highlightbackground=_M_ERROR, highlightthickness=1)
+        card_wrap.pack(fill=tk.X)
+
+        tk.Frame(card_wrap, width=5, bg=_M_ERROR).pack(side=tk.LEFT, fill=tk.Y)
+        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        head = tk.Frame(card, bg=_M_ERROR_TINT, pady=0)
+        head.pack(fill=tk.X)
+        tk.Label(
+            head,
+            text=f"Duplicates  ({len(self._manual_trashed_items)} manually trashed)",
+            font=("Segoe UI", 9, "bold"), bg=_M_ERROR_TINT, fg=_M_ERROR,
+        ).pack(side=tk.LEFT, padx=12, pady=8)
+        tk.Label(
+            head, text="Images you manually moved to trash — click Revert to restore",
+            font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT3,
+        ).pack(side=tk.LEFT, padx=4)
+
+        grid_frame = tk.Frame(card, bg=_M_ERROR_TINT, padx=10, pady=8)
+        grid_frame.pack(fill=tk.X)
+
+        COLS = 5
+        for i, item in enumerate(self._manual_trashed_items):
+            path: Path = item["original"]
+            trash_path: Path = item["trash"]
+            rec: Optional[ImageRecord] = item["rec"]
+
+            cell = tk.Frame(grid_frame, bg=_M_ERROR_TINT, padx=4, pady=4)
+            cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
+
+            thumb_lbl = tk.Label(cell, bg=_M_ERROR_TINT)
+            thumb_lbl.pack()
+            self._load_thumbnail_async(trash_path if trash_path.exists() else path,
+                                       thumb_lbl, _THUMB_SIZE, grayscale=True)
+
+            tk.Label(cell, text="🗑  Trashed",
+                     font=("Segoe UI", 8, "bold"), bg=_M_ERROR_TINT, fg="#757575",
+                     ).pack(pady=(2, 0))
+
+            fname = path.name
+            tk.Label(
+                cell,
+                text=(fname[:15] + "…" if len(fname) > 16 else fname),
+                font=("Segoe UI", 7), bg=_M_ERROR_TINT, fg=_M_TEXT2,
+                wraplength=_THUMB_SIZE,
+            ).pack()
+            if rec is not None:
+                tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                         font=("Segoe UI", 7), bg=_M_ERROR_TINT, fg=_M_TEXT3).pack()
+
+            _mat_btn(cell, "↩ Revert",
+                     lambda it=item: self._on_revert_manual_item(it),
+                     bg=_M_WARNING_TINT, fg=_M_WARNING, font_size=7).pack(pady=(3, 0))
 
     # ── var initialisation (runs once, preserves state across page changes) ──────
 
@@ -1105,6 +1694,7 @@ class ReportViewer(tk.Toplevel):
         for widget in self._inner_frame.winfo_children():
             widget.destroy()
         self._group_border_frames.clear()
+        self._manual_trash_tile_frames.clear()
 
         self._current_page = max(0, min(page, self._total_pages() - 1))
 
@@ -1121,8 +1711,10 @@ class ReportViewer(tk.Toplevel):
 
         # Solo / broken / manual-groups sections shown on last page
         if self._current_page >= self._total_pages() - 1:
+            self._build_manual_duplicates_section()
             for mg_idx in range(len(self._manual_calib_groups)):
                 self._build_manual_group_card(mg_idx)
+            self._build_unsorted_section()
             if self._solo_originals:
                 self._build_solo_section()
             if self._broken_files:
@@ -1130,18 +1722,27 @@ class ReportViewer(tk.Toplevel):
 
         self._canvas.yview_moveto(0)
         self._update_page_nav()
+        # Re-bind mousewheel on all freshly rendered widgets so scroll works
+        # everywhere without relying on bind_all (which affects global mouse input).
+        self._canvas.after(10, lambda: self._bind_mousewheel_recursive(self._inner_frame))
 
     def _update_page_nav(self) -> None:
         total  = self._total_pages()
         page   = self._current_page
         n      = len(self._groups)
         start  = page * self._page_size + 1
+
+        # Enable / disable Prev & Next buttons
+        if hasattr(self, "_prev_btn") and self._prev_btn.winfo_exists():
+            self._prev_btn.configure(state=tk.NORMAL if page > 0 else tk.DISABLED)
+        if hasattr(self, "_next_btn") and self._next_btn.winfo_exists():
+            self._next_btn.configure(state=tk.NORMAL if page < total - 1 else tk.DISABLED)
+
         end    = min((page + 1) * self._page_size, n)
 
         if n > 0:
             self._page_info_var.set(
-                f"Page {page + 1} of {total}  ·  groups {start}–{end} of {n}"
-                f"  ·  scroll past edge to flip page")
+                f"Page {page + 1} of {total}  ·  groups {start}–{end} of {n}")
         else:
             self._page_info_var.set("")
 
@@ -1165,32 +1766,23 @@ class ReportViewer(tk.Toplevel):
 
     # ── scroll helpers ────────────────────────────────────────────────────────
 
-    def _on_canvas_enter(self, _=None) -> None:
-        """Capture all mousewheel events while the pointer is inside the canvas."""
-        self.bind_all("<MouseWheel>", self._on_mousewheel)
-
-    def _on_canvas_leave(self, _=None) -> None:
-        """Release the global mousewheel capture when the pointer leaves."""
-        self.unbind_all("<MouseWheel>")
+    def _bind_mousewheel_recursive(self, widget: tk.Widget) -> None:
+        """Bind mousewheel scroll to widget and all its descendants (non-interactive only)."""
+        try:
+            # Skip widgets that need their own scroll (Combobox, Scale, Scrollbar)
+            if not isinstance(widget, (ttk.Scrollbar, ttk.Scale, ttk.Combobox)):
+                widget.bind("<MouseWheel>", self._on_mousewheel)
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child)
 
     def _scroll(self, delta: int) -> None:
         self._canvas.yview_scroll(delta, "units")
 
     def _on_mousewheel(self, event: tk.Event) -> None:
         delta = int(-1 * (event.delta / 120))
-        top, bottom = self._canvas.yview()
-        if delta > 0 and bottom >= 1.0:
-            # Scrolled past the bottom — go to next page
-            if self._current_page < self._total_pages() - 1:
-                self._render_page(self._current_page + 1)
-                # _render_page already calls yview_moveto(0)
-        elif delta < 0 and top <= 0.0:
-            # Scrolled past the top — go to previous page
-            if self._current_page > 0:
-                self._render_page(self._current_page - 1)
-                self._canvas.yview_moveto(1.0)
-        else:
-            self._canvas.yview_scroll(delta, "units")
+        self._canvas.yview_scroll(delta, "units")
 
     def _on_frame_configure(self, _event=None) -> None:
         self._canvas.configure(scrollregion=self._canvas.bbox("all"))
