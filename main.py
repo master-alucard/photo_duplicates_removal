@@ -1,5 +1,5 @@
 """
-main.py — Image Deduper v2 GUI
+main.py — Image Deduper GUI
 Tab-based UI: Scan, Results (dynamic), History, Settings.
 """
 from __future__ import annotations
@@ -81,6 +81,20 @@ _M_DIVIDER      = "#E0E0E0"   # Grey 300
 _M_TEXT1        = "#212121"   # Grey 900
 _M_TEXT2        = "#616161"   # Grey 700
 _MAT_DISABLED   = "#BDBDBD"   # Grey 400
+
+
+def _unique_dest(folder: Path, name: str) -> Path:
+    """Return a non-colliding path inside folder for the given filename."""
+    p = folder / name
+    if not p.exists():
+        return p
+    stem, suffix = Path(name).stem, Path(name).suffix
+    i = 1
+    while True:
+        p = folder / f"{stem}_{i}{suffix}"
+        if not p.exists():
+            return p
+        i += 1
 
 
 def _set_sleep_prevention(enable: bool) -> None:
@@ -274,10 +288,13 @@ class App:
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("Image Deduper v2")
+        self.root.title("Image Deduper")
         self.root.geometry("1160x800")
         self.root.resizable(True, True)
         self.root.minsize(700, 520)
+
+        # Refresh UI after the PC wakes from sleep (canvas can go blank)
+        self.root.bind("<FocusIn>", self._on_focus_in)
 
         try:
             _ico = _find_ico()
@@ -326,10 +343,10 @@ class App:
         # Header
         hdr = tk.Frame(self.root, bg=_ACCENT)
         hdr.pack(fill=tk.X)
-        tk.Label(hdr, text="Image Deduper v2",
+        tk.Label(hdr, text="Image Deduper",
                  font=("Segoe UI", 15, "bold"), bg=_ACCENT, fg="white").pack(
             side=tk.LEFT, padx=20, pady=12)
-        tk.Label(hdr, text="Find & remove duplicate preview images",
+        tk.Label(hdr, text="Find & remove duplicate images",
                  font=("Segoe UI", 9), bg=_ACCENT, fg="#90CAF9").pack(side=tk.LEFT)
 
         # Notebook style — white selected tab with blue text works reliably on Windows
@@ -2559,6 +2576,11 @@ class App:
 
     # ── new scan prompt ───────────────────────────────────────────────────
 
+    def _on_focus_in(self, event: tk.Event) -> None:
+        """Force a UI refresh when the window regains focus (e.g. after sleep)."""
+        if event.widget is self.root:
+            self.root.after(150, self.root.update_idletasks)
+
     def _new_scan_prompt(self) -> None:
         if not messagebox.askyesno(
             "Start New Scan",
@@ -2709,6 +2731,20 @@ class App:
             if not settings.dry_run and groups:
                 cb("Moving files…", 0, len(groups), "Moving")
                 move_groups(groups, out, dry_run=False, settings=settings)
+
+            # Move broken/unreadable files to trash/broken/
+            broken = getattr(self, "_broken_files", [])
+            if not settings.dry_run and broken:
+                broken_dir = out / "trash" / "broken"
+                broken_dir.mkdir(parents=True, exist_ok=True)
+                for bp in broken:
+                    try:
+                        bp = Path(bp) if not isinstance(bp, Path) else bp
+                        if bp.exists():
+                            import shutil as _sh
+                            _sh.move(str(bp), str(_unique_dest(broken_dir, bp.name)))
+                    except Exception:
+                        pass
 
             cb("Generating report…", 0, 1, "Report")
             report = generate_report(groups, out, src, len(records), settings)

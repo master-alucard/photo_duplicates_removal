@@ -1,5 +1,5 @@
 """
-mover.py — Move originals -> results/ and previews -> trash/.
+mover.py — Move duplicate previews -> trash/ only. Originals are never touched.
 Updates ImageRecord.path in-place so the reporter sees new locations.
 Writes operations_log.json and supports revert.
 """
@@ -85,18 +85,15 @@ def move_groups(
     settings=None,
 ) -> tuple[int, int]:
     """
-    Move files and update paths on each record.
-    Returns (moved_originals, moved_previews).
+    Move duplicate previews to trash/ only. Originals are never touched.
+    Returns (0, moved_previews).
     Writes operations_log.json in output_folder.
     """
-    results_dir = output_folder / "results"
     trash_dir = output_folder / "trash"
 
     if not dry_run:
-        results_dir.mkdir(parents=True, exist_ok=True)
         trash_dir.mkdir(parents=True, exist_ok=True)
 
-    moved_originals = 0
     moved_previews = 0
     operations: list[dict] = []
 
@@ -118,27 +115,6 @@ def move_groups(
             continue
 
         group_id = getattr(group, "group_id", "unknown")
-
-        for orig in group.originals:
-            dest = _unique_path(_dest_dir(results_dir, orig.path) / orig.path.name)
-            op = {
-                "group_id": group_id,
-                "type": "original",
-                "from": str(orig.path),
-                "to": str(dest),
-            }
-            if not dry_run:
-                try:
-                    shutil.move(str(orig.path), str(dest))
-                    orig.path = dest
-                    moved_originals += 1
-                    op["status"] = "moved"
-                except Exception as exc:
-                    op["status"] = f"error: {exc}"
-            else:
-                op["status"] = "dry_run"
-                moved_originals += 1
-            operations.append(op)
 
         for preview in group.previews:
             dest = _unique_path(_dest_dir(trash_dir, preview.path) / preview.path.name)
@@ -164,7 +140,7 @@ def move_groups(
     if not dry_run:
         _write_ops_log(operations, output_folder)
 
-    return moved_originals, moved_previews
+    return 0, moved_previews
 
 
 def revert_operations(

@@ -238,7 +238,7 @@ def generate_report(
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Image Deduper Report v2</title>
+<title>Image Deduper Report</title>
 <style>
 *{{box-sizing:border-box;margin:0;padding:0}}
 body{{font-family:"Segoe UI",Arial,sans-serif;background:#f0f2f5;color:#1f1f1f;font-size:14px}}
@@ -331,7 +331,7 @@ body{{font-family:"Segoe UI",Arial,sans-serif;background:#f0f2f5;color:#1f1f1f;f
 <body>
 
 <div class="hdr">
-  <h1>Image Deduper Report v2 {dry_tag}</h1>
+  <h1>Image Deduper Report {dry_tag}</h1>
   <div class="src">Source: {html.escape(str(source_folder))}</div>
   <div class="opts">
     Keep strategy: <strong>{strategy_label}</strong>
