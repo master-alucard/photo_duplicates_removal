@@ -23,12 +23,26 @@ try:
 except ImportError as _e:
     _root = tk.Tk()
     _root.withdraw()
-    messagebox.showerror(
-        "Missing dependencies",
-        "Please install requirements first:\n\n"
-        "  pip install Pillow imagehash piexif\n\n"
-        f"Error: {_e}"
-    )
+    _frozen = getattr(sys, "frozen", False)
+    if _frozen:
+        _msg = (
+            "A required component could not be loaded.\n\n"
+            f"Error: {_e}\n\n"
+            "This is usually caused by Windows security blocking an app file.\n\n"
+            "Try these steps:\n"
+            "  1. Right-click ImageDeduper.exe → Properties → click Unblock → OK\n"
+            "  2. Re-run the installer as Administrator\n"
+            "  3. Temporarily disable Windows Defender / App Control and retry\n\n"
+            "If the problem persists, please report it at:\n"
+            "  https://github.com/master-alucard/photo_duplicates_removal/issues"
+        )
+    else:
+        _msg = (
+            "Please install requirements first:\n\n"
+            "  pip install Pillow imagehash piexif\n\n"
+            f"Error: {_e}"
+        )
+    messagebox.showerror("Startup Error", _msg)
     sys.exit(1)
 
 try:
