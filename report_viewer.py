@@ -271,6 +271,11 @@ class ReportViewer(tk.Frame):
         _mat_btn(hdr, "Select All", self._select_all, "#FFFFFF", fg=_M_PRIMARY,
                  ).pack(side=tk.RIGHT, padx=2, pady=8)
 
+        if self._on_close_cb:
+            _mat_btn(hdr, "◀  Back to Results", self._on_close_cb,
+                     _M_PRIMARY, fg="#BBDEFB", font_size=9,
+                     ).pack(side=tk.RIGHT, padx=(0, 12), pady=8)
+
         # ── Action bar ────────────────────────────────────────────────────
         act = tk.Frame(self, bg=_M_SURFACE, pady=6,
                        highlightbackground=_M_DIVIDER, highlightthickness=1)
