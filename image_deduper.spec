@@ -77,7 +77,7 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,                   # compress binaries with UPX if available
+    upx=False,                  # UPX compression causes Windows App Control to block DLLs
     console=False,              # no black console window
     disable_windowed_traceback=False,
     target_arch=None,
@@ -90,12 +90,6 @@ coll = COLLECT(
     a.binaries,
     a.datas,
     strip=False,
-    upx=True,
-    upx_exclude=[
-        # UPX breaks some DLLs — exclude known problematic ones
-        'vcruntime140.dll',
-        'python3*.dll',
-        'libraw*.dll',
-    ],
+    upx=False,                  # disabled — UPX-packed DLLs are blocked by Windows App Control
     name='ImageDeduper',
 )
