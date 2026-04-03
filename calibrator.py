@@ -1,10 +1,11 @@
 """
-calibrator.py — Iterative auto-configure: 3-round coarse-to-fine grid search
+calibrator.py — Iterative auto-configure: 4-round coarse-to-fine grid search
 with detailed per-algorithm-step diagnostic log generation.
 
-Round 1 (Coarse Grid)   threshold × preview_ratio      — 45 combos
-Round 2 (Fine Ratio)    top-5 thresholds + denser ratio — ~30 new combos
-Round 3 (Feature Flags) best settings ± one toggle each — ~6 variants
+Round 1 (Coarse Grid)    threshold × preview_ratio       — 45 combos
+Round 2 (Fine Ratio)     top-5 thresholds + denser ratio — ~30 new combos
+Round 3 (Feature Flags)  best settings ± one toggle each — ~6 variants
+Round 4 (Param Sweeps)   optimise each impactful param   — conditional
 
 After all rounds the best result is re-scored in verbose mode, producing a
 line-by-line log of every guard check for every pair in every expected group
@@ -38,13 +39,14 @@ keeping an extra copy.
 from __future__ import annotations
 
 import copy
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
 
 from config import Settings
 from scanner import (
     IMAGE_EXTENSIONS,
+    RAW_EXTENSIONS,
     DuplicateGroup,
     ImageRecord,
     collect_images,
@@ -56,6 +58,22 @@ from scanner import (
 
 ROUND1_THRESHOLDS = [4, 6, 8, 10, 12, 14, 16, 18, 20]
 ROUND1_RATIOS     = [0.75, 0.80, 0.85, 0.90, 0.95]
+
+# Round 4 — per-parameter sweep grids.
+# Each grid is used only when the corresponding feature showed measurable impact
+# in Round 3 (score change ≥ _ROUND4_IMPACT_THR).
+ROUND4_SERIES_THRESHOLD_FACTORS = [0.50, 0.75, 1.00, 1.25, 1.50, 2.00]
+ROUND4_BRIGHTNESS_MAX_DIFFS     = [20.0, 40.0, 60.0, 80.0, 100.0, 150.0, 200.0]
+ROUND4_HIST_MIN_SIMILARITIES    = [0.50, 0.60, 0.65, 0.70, 0.75, 0.80, 0.90]
+ROUND4_AR_TOLERANCE_PCTS        = [2.0, 3.0, 5.0, 8.0, 10.0, 15.0]
+ROUND4_CF_THRESHOLD_FACTORS     = [2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0]
+ROUND4_DARK_THRESHOLDS          = [20.0, 30.0, 40.0, 50.0, 60.0, 80.0, 100.0]
+ROUND4_DARK_TIGHTEN_FACTORS     = [0.25, 0.33, 0.50, 0.67, 0.75, 1.00]
+ROUND4_SERIES_TOLERANCE_PCTS    = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0]
+
+# Minimum absolute score change (0-1) in Round 3 that triggers a Round 4 sweep
+# for that parameter.  0.005 = 0.5 percentage-point impact.
+_ROUND4_IMPACT_THR = 0.005
 
 # Weight applied to negatives in the composite score.
 # 3 means "avoiding a false positive is 3× more important than finding one more dup."
@@ -183,6 +201,11 @@ def _refine_originals(
     In-place: update each ExpectedGroup's expected_original and expected_previews
     using actual pixel count (width×height) from scanned ImageRecords.
     File size was the load-time proxy; pixel count is more accurate.
+
+    Tiebreaker: when multiple files share the same pixel count (e.g. all 6000×4000),
+    the larger file (more bytes = less compressed = higher quality) is considered the
+    expected original.  This matches scanner._sort_key which also uses -file_size as
+    the secondary sort key.
     """
     for eg in ground_truth.groups:
         resolved_all = [f.resolve() for f in eg.all_files]
@@ -190,7 +213,10 @@ def _refine_originals(
         recs = [r for r in recs if r is not None]
         if not recs:
             continue
-        best = max(recs, key=lambda r: r.width * r.height)
+        # Primary key: pixels (more = better original); secondary: file size (larger
+        # file = less compressed = preferred when resolutions are equal, e.g. burst
+        # shots or same-quality duplicates at the same resolution).
+        best = max(recs, key=lambda r: (r.width * r.height, r.file_size))
         eg.expected_original  = best.path
         eg.expected_previews  = [
             r.path for r in recs if r.path.resolve() != best.path.resolve()
@@ -257,7 +283,8 @@ def _diagnose_pair(a: ImageRecord, b: ImageRecord, settings: Settings) -> PairDi
         blocked_by = "brightness"
     elif phash_dist > eff_thr:
         blocked_by = "pHash"
-    elif dhash_dist is not None and dhash_dist > eff_thr * 1.5:
+    elif dhash_dist is not None and phash_dist > 0 and dhash_dist > eff_thr * 1.5:
+        # dHash is skipped when pHash==0 (perceptually identical); see scanner._can_be_similar
         blocked_by = "dHash"
     elif hist_sim is not None and hist_sim < settings.hist_min_similarity:
         blocked_by = "histogram"
@@ -329,14 +356,18 @@ class CalibrationResult:
 
 @dataclass
 class CalibrationLog:
-    rounds_run:         int
-    total_combos:       int
-    best_result:        CalibrationResult
-    settings_used:      dict
-    group_diagnoses:    list[GroupDiagnosis]
-    negative_diagnoses: list[NegativeDiagnosis]
-    single_diagnoses:   list[SingleDiagnosis]
-    feature_comparison: list[CalibrationResult]
+    rounds_run:          int
+    total_combos:        int
+    best_result:         CalibrationResult
+    settings_used:       dict
+    group_diagnoses:     list[GroupDiagnosis]
+    negative_diagnoses:  list[NegativeDiagnosis]
+    single_diagnoses:    list[SingleDiagnosis]
+    feature_comparison:  list[CalibrationResult]
+    # Round 4 results: list of (param_name, [CalibrationResult per value tested])
+    parameter_sweeps:    list[tuple[str, list[CalibrationResult]]] = field(default_factory=list)
+    # Best value found per parameter in Round 4 (param_name -> value)
+    optimized_params:    dict = field(default_factory=dict)
 
 
 # ── fast scoring (no diagnostics) ────────────────────────────────────────────
@@ -350,9 +381,12 @@ def _score(
     variant_label: str = "",
 ) -> CalibrationResult:
     path_to_dgroup: dict[Path, DuplicateGroup] = {}
+    # Also build a path→record map from detected groups (ImageRecord carries file_size & dims).
+    path_to_record: dict[Path, "ImageRecord"] = {}
     for dg in detected_groups:
         for r in dg.originals + dg.previews:
             path_to_dgroup[r.path.resolve()] = dg
+            path_to_record[r.path.resolve()] = r
 
     groups_found = originals_correct = originals_total = 0
     previews_correct = previews_total = false_positives = 0
@@ -370,7 +404,23 @@ def _score(
             groups_found += 1
             dg = path_to_dgroup.get(resolved_all[0])
             if dg:
-                if any(r.path.resolve() == resolved_orig for r in dg.originals):
+                orig_ok = any(r.path.resolve() == resolved_orig for r in dg.originals)
+                if not orig_ok:
+                    # Accept a "better or equal" original: same or more pixels,
+                    # same or more bytes.  This covers the case where adjacent
+                    # expected groups merge because they are perceptually identical
+                    # (pHash=0-2) and the algorithm correctly keeps the globally
+                    # best copy rather than the per-pair expected original.
+                    exp_rec = path_to_record.get(resolved_orig)
+                    if exp_rec is not None:
+                        exp_px = exp_rec.width * exp_rec.height
+                        orig_ok = any(
+                            (r.width * r.height > exp_px)
+                            or (r.width * r.height == exp_px
+                                and r.file_size >= exp_rec.file_size)
+                            for r in dg.originals
+                        )
+                if orig_ok:
                     originals_correct += 1
                 for p in resolved_prev:
                     if any(r.path.resolve() == p for r in dg.previews):
@@ -464,6 +514,20 @@ def _score_verbose(
         if detected_together and dg:
             groups_found += 1
             orig_correct = any(r.path.resolve() == resolved_orig for r in dg.originals)
+            if not orig_correct:
+                # Accept a "better or equal" original: same or more pixels + bytes.
+                # Handles the case where adjacent expected groups merged because they
+                # are perceptually identical (pHash=0-2); the algorithm correctly
+                # keeps the globally best copy rather than the per-pair expected one.
+                exp_rec = path_to_record.get(resolved_orig)
+                if exp_rec is not None:
+                    exp_px = exp_rec.width * exp_rec.height
+                    orig_correct = any(
+                        (r.width * r.height > exp_px)
+                        or (r.width * r.height == exp_px
+                            and r.file_size >= exp_rec.file_size)
+                        for r in dg.originals
+                    )
             if orig_correct:
                 originals_correct += 1
             for p in resolved_prev:
@@ -708,6 +772,7 @@ def run_calibration(
         ("no_series_detect", {"disable_series_detection": True}),
         ("no_dual_hash",     {"use_dual_hash": False}),
         ("no_histogram",     {"use_histogram": False}),
+        ("no_dark_protect",  {"dark_protection": False}),
         ("loose_AR",         {"ar_tolerance_pct": base_settings.ar_tolerance_pct * 2}),
         ("tight_AR",         {"ar_tolerance_pct": max(1.0, base_settings.ar_tolerance_pct / 2)}),
         ("loose_brightness", {"brightness_max_diff": base_settings.brightness_max_diff * 2}),
@@ -721,6 +786,73 @@ def run_calibration(
             progress_cb(f"[Round 3] {label}", done, r3_combos)
         _test(best.threshold, best.preview_ratio, rnd=3, label=label, extra_cfg=extra)
         done += 1
+
+    # ── Round 4: conditional per-parameter sweeps ────────────────────────────
+    # For each guard that showed measurable impact in Round 3, sweep its
+    # numeric parameter to find the optimum value.  series_threshold_factor
+    # is always swept since series detection is critical on most datasets.
+    feature_results_r4 = [r for r in all_results if r.round_number == 3]
+    feature_map = {r.variant_label: r for r in feature_results_r4}
+
+    def _r3_delta(label: str) -> float:
+        """Absolute score gap between baseline and feature variant (positive = variant worse)."""
+        r = feature_map.get(label)
+        return abs(best.score - r.score) if r else 0.0
+
+    # Build ordered list of (param_name, values) to sweep
+    r4_sweeps: list[tuple[str, list]] = []
+    # series_threshold_factor — always, because series detection dominates most datasets
+    r4_sweeps.append(("series_threshold_factor", ROUND4_SERIES_THRESHOLD_FACTORS))
+    # histogram similarity — sweep if disabling histogram had measurable impact
+    if _r3_delta("no_histogram") >= _ROUND4_IMPACT_THR:
+        r4_sweeps.append(("hist_min_similarity", ROUND4_HIST_MIN_SIMILARITIES))
+    # brightness limit — sweep if loosening brightness changed the score
+    if _r3_delta("loose_brightness") >= _ROUND4_IMPACT_THR:
+        r4_sweeps.append(("brightness_max_diff", ROUND4_BRIGHTNESS_MAX_DIFFS))
+    # AR tolerance — sweep if either loose or tight variant showed impact
+    ar_impact = max(_r3_delta("loose_AR"), _r3_delta("tight_AR"))
+    if ar_impact >= _ROUND4_IMPACT_THR:
+        r4_sweeps.append(("ar_tolerance_pct", ROUND4_AR_TOLERANCE_PCTS))
+    # cross_format_threshold_factor — sweep only when RAW files are present
+    if any(r.path.suffix.lower() in RAW_EXTENSIONS for r in records):
+        r4_sweeps.append(("cross_format_threshold_factor", ROUND4_CF_THRESHOLD_FACTORS))
+    # dark_threshold + dark_tighten_factor — sweep if disabling dark protection had impact
+    if _r3_delta("no_dark_protect") >= _ROUND4_IMPACT_THR:
+        r4_sweeps.append(("dark_threshold",     ROUND4_DARK_THRESHOLDS))
+        r4_sweeps.append(("dark_tighten_factor", ROUND4_DARK_TIGHTEN_FACTORS))
+    # series_tolerance_pct — sweep if series detection had impact (i.e. series exist in data)
+    if _r3_delta("no_series_detect") >= _ROUND4_IMPACT_THR:
+        r4_sweeps.append(("series_tolerance_pct", ROUND4_SERIES_TOLERANCE_PCTS))
+
+    parameter_sweep_results: list[tuple[str, list[CalibrationResult]]] = []
+    optimized_params: dict = {}
+
+    r4_total = sum(len(vals) for _, vals in r4_sweeps)
+    r4_done  = 0
+    for param_name, values in r4_sweeps:
+        if stop_flag and stop_flag[0]:
+            break
+        sweep: list[CalibrationResult] = []
+        for val in values:
+            if stop_flag and stop_flag[0]:
+                break
+            label = f"{param_name}={val}"
+            if progress_cb:
+                progress_cb(f"[Round 4] {param_name}={val}", r4_done, r4_total)
+            _test(best.threshold, best.preview_ratio, rnd=4, label=label,
+                  extra_cfg={param_name: val})
+            r = next((x for x in all_results if x.variant_label == label), None)
+            if r:
+                sweep.append(r)
+            r4_done += 1
+        if sweep:
+            parameter_sweep_results.append((param_name, sweep))
+            best_in_sweep = max(sweep, key=lambda x: x.score)
+            val_str = best_in_sweep.variant_label.split("=", 1)[1]
+            try:
+                optimized_params[param_name] = float(val_str)
+            except ValueError:
+                optimized_params[param_name] = val_str
 
     # ── Verbose log for the best result ───────────────────────────────────────
     all_results.sort(key=lambda r: r.score, reverse=True)
@@ -739,6 +871,15 @@ def run_calibration(
             for k, v in extra.items():
                 setattr(log_cfg, k, v)
 
+    # Apply Round 4 optimized param so the verbose log uses the actual best setting
+    # (e.g. series_threshold_factor=0.5) rather than the 1.0 baseline written above.
+    if best_final.round_number == 4 and best_final.variant_label and "=" in best_final.variant_label:
+        param_name, val_str = best_final.variant_label.split("=", 1)
+        try:
+            setattr(log_cfg, param_name, float(val_str))
+        except (ValueError, AttributeError):
+            pass
+
     log_groups, _ = find_groups(records, log_cfg)
 
     path_to_record = {r.path.resolve(): r for r in records}
@@ -752,21 +893,24 @@ def run_calibration(
     feature_results = [r for r in all_results if r.round_number == 3]
 
     settings_snapshot = {
-        "ar_tolerance_pct":         base_settings.ar_tolerance_pct,
-        "brightness_max_diff":      base_settings.brightness_max_diff,
-        "use_dual_hash":            base_settings.use_dual_hash,
-        "use_histogram":            base_settings.use_histogram,
-        "hist_min_similarity":      base_settings.hist_min_similarity,
-        "dark_protection":          base_settings.dark_protection,
-        "dark_threshold":           base_settings.dark_threshold,
-        "dark_tighten_factor":      base_settings.dark_tighten_factor,
-        "series_tolerance_pct":     base_settings.series_tolerance_pct,
-        "series_threshold_factor":  base_settings.series_threshold_factor,
-        "disable_series_detection": base_settings.disable_series_detection,
+        "ar_tolerance_pct":                  base_settings.ar_tolerance_pct,
+        "brightness_max_diff":               base_settings.brightness_max_diff,
+        "use_dual_hash":                     base_settings.use_dual_hash,
+        "use_histogram":                     base_settings.use_histogram,
+        "hist_min_similarity":               base_settings.hist_min_similarity,
+        "dark_protection":                   base_settings.dark_protection,
+        "dark_threshold":                    base_settings.dark_threshold,
+        "dark_tighten_factor":               base_settings.dark_tighten_factor,
+        "series_tolerance_pct":              base_settings.series_tolerance_pct,
+        "series_threshold_factor":           base_settings.series_threshold_factor,
+        "disable_series_detection":          base_settings.disable_series_detection,
+        "cross_format_threshold_factor":     getattr(base_settings, "cross_format_threshold_factor", 5.0),
     }
 
+    rounds_run = 4 if parameter_sweep_results else 3
+
     log = CalibrationLog(
-        rounds_run=3,
+        rounds_run=rounds_run,
         total_combos=len(tested),
         best_result=best_final,
         settings_used=settings_snapshot,
@@ -774,6 +918,8 @@ def run_calibration(
         negative_diagnoses=neg_diags,
         single_diagnoses=single_diags,
         feature_comparison=feature_results,
+        parameter_sweeps=parameter_sweep_results,
+        optimized_params=optimized_params,
     )
     return all_results, log
 
@@ -824,6 +970,39 @@ def format_log(log: CalibrationLog) -> str:
               f"groups={r.groups_found}/{r.groups_total}  "
               f"neg={r.negatives_correct}/{r.negatives_total}  "
               f"fp={r.false_positives}")
+
+    # ── Round 4: parameter sweeps ─────────────────────────────────────────────
+    if log.parameter_sweeps:
+        h()
+        sep()
+        h("ROUND 4 — PARAMETER SWEEPS  (each param swept independently at best threshold/ratio)")
+        sep()
+        base_score = log.best_result.score
+        for param_name, sweep_results in log.parameter_sweeps:
+            if not sweep_results:
+                continue
+            best_val = log.optimized_params.get(param_name)
+            h(f"  {param_name}:")
+            for r in sorted(sweep_results,
+                            key=lambda x: float(x.variant_label.split("=", 1)[1])):
+                val_str = r.variant_label.split("=", 1)[1]
+                delta   = (r.score - base_score) * 100
+                sign    = "+" if delta >= 0 else ""
+                try:
+                    is_best = best_val is not None and abs(float(val_str) - best_val) < 1e-9
+                except (ValueError, TypeError):
+                    is_best = (val_str == str(best_val))
+                mark = "  ← best" if is_best else ""
+                h(f"    {val_str:<8}  score={r.score*100:.1f}%  ({sign}{delta:.1f}pp){mark}")
+        if log.optimized_params:
+            h()
+            h("  Recommended settings from Round 4:")
+            for param, val in log.optimized_params.items():
+                base_val = log.settings_used.get(param, "?")
+                changed  = not (isinstance(val, float) and isinstance(base_val, float)
+                                and abs(val - base_val) < 1e-9)
+                arrow = "  ← CHANGED" if changed else "  (unchanged)"
+                h(f"    {param:<38} = {val}{arrow}")
 
     # ── group diagnostics ─────────────────────────────────────────────────────
     h()

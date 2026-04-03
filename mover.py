@@ -86,8 +86,9 @@ def move_groups(
 ) -> tuple[int, int]:
     """
     Move duplicate previews to trash/ only. Originals are never touched.
-    Returns (0, moved_previews).
+    Returns (moved_count, error_count).
     Writes operations_log.json in output_folder.
+    Raises RuntimeError if ALL files failed to move (so caller can show an error).
     """
     trash_dir = output_folder / "trash"
 
@@ -95,6 +96,7 @@ def move_groups(
         trash_dir.mkdir(parents=True, exist_ok=True)
 
     moved_previews = 0
+    error_count = 0
     operations: list[dict] = []
 
     _by_date = settings and getattr(settings, "organize_by_date", False)
@@ -117,6 +119,18 @@ def move_groups(
         group_id = getattr(group, "group_id", "unknown")
 
         for preview in group.previews:
+            if not preview.path.exists():
+                op = {
+                    "group_id": group_id,
+                    "type": "preview",
+                    "from": str(preview.path),
+                    "to": "",
+                    "status": "skipped: file not found",
+                }
+                operations.append(op)
+                error_count += 1
+                continue
+
             dest = _unique_path(_dest_dir(trash_dir, preview.path) / preview.path.name)
             op = {
                 "group_id": group_id,
@@ -132,6 +146,7 @@ def move_groups(
                     op["status"] = "moved"
                 except Exception as exc:
                     op["status"] = f"error: {exc}"
+                    error_count += 1
             else:
                 op["status"] = "dry_run"
                 moved_previews += 1
@@ -140,7 +155,7 @@ def move_groups(
     if not dry_run:
         _write_ops_log(operations, output_folder)
 
-    return 0, moved_previews
+    return moved_previews, error_count
 
 
 def revert_operations(

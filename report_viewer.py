@@ -326,6 +326,16 @@ class ReportViewer(tk.Frame):
                  bg=_M_SURFACE, fg=_M_TEXT2,
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=14)
 
+        # Jump-to-unique button (only shown when there are solo originals)
+        if self._solo_originals:
+            self._unique_btn = _mat_btn(
+                nav,
+                f"★  Unique  ({len(self._solo_originals)})",
+                lambda: self._render_page(self._unique_page_index()),
+                _M_SOLO_BORDER, font_size=8,
+            )
+            self._unique_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
+
         # Per-page size selector (right side)
         tk.Label(nav, text="Groups per page:",
                  bg=_M_SURFACE, fg=_M_TEXT2,
@@ -1727,10 +1737,21 @@ class ReportViewer(tk.Frame):
     # ── pagination ────────────────────────────────────────────────────────────
 
     def _total_pages(self) -> int:
-        if not self._groups:
-            return 1
         import math
-        return math.ceil(len(self._groups) / self._page_size)
+        group_pages = max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
+        # Unique images get their own dedicated page when present
+        extra = 1 if self._solo_originals else 0
+        return group_pages + extra
+
+    def _unique_page_index(self) -> int:
+        """Return the page index of the dedicated Unique Images page, or -1."""
+        if not self._solo_originals:
+            return -1
+        import math
+        return max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
+
+    def _is_unique_page(self, page: int) -> bool:
+        return self._solo_originals and page == self._unique_page_index()
 
     def _render_page(self, page: int) -> None:
         """Destroy current page widgets and build the requested page."""
@@ -1742,27 +1763,30 @@ class ReportViewer(tk.Frame):
 
         self._current_page = max(0, min(page, self._total_pages() - 1))
 
-        if not self._groups:
-            tk.Label(
-                self._inner_frame, text="No duplicate groups found.",
-                font=("Segoe UI", 13), bg=_M_BG, fg=_M_TEXT3,
-            ).pack(pady=40)
+        if self._is_unique_page(self._current_page):
+            # ── Dedicated Unique Images page ──────────────────────────────
+            self._build_solo_section()
         else:
-            start = self._current_page * self._page_size
-            end   = min(start + self._page_size, len(self._groups))
-            for idx in range(start, end):
-                self._build_group_card(idx, self._groups[idx])
+            if not self._groups:
+                tk.Label(
+                    self._inner_frame, text="No duplicate groups found.",
+                    font=("Segoe UI", 13), bg=_M_BG, fg=_M_TEXT3,
+                ).pack(pady=40)
+            else:
+                start = self._current_page * self._page_size
+                end   = min(start + self._page_size, len(self._groups))
+                for idx in range(start, end):
+                    self._build_group_card(idx, self._groups[idx])
 
-        # Solo / broken / manual-groups sections shown on last page
-        if self._current_page >= self._total_pages() - 1:
-            self._build_manual_duplicates_section()
-            for mg_idx in range(len(self._manual_calib_groups)):
-                self._build_manual_group_card(mg_idx)
-            self._build_unsorted_section()
-            if self._solo_originals:
-                self._build_solo_section()
-            if self._broken_files:
-                self._build_broken_section()
+            # Manual groups / broken shown on last duplicate-groups page
+            last_dup_page = self._unique_page_index() - 1 if self._solo_originals else self._total_pages() - 1
+            if self._current_page >= last_dup_page:
+                self._build_manual_duplicates_section()
+                for mg_idx in range(len(self._manual_calib_groups)):
+                    self._build_manual_group_card(mg_idx)
+                self._build_unsorted_section()
+                if self._broken_files:
+                    self._build_broken_section()
 
         self._canvas.yview_moveto(0)
         self._update_page_nav()
@@ -1782,9 +1806,19 @@ class ReportViewer(tk.Frame):
         if hasattr(self, "_next_btn") and self._next_btn.winfo_exists():
             self._next_btn.configure(state=tk.NORMAL if page < total - 1 else tk.DISABLED)
 
-        end    = min((page + 1) * self._page_size, n)
+        # Highlight the unique button when on the unique page
+        if hasattr(self, "_unique_btn") and self._unique_btn.winfo_exists():
+            on_unique = self._is_unique_page(page)
+            self._unique_btn.configure(
+                bg=_M_SOLO_BORDER if on_unique else _M_SURFACE,
+                fg="#FFFFFF" if on_unique else _M_SOLO_BORDER,
+            )
 
-        if n > 0:
+        if self._is_unique_page(page):
+            self._page_info_var.set(
+                f"Unique Images  ·  {len(self._solo_originals)} files  ·  page {page + 1} of {total}")
+        elif n > 0:
+            end = min((page + 1) * self._page_size, n)
             self._page_info_var.set(
                 f"Page {page + 1} of {total}  ·  groups {start}–{end} of {n}")
         else:
