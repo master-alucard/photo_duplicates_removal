@@ -52,6 +52,13 @@ class Settings:
     custom_out_folder: str = ""             # Custom Scan: output/trash folder
     auto_update: bool = True                # Check for updates on startup
     developer_mode: bool = False            # Show full error details / tracebacks
+    cross_format_threshold_factor: float = 5.0  # pHash threshold multiplier for RAW vs JPEG pairs
+    scan_speed: int = 5                          # 1=quality → 10=speed (quick-mode quality slider)
+    scan_threads: int = 0                        # parallel hashing threads (0 = os.cpu_count())
+    # Calibrated on Canon EOS M100 CR2 vs camera JPEG:
+    # max intra-group cross-format pHash = 10  (e.g. 001842.cr2 vs 104914.jpg)
+    # min inter-group cross-format pHash = 14  → 4-bit safety gap
+    # effective cross-format threshold  = 2 × 5 = 10  (covers all true pairs)
 
 
 DEFAULTS = Settings()

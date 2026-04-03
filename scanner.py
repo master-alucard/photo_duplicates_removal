@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 from collections import defaultdict
+import numpy as _np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
@@ -39,6 +40,13 @@ _EXACT_DUP_PHASH = 2
 # Use BK-tree candidate filtering when the collection exceeds this size.
 # Below this threshold the O(n²) brute-force is fast enough.
 _BKTREE_THRESHOLD = 200
+
+# When comparing RAW vs JPEG file dimensions, allow up to this relative
+# difference before declaring them "different resolutions".  rawpy decodes
+# the full sensor area (including a few border pixels) so a Canon M100 CR2
+# decodes to 6024×4020 while the camera JPEG is 6000×4000 — 0.4% difference.
+# 2 % is a safe upper bound that still distinguishes full-res from downscaled.
+_CROSS_FORMAT_DIM_TOL = 0.02
 
 
 # ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────
@@ -159,9 +167,9 @@ def _compute_histogram(img: Image.Image) -> list[float]:
 
 def _compute_brightness(img: Image.Image) -> float:
     """Return mean pixel brightness 0.0-255.0."""
+    import numpy as np
     gray = img.convert("L")
-    pixels = list(gray.getdata())
-    return sum(pixels) / len(pixels) if pixels else 0.0
+    return float(np.asarray(gray, dtype=np.float32).mean())
 
 
 # ── collection ───────────────────────────────────────────────────────────────
@@ -230,35 +238,84 @@ def collect_images(
     # Build stem -> record map for RAW companion matching
     stem_to_record: dict[tuple[Path, str], ImageRecord] = {}
 
-    for i, path in enumerate(all_image_paths):
-        if stop_flag and stop_flag[0]:
-            break
-        if pause_flag and pause_flag[0]:
-            break
+    n_threads = getattr(settings, "scan_threads", 1)
+    if n_threads == 0:
+        import os as _os
+        n_threads = max(1, (_os.cpu_count() or 1))
 
-        if progress_cb:
-            progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
-
+    def _hash_one(args: tuple) -> "tuple[int, Path, Optional[ImageRecord], Optional[Exception]]":
+        i, path = args
         try:
             ext = path.suffix.lower()
-
             if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
                 rec = _hash_raw(path, settings)
             else:
                 rec = _hash_image(path, settings)
+            return i, path, rec, None
+        except Exception as exc:
+            return i, path, None, exc
 
+    if n_threads > 1:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        futures = {}
+        completed = 0
+        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+            for i, path in enumerate(all_image_paths):
+                if stop_flag and stop_flag[0]:
+                    break
+                futures[pool.submit(_hash_one, (i, path))] = i
+
+            ordered: dict[int, Optional[ImageRecord]] = {}
+            for fut in as_completed(futures):
+                if stop_flag and stop_flag[0]:
+                    break
+                idx, path, rec, exc = fut.result()
+                completed += 1
+                if progress_cb:
+                    progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                if exc is not None:
+                    if failed_paths is not None:
+                        failed_paths.append(path)
+                else:
+                    ordered[idx] = rec
+
+        for idx in sorted(ordered):
+            rec = ordered[idx]
             if rec is None:
                 continue
-
             records.append(rec)
-            stem_key = (path.parent.resolve(), path.stem.lower())
+            stem_key = (all_image_paths[idx].parent.resolve(), all_image_paths[idx].stem.lower())
             stem_to_record[stem_key] = rec
+    else:
+        for i, path in enumerate(all_image_paths):
+            if stop_flag and stop_flag[0]:
+                break
+            if pause_flag and pause_flag[0]:
+                break
 
-        except Exception as exc:
             if progress_cb:
-                progress_cb(f"  Skip {path.name}: {exc}", i + 1, total, "Hashing")
-            if failed_paths is not None:
-                failed_paths.append(path)
+                progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
+
+            try:
+                ext = path.suffix.lower()
+
+                if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
+                    rec = _hash_raw(path, settings)
+                else:
+                    rec = _hash_image(path, settings)
+
+                if rec is None:
+                    continue
+
+                records.append(rec)
+                stem_key = (path.parent.resolve(), path.stem.lower())
+                stem_to_record[stem_key] = rec
+
+            except Exception as exc:
+                if progress_cb:
+                    progress_cb(f"  Skip {path.name}: {exc}", i + 1, total, "Hashing")
+                if failed_paths is not None:
+                    failed_paths.append(path)
 
     # ── attach RAW companions (stem matching) ────────────────────────────
 
@@ -289,9 +346,9 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
 
         rgb = img if img.mode == "RGB" else img.convert("RGB")
         ph = imagehash.phash(rgb)
-        dh = imagehash.dhash(rgb)
-        hist = _compute_histogram(rgb)
-        brightness = _compute_brightness(rgb)
+        dh = imagehash.dhash(rgb) if settings.use_dual_hash else imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
+        hist = _compute_histogram(rgb) if settings.use_histogram else []
+        brightness = _compute_brightness(rgb) if settings.dark_protection else 128.0
 
     stat = path.stat()
     mtime = min(stat.st_mtime, stat.st_ctime)
@@ -365,16 +422,31 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     Same-dimension pairs (potential series/edited shots) use a higher pHash threshold
     so JPEG quality variation doesn't prevent them from being grouped — _classify_group
     will then promote them all to originals via series detection.
+
+    Cross-format pairs (RAW vs JPEG) use a more lenient threshold because rawpy
+    demosaicing produces a slightly different rendering than the camera's own JPEG
+    processor — typical pHash distance is 3-8 bits even for the same shot.
     """
-    # 1. Aspect ratio guard
+    # 1. Aspect ratio guard (valid for all pairs including cross-format)
     ar_a = a.width / a.height if a.height else 1.0
     ar_b = b.width / b.height if b.height else 1.0
     ar_diff = abs(ar_a - ar_b) / max(ar_a, ar_b, 0.001)
     if ar_diff > settings.ar_tolerance_pct / 100:
         return False
 
-    # 2. Brightness guard
-    if abs(a.brightness - b.brightness) > settings.brightness_max_diff:
+    # Detect cross-format pairs (RAW vs non-RAW or vice versa).
+    # RAW demosaicing differs from camera JPEG rendering, so we relax several
+    # guards by the cross_format_threshold_factor (default 2.0).
+    a_is_raw = a.path.suffix.lower() in RAW_EXTENSIONS
+    b_is_raw = b.path.suffix.lower() in RAW_EXTENSIONS
+    cross_format = a_is_raw != b_is_raw
+    cf_factor = (
+        getattr(settings, "cross_format_threshold_factor", 2.0)
+        if cross_format else 1.0
+    )
+
+    # 2. Brightness guard — relax for cross-format: RAW white balance differs from JPEG
+    if abs(a.brightness - b.brightness) > settings.brightness_max_diff * cf_factor:
         return False
 
     # 3. pHash — use a more lenient threshold for same-dimension pairs so that
@@ -386,6 +458,10 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     else:
         eff_threshold = settings.threshold
 
+    # Cross-format pairs get an additional threshold relaxation on top of series scaling
+    if cross_format:
+        eff_threshold = max(eff_threshold, int(settings.threshold * cf_factor))
+
     if settings.dark_protection:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
             eff_threshold = max(1, int(eff_threshold * settings.dark_tighten_factor))
@@ -393,14 +469,24 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     if a.phash - b.phash > eff_threshold:
         return False
 
-    # 4. dHash — also scale for same-dimension pairs
-    if settings.use_dual_hash:
+    # 4. dHash — also scale for same-dimension pairs.
+    # Skipped for cross-format pairs: rawpy demosaicing produces very different
+    # directional gradients compared to the camera JPEG engine.  Calibration on
+    # Canon EOS M100 shows intra-group dHash up to 18 bits — well above the 15-bit
+    # limit that would be inferred from the pHash threshold — causing false negatives.
+    # Also skipped when pHash == 0: perceptually identical images (same DCT spectrum)
+    # may still diverge on local gradient direction (dHash) due to JPEG quality or
+    # denoising differences.  pHash=0 is already a definitive identity signal, so an
+    # additional dHash gate would only produce false negatives here.
+    if settings.use_dual_hash and not cross_format and a.phash - b.phash > 0:
         dhash_thr = eff_threshold * 1.5
         if a.dhash - b.dhash > dhash_thr:
             return False
 
-    # 5. Histogram intersection
-    if settings.use_histogram and a.histogram and b.histogram:
+    # 5. Histogram intersection — skip for cross-format pairs: RAW color rendering
+    #    (with camera profile) differs visibly from camera JPEG engine output, so
+    #    histogram distance would be misleading.
+    if not cross_format and settings.use_histogram and a.histogram and b.histogram:
         intersection = sum(min(x, y) for x, y in zip(a.histogram, b.histogram)) / 3
         if intersection < settings.hist_min_similarity:
             return False
@@ -411,20 +497,39 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
 # ── grouping ──────────────────────────────────────────────────────────────────
 
 def _sort_key(r: ImageRecord, settings: Settings):
-    """Return sort key so the *best* image sorts first (ascending)."""
+    """Return sort key so the *best* image sorts first (ascending).
+
+    When keep_all_formats is disabled, RAW files are preferred as originals over
+    their JPEG equivalents — they contain more data and are the true camera output.
+    raw_priority=0 sorts RAW before JPEG; raw_priority=1 sorts JPEG last.
+    """
     strategy = settings.keep_strategy
+
+    # RAW preference: 0 = RAW (keep), 1 = non-RAW (may be trashed as duplicate)
+    # Only applied when not keeping all formats — in keep_all_formats mode both
+    # RAW and JPEG are already kept as separate originals.
+    if not getattr(settings, "keep_all_formats", True):
+        raw_priority = 0 if r.path.suffix.lower() in RAW_EXTENSIONS else 1
+    else:
+        raw_priority = 0  # no preference — format split is handled by _split_by_format
+
     if strategy == "oldest":
-        # Try EXIF date first, then filename date, then mtime
+        # Try EXIF date first, then filename date, then mtime.
+        # Use -file_size as tiebreaker so the larger (higher-quality) file wins
+        # when two images share the same timestamp (e.g. burst or exact duplicates).
         if settings.sort_by_exif_date:
             dt = extract_date_from_exif(r.path)
             if dt is not None:
-                return dt.timestamp()
+                return (raw_priority, dt.timestamp(), -r.file_size)
         if settings.sort_by_filename_date:
             dt = extract_date_from_filename(r.path.name)
             if dt is not None:
-                return dt.timestamp()
-        return r.mtime
-    return -r.pixels
+                return (raw_priority, dt.timestamp(), -r.file_size)
+        return (raw_priority, r.mtime, -r.file_size)
+    # pixels strategy: prefer more pixels, then larger file size as tiebreaker.
+    # This ensures that between two same-resolution files (pHash=0 exact duplicates)
+    # the less-compressed (larger file) copy is consistently chosen as the original.
+    return (raw_priority, -r.pixels, -r.file_size)
 
 
 def find_groups(
@@ -462,12 +567,14 @@ def find_groups(
         if px != py:
             parent[px] = py
 
-    # Maximum effective threshold used across all pair types (series pairs use
-    # a multiplied threshold, so we query the BK-tree with that wider radius
-    # and let _can_be_similar apply the exact per-pair logic).
+    # Maximum effective threshold used across all pair types.
+    # Series pairs use a multiplied threshold; cross-format RAW/JPEG pairs use
+    # cross_format_threshold_factor.  We query the BK-tree with the widest radius
+    # and let _can_be_similar apply the exact per-pair logic.
     _max_query_thr = max(
         settings.threshold,
         int(settings.threshold * getattr(settings, "series_threshold_factor", 2.0)),
+        int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
     )
 
     if n > _BKTREE_THRESHOLD:
@@ -643,11 +750,14 @@ def _classify_group(
     """
     Given a set of similar images, classify each as original or preview.
 
-    Same-dimension handling distinguishes two cases:
+    Same-dimension handling distinguishes three cases:
       - Exact duplicates (pHash ≤ _EXACT_DUP_PHASH within the bucket): same image
         saved/exported twice.  Keep the best copy; trash the rest as duplicates.
-      - Genuine series / burst (pHash > _EXACT_DUP_PHASH): different shots at the
-        same resolution.  Keep all; none are previews.
+      - Cross-format pairs (RAW vs JPEG of the same shot): pHash 3-8 bits apart
+        due to different colour rendering.  keep_all_formats=True → keep both as
+        originals; keep_all_formats=False → keep RAW, trash JPEG.
+      - Genuine series / burst (pHash > _EXACT_DUP_PHASH, same format): different
+        shots at the same resolution.  Keep all; none are previews.
 
     A member is only a preview if BOTH dimensions are strictly smaller than the best.
 
@@ -669,7 +779,16 @@ def _classify_group(
                 return False
             w_ratio = abs(a.width - b.width) / max(a.width, b.width)
             h_ratio = abs(a.height - b.height) / max(a.height, b.height)
-            return w_ratio <= tol and h_ratio <= tol
+            # For cross-format pairs (RAW vs JPEG), use a wider tolerance:
+            # rawpy decodes the full sensor area, adding a few border pixels
+            # vs the camera JPEG crop (e.g. 6024×4020 vs 6000×4000 = 0.4%).
+            a_is_raw = a.path.suffix.lower() in RAW_EXTENSIONS
+            b_is_raw = b.path.suffix.lower() in RAW_EXTENSIONS
+            effective_tol = (
+                max(tol, _CROSS_FORMAT_DIM_TOL)
+                if a_is_raw != b_is_raw else tol
+            )
+            return w_ratio <= effective_tol and h_ratio <= effective_tol
 
         # Build dimension buckets (union-find for transitivity)
         dim_parent = list(range(len(members_sorted)))
@@ -704,18 +823,58 @@ def _classify_group(
             # pHash ≤ _EXACT_DUP_PHASH means "same image, different file" —
             # keep only the best copy and trash the rest.
             # pHash > _EXACT_DUP_PHASH means genuine burst/series shots.
+            #
+            # Special case: cross-format pairs (RAW vs JPEG of the same shot)
+            # have pHash distance 3-8 bits due to different colour rendering, so
+            # they would incorrectly be classified as series shots.  Instead we
+            # treat all-cross-format buckets as exact duplicates so the best copy
+            # (RAW when keep_all_formats=False) is kept and the rest are trashed.
             max_pdist = max(
                 recs[a].phash - recs[b].phash
                 for a in range(len(recs))
                 for b in range(a + 1, len(recs))
             )
 
-            if max_pdist <= _EXACT_DUP_PHASH:
-                # Exact duplicates: best (bucket_indices[0]) stays; the rest are trashed.
+            # A bucket is "all cross-format" when it contains both RAW and
+            # non-RAW files — i.e. the same shot in two different file formats.
+            raw_flags = {r.path.suffix.lower() in RAW_EXTENSIONS for r in recs}
+            all_cross_format = (True in raw_flags and False in raw_flags)
+
+            if all_cross_format:
+                # Cross-format pair: same shot captured as both RAW and JPEG.
+                # The elevated pHash distance (3-8 bits) is due to different
+                # colour rendering, NOT different image content.
+                if settings.keep_all_formats:
+                    # Keep the best representative of each format; trash same-
+                    # format extras.  members_sorted is already sorted best-first
+                    # so the first RAW and first non-RAW in the bucket are keepers.
+                    # We do NOT add these to series_indices — _split_by_format()
+                    # will keep the best-of-format using _same_size_as_best().
+                    raw_in_bucket = [
+                        bi for bi in bucket_indices
+                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS
+                    ]
+                    nonraw_in_bucket = [
+                        bi for bi in bucket_indices
+                        if members_sorted[bi].path.suffix.lower() not in RAW_EXTENSIONS
+                    ]
+                    # Keep only the first (best-sorted) of each format; trash extras.
+                    for dup_idx in raw_in_bucket[1:]:
+                        exact_dup_indices.add(dup_idx)
+                    for dup_idx in nonraw_in_bucket[1:]:
+                        exact_dup_indices.add(dup_idx)
+                else:
+                    # Keep only the single best copy (RAW preferred via _sort_key);
+                    # treat all other-format copies as duplicates to trash.
+                    for dup_idx in bucket_indices[1:]:
+                        exact_dup_indices.add(dup_idx)
+            elif max_pdist <= _EXACT_DUP_PHASH:
+                # True exact duplicates: same format, same content.
+                # Keep the best (bucket_indices[0]); trash the rest.
                 for dup_idx in bucket_indices[1:]:
                     exact_dup_indices.add(dup_idx)
             else:
-                # Genuine series: keep every member.
+                # Genuine series / burst: keep every member.
                 is_series = True
                 series_indices.update(bucket_indices)
 
@@ -802,7 +961,15 @@ def _split_by_format(
             return False
         w_ratio = abs(r.width - global_best.width) / max(r.width, global_best.width)
         h_ratio = abs(r.height - global_best.height) / max(r.height, global_best.height)
-        return w_ratio <= tol and h_ratio <= tol
+        # Cross-format pairs get a wider tolerance: rawpy decodes a few extra
+        # sensor-border pixels so a CR2 decodes larger than the camera JPEG.
+        r_is_raw = r.path.suffix.lower() in RAW_EXTENSIONS
+        best_is_raw = global_best.path.suffix.lower() in RAW_EXTENSIONS
+        effective_tol = (
+            max(tol, _CROSS_FORMAT_DIM_TOL)
+            if r_is_raw != best_is_raw else tol
+        )
+        return w_ratio <= effective_tol and h_ratio <= effective_tol
 
     originals: list[ImageRecord] = []
     previews: list[ImageRecord] = []

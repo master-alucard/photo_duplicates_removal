@@ -135,9 +135,15 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "When DISABLED (default): RAW files are paired with their JPEG/TIFF companions "
         "by matching filename stems (e.g., IMG_1234.CR2 + IMG_1234.jpg).\n\n"
         "When ENABLED: rawpy decodes the RAW file and computes an actual perceptual hash, "
-        "allowing RAW files to participate in duplicate detection independently.\n\n"
+        "allowing cross-format duplicate detection even when RAW and JPEG filenames differ. "
+        "The scanner automatically relaxes its similarity thresholds for RAW vs JPEG pairs "
+        "because rawpy demosaicing produces slightly different colour rendering than the "
+        "camera's own JPEG engine.\n\n"
+        "Cross-format behaviour:\n"
+        "  • Keep All Formats ON  → RAW + JPEG both appear as originals side by side.\n"
+        "  • Keep All Formats OFF → RAW is kept as the original; JPEG is trashed.\n\n"
         "Note: rawpy must be installed separately. Adds ~30% processing time.\n\n"
-        "Recommended: OFF unless you have unmatched RAW files."
+        "Recommended: ON when your library has RAW + JPEG pairs from the same shots."
     ),
     "keep_strategy": (
         "Keep Strategy",

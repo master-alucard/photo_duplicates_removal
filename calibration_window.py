@@ -138,6 +138,7 @@ class CalibrationPanel(tk.Frame):
         self._start_on_run_tab      = start_on_run_tab
         self.results                = []
         self._stop_flag             = [False]
+        self._last_log              = None
 
         self._calib_folder = tk.StringVar(value=settings.calib_folder or "")
         self._status_var   = tk.StringVar(value="Ready.")
@@ -228,14 +229,29 @@ class CalibrationPanel(tk.Frame):
 
         ttk.Separator(f, orient="horizontal").pack(fill="x", padx=16, pady=8)
 
-        # ── what will be tested ───────────────────────────────────────────
-        ttk.Label(f, text="Parameters being calibrated:", font=_BOLD).pack(
+        # ── parameters overview (scrollable) ──────────────────────────────
+        ttk.Label(f, text="Calibration rounds and parameters:", font=_BOLD).pack(
             anchor="w", padx=16)
-        for line in (
-            "• threshold  (similarity sensitivity, tested at: 4 6 8 10 12 14 16 18 20)",
-            "• preview_ratio  (min size difference to classify as preview, tested: 0.75–0.95)",
-        ):
-            ttk.Label(f, text=line, font=_NORMAL).pack(anchor="w", padx=28, pady=1)
+
+        params_outer = tk.Frame(f, bg=_BG)
+        params_outer.pack(fill="both", expand=True, padx=16, pady=(4, 0))
+
+        self._params_text = tk.Text(
+            params_outer, wrap="none", relief="flat",
+            bg="#fafafa", padx=10, pady=6,
+            font=_MONO, state="disabled", height=12,
+        )
+        params_vsb = ttk.Scrollbar(params_outer, orient="vertical",
+                                   command=self._params_text.yview)
+        params_hsb = ttk.Scrollbar(params_outer, orient="horizontal",
+                                   command=self._params_text.xview)
+        self._params_text.configure(yscrollcommand=params_vsb.set,
+                                    xscrollcommand=params_hsb.set)
+        params_vsb.pack(side="right", fill="y")
+        params_hsb.pack(side="bottom", fill="x")
+        self._params_text.pack(fill="both", expand=True)
+
+        self._refresh_params_text()
 
         ttk.Separator(f, orient="horizontal").pack(fill="x", padx=16, pady=8)
 
@@ -255,6 +271,122 @@ class CalibrationPanel(tk.Frame):
         _mat_disable(self._stop_btn)
 
         self._calib_folder.trace_add("write", self._on_folder_change)
+
+    def _refresh_params_text(self, log=None) -> None:
+        """Build and display the full calibration parameters overview in the Run tab."""
+        try:
+            from calibrator import (
+                ROUND1_THRESHOLDS, ROUND1_RATIOS,
+                ROUND4_SERIES_THRESHOLD_FACTORS, ROUND4_BRIGHTNESS_MAX_DIFFS,
+                ROUND4_HIST_MIN_SIMILARITIES, ROUND4_AR_TOLERANCE_PCTS,
+                ROUND4_CF_THRESHOLD_FACTORS, ROUND4_DARK_THRESHOLDS,
+                ROUND4_DARK_TIGHTEN_FACTORS, ROUND4_SERIES_TOLERANCE_PCTS,
+                _ROUND4_IMPACT_THR,
+            )
+        except Exception:
+            return
+
+        s = self.settings
+        lines: list[str] = []
+
+        # ── constant settings ──────────────────────────────────────────
+        lines.append("── Constant settings (held fixed during calibration) ──────────────────")
+        constants = [
+            ("ar_tolerance_pct",              s.ar_tolerance_pct),
+            ("brightness_max_diff",           s.brightness_max_diff),
+            ("use_dual_hash",                 s.use_dual_hash),
+            ("use_histogram",                 s.use_histogram),
+            ("hist_min_similarity",           s.hist_min_similarity),
+            ("dark_protection",               s.dark_protection),
+            ("dark_threshold",                s.dark_threshold),
+            ("dark_tighten_factor",           s.dark_tighten_factor),
+            ("series_tolerance_pct",          s.series_tolerance_pct),
+            ("series_threshold_factor",       s.series_threshold_factor),
+            ("disable_series_detection",      s.disable_series_detection),
+            ("cross_format_threshold_factor", getattr(s, "cross_format_threshold_factor", 5.0)),
+        ]
+        for k, v in constants:
+            lines.append(f"  {k:<36} = {v}")
+
+        # ── round 1 ───────────────────────────────────────────────────
+        lines.append("")
+        lines.append("── Round 1: Coarse threshold × preview_ratio grid ─────────────────────")
+        thr_str = "  ".join(str(t) for t in ROUND1_THRESHOLDS)
+        rat_str = "  ".join(f"{r:.2f}" for r in ROUND1_RATIOS)
+        n_r1 = len(ROUND1_THRESHOLDS) * len(ROUND1_RATIOS)
+        lines.append(f"  threshold     ({len(ROUND1_THRESHOLDS)} values): {thr_str}")
+        lines.append(f"  preview_ratio ({len(ROUND1_RATIOS)} values): {rat_str}")
+        lines.append(f"  Total: {n_r1} combinations")
+
+        # ── round 2 ───────────────────────────────────────────────────
+        lines.append("")
+        lines.append("── Round 2: Fine preview_ratio around best Round 1 result ─────────────")
+        lines.append("  Sweeps ±0.01 … ±0.04 around best R1 ratio for top-5 thresholds")
+        lines.append("  (~8 new ratios × top-5 thresholds  ≈ up to 40 additional combos)")
+
+        # ── round 3 ───────────────────────────────────────────────────
+        lines.append("")
+        lines.append("── Round 3: Feature flag variants (using best threshold / ratio) ───────")
+        feature_variants = [
+            ("no_series_detect",  "disable_series_detection = True"),
+            ("no_dual_hash",      "use_dual_hash = False"),
+            ("no_histogram",      "use_histogram = False"),
+            ("no_dark_protect",   "dark_protection = False"),
+            ("loose_AR",          f"ar_tolerance_pct = {s.ar_tolerance_pct * 2:.1f}  (doubled)"),
+            ("tight_AR",          f"ar_tolerance_pct = {max(1.0, s.ar_tolerance_pct / 2):.1f}  (halved)"),
+            ("loose_brightness",  f"brightness_max_diff = {s.brightness_max_diff * 2:.1f}  (doubled)"),
+        ]
+        for label, desc in feature_variants:
+            lines.append(f"  {label:<22} → {desc}")
+
+        # ── round 4 ───────────────────────────────────────────────────
+        lines.append("")
+        lines.append(
+            f"── Round 4: Conditional sweeps  "
+            f"(triggered when Round 3 impact ≥ {_ROUND4_IMPACT_THR * 100:.1f}%) ──────"
+        )
+        r4_params = [
+            ("series_threshold_factor",       "always",
+             ROUND4_SERIES_THRESHOLD_FACTORS),
+            ("hist_min_similarity",           "if no_histogram impactful",
+             ROUND4_HIST_MIN_SIMILARITIES),
+            ("brightness_max_diff",           "if loose_brightness impactful",
+             ROUND4_BRIGHTNESS_MAX_DIFFS),
+            ("ar_tolerance_pct",              "if loose_AR or tight_AR impactful",
+             ROUND4_AR_TOLERANCE_PCTS),
+            ("cross_format_threshold_factor", "if RAW files present in data",
+             ROUND4_CF_THRESHOLD_FACTORS),
+            ("dark_threshold",                "if no_dark_protect impactful",
+             ROUND4_DARK_THRESHOLDS),
+            ("dark_tighten_factor",           "if no_dark_protect impactful",
+             ROUND4_DARK_TIGHTEN_FACTORS),
+            ("series_tolerance_pct",          "if no_series_detect impactful",
+             ROUND4_SERIES_TOLERANCE_PCTS),
+        ]
+        swept_params: set[str] = set()
+        if log:
+            swept_params = {name for name, _ in log.parameter_sweeps}
+        for param, condition, vals in r4_params:
+            val_str = "  ".join(str(v) for v in vals)
+            if log:
+                status = "  ✓ swept" if param in swept_params else "  — skipped"
+            else:
+                status = ""
+            lines.append(f"  {param:<36}  ({condition}){status}")
+            lines.append(f"    values: {val_str}")
+
+        # ── round 4 optimized results (shown after calibration) ───────
+        if log and log.optimized_params:
+            lines.append("")
+            lines.append("── Round 4 Results: Recommended parameter values ──────────────────────")
+            for param, val in log.optimized_params.items():
+                lines.append(f"  {param:<36} → {val}")
+
+        text = "\n".join(lines)
+        self._params_text.configure(state="normal")
+        self._params_text.delete("1.0", "end")
+        self._params_text.insert("1.0", text)
+        self._params_text.configure(state="disabled")
 
     # ── tab 3: results ────────────────────────────────────────────────────────
 
@@ -385,8 +517,9 @@ class CalibrationPanel(tk.Frame):
 
         n = len(results)
         best = results[0]
+        rounds_run = log.rounds_run if log is not None else "?"
         self._status_var.set(
-            f"Done. {n} combinations tested across 3 rounds. "
+            f"Done. {n} combinations tested across {rounds_run} rounds. "
             f"Best: threshold={best.threshold}  "
             f"preview_ratio={best.preview_ratio:.3f}  "
             f"→ {best.score * 100:.1f}%"
@@ -396,8 +529,10 @@ class CalibrationPanel(tk.Frame):
 
         if log is not None:
             from calibrator import format_log
+            self._last_log = log
             self._log_text = format_log(log)
             self._set_log_text(self._log_text)
+            self._refresh_params_text(log)
 
         self._nb.select(2)
 
@@ -500,7 +635,9 @@ class CalibrationPanel(tk.Frame):
                                 parent=self.winfo_toplevel())
             return
         r = self.results[0]
-        self._do_apply(r.threshold, r.preview_ratio)
+        self._do_apply(r.threshold, r.preview_ratio,
+                       optimized_params=(self._last_log.optimized_params
+                                         if self._last_log else None))
 
     def _apply_selected(self) -> None:
         sel = self._tree.selection()
@@ -512,16 +649,31 @@ class CalibrationPanel(tk.Frame):
             r = self.results[idx]
             self._do_apply(r.threshold, r.preview_ratio)
 
-    def _do_apply(self, threshold: int, preview_ratio: float) -> None:
+    def _do_apply(self, threshold: int, preview_ratio: float,
+                  optimized_params: "dict | None" = None) -> None:
         self.apply_cb(threshold, preview_ratio)
+
+        # Apply Round 4 optimized params (e.g. series_threshold_factor=0.5) directly
+        # to the live settings object so they take effect immediately.
+        extra_applied: list[str] = []
+        if optimized_params:
+            for param, val in optimized_params.items():
+                try:
+                    setattr(self.settings, param, val)
+                    extra_applied.append(f"{param}={val}")
+                except Exception:
+                    pass
+
         if self.calibration_applied_cb:
             try:
                 self.calibration_applied_cb(threshold, preview_ratio)
             except Exception:
                 pass
-        self._apply_var.set(
-            f"Applied: threshold={threshold},  preview_ratio={preview_ratio:.2f}"
-        )
+
+        msg = f"Applied: threshold={threshold},  preview_ratio={preview_ratio:.2f}"
+        if extra_applied:
+            msg += "  |  " + ",  ".join(extra_applied)
+        self._apply_var.set(msg)
 
     # ── close / stop ──────────────────────────────────────────────────────────
 
