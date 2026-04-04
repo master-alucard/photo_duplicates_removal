@@ -570,11 +570,18 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of
     # pHash drift even for pixel-identical content.  Apply a rotation-lenient
     # threshold floor so that 90°/180°/270°-rotated JPEG duplicates are not
-    # filtered out.  rotation_threshold_factor=3.0 (default) → thr = 2×3 = 6,
-    # which covers 100% of photo-like JPEG pairs at quality≥85.
+    # filtered out.  rotation_threshold_factor=3.0 (default) → floor = 2×3 = 6 bits.
+    #
+    # IMPORTANT: the floor is an absolute bit count, not a multiple of the current
+    # threshold.  Using settings.threshold × factor would explode during calibration
+    # (which sweeps threshold up to 20), making the floor 60 bits and causing all
+    # same-dimension pairs to look like rotation duplicates (O(n²) performance hit).
+    # The JPEG re-encoding drift is a fixed physical property (~6 bits), independent
+    # of whatever threshold the user or calibrator has chosen.
     if is_rotated:
-        rotation_thr = int(settings.threshold * getattr(settings, "rotation_threshold_factor", 3.0))
-        eff_threshold = max(eff_threshold, rotation_thr)
+        _base = 2  # default threshold — rotation drift is relative to this, not the sweep value
+        rotation_floor = int(_base * getattr(settings, "rotation_threshold_factor", 3.0))
+        eff_threshold = max(eff_threshold, rotation_floor)
 
     if phash_dist > eff_threshold:
         return False
@@ -684,7 +691,7 @@ def find_groups(
         settings.threshold,
         int(settings.threshold * getattr(settings, "series_threshold_factor",    2.0)),
         int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
-        int(settings.threshold * getattr(settings, "rotation_threshold_factor",  3.0)),
+        int(2 * getattr(settings, "rotation_threshold_factor",  3.0)),  # fixed floor, not scaled
     )
 
     if n > _BKTREE_THRESHOLD:
@@ -1008,10 +1015,10 @@ def _classify_group(
                 # pHash distance; their rotation-aware minimum distance is small (≤ 6).
                 # Detect rotation duplicates by checking if ALL intra-bucket pairs have
                 # a rotation-aware minimum distance within the rotation threshold.
-                rot_thr = int(
-                    settings.threshold
-                    * getattr(settings, "rotation_threshold_factor", 3.0)
-                )
+                # Fixed physical floor — same reasoning as in _can_be_similar:
+                # rotation drift ≤ 6 bits regardless of the calibration threshold.
+                _base = 2
+                rot_thr = int(_base * getattr(settings, "rotation_threshold_factor", 3.0))
 
                 def _rot_aware_dist(ra: "ImageRecord", rb: "ImageRecord") -> int:
                     d = int(ra.phash - rb.phash)
