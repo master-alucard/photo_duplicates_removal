@@ -48,6 +48,14 @@ _BKTREE_THRESHOLD = 200
 # 2 % is a safe upper bound that still distinguishes full-res from downscaled.
 _CROSS_FORMAT_DIM_TOL = 0.02
 
+# Relaxed histogram-intersection floor for cross-format pairs (RAW vs JPEG).
+# Same-shot RAW vs camera JPEG typically achieves hist_sim ≥ 0.40 despite
+# different colour rendering / tone curves.  Genuinely different images
+# (different subjects, scenes) fall well below 0.25.  Without this floor,
+# the lenient cross-format pHash threshold (10 bits) can group unrelated
+# images that happen to share similar spatial-frequency structure.
+_CROSS_FORMAT_HIST_FLOOR = 0.25
+
 
 # ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────
 
@@ -598,12 +606,18 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         if a.dhash - b.dhash > dhash_thr:
             return False
 
-    # 5. Histogram intersection — skip for cross-format pairs: RAW color rendering
-    #    (with camera profile) differs visibly from camera JPEG engine output, so
-    #    histogram distance would be misleading.
-    if not cross_format and settings.use_histogram and a.histogram and b.histogram:
+    # 5. Histogram intersection.
+    #    Cross-format pairs (RAW vs JPEG) use a relaxed floor instead of the full
+    #    hist_min_similarity check.  Same-shot RAW vs camera JPEG typically achieves
+    #    histogram similarity ≥ 0.40 despite different colour rendering / tone curves;
+    #    genuinely different images fall below 0.25.  Without this floor, the lenient
+    #    cross-format pHash threshold (10 bits) can false-positive unrelated images.
+    if settings.use_histogram and a.histogram and b.histogram:
         intersection = sum(min(x, y) for x, y in zip(a.histogram, b.histogram)) / 3
-        if intersection < settings.hist_min_similarity:
+        if cross_format:
+            if intersection < _CROSS_FORMAT_HIST_FLOOR:
+                return False
+        elif intersection < settings.hist_min_similarity:
             return False
 
     return True
