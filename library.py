@@ -372,6 +372,38 @@ class Library:
         except Exception:
             return {}
 
+    def load_cache_merged(self, folder_path: str) -> "dict[str, FileRecord]":
+        """Load file-record cache for *folder_path*, pulling in records from any
+        tracked ancestor folder whose recursive cache covers files inside
+        *folder_path*.
+
+        Use this instead of :meth:`load_cache` before a scan so that scanning a
+        sub-folder (e.g. ``C:\\Photos\\Vacation``) automatically benefits from a
+        parent folder's cache (``C:\\Photos``) even if the sub-folder was never
+        tracked separately.
+
+        Priority rule: exact-folder records override ancestor records, so a
+        previously cached sub-folder scan always wins over a stale parent entry.
+        """
+        norm = self._norm(folder_path)
+        norm_with_sep = norm + os.sep
+        merged: "dict[str, FileRecord]" = {}
+
+        # Pull matching records from every tracked ancestor
+        for tracked_path in list(self._index):
+            if tracked_path == norm:
+                continue  # handled by exact load below
+            # Is tracked_path a proper ancestor of norm?
+            if norm.startswith(tracked_path + os.sep):
+                for file_key, record in self.load_cache(tracked_path).items():
+                    # Keep only files that live inside our target folder
+                    if file_key.startswith(norm_with_sep):
+                        merged[file_key] = record
+
+        # Exact folder cache overrides ancestor records
+        merged.update(self.load_cache(norm))
+        return merged
+
     def save_cache(self, path: str, cache: dict[str, FileRecord]) -> None:
         """Persist the file-record cache for *path*."""
         norm       = self._norm(path)

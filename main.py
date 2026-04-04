@@ -1900,7 +1900,7 @@ class App:
             try:
                 from library import Library, get_library_dir
                 _lib = Library.load(get_library_dir())
-                return _lib.load_cache(str(folder.resolve())), _lib
+                return _lib.load_cache_merged(str(folder.resolve())), _lib
             except Exception:
                 return None, None
 
@@ -2349,10 +2349,19 @@ class App:
         # ── Library row ───────────────────────────────────────────────────
         lib_row = ttk.Frame(container)
         ttk.Label(lib_row, width=label_width).pack(side=tk.LEFT)
-        lib_combo = ttk.Combobox(lib_row, state="readonly")
-        lib_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        badge_lbl = ttk.Label(lib_row, text="", width=12, anchor=tk.W)
-        badge_lbl.pack(side=tk.LEFT)
+        lib_path_entry = ttk.Entry(lib_row, textvariable=path_var, state="readonly")
+        lib_path_entry.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        badge_lbl = ttk.Label(lib_row, text="", width=10, anchor=tk.W)
+        badge_lbl.pack(side=tk.LEFT, padx=(0, 4))
+
+        def _open_lib_picker() -> None:
+            from library_tab import LibFolderPickerDialog
+            dlg = LibFolderPickerDialog(self.root)
+            if dlg.result:
+                path_var.set(dlg.result)
+                _update_badge(dlg.result)
+
+        ttk.Button(lib_row, text="Pick…", command=_open_lib_picker).pack(side=tk.RIGHT)
 
         # ── Trust row (shown only in Library mode) ────────────────────────
         trust_row = ttk.Frame(container)
@@ -2365,28 +2374,6 @@ class App:
 
         # ── Helpers ───────────────────────────────────────────────────────
 
-        def _refresh_combo() -> None:
-            """Reload Library folders into the combobox."""
-            try:
-                from library import Library, get_library_dir
-                _lib = Library.load(get_library_dir())
-                paths = [e.path for e in _lib.folders]
-            except Exception:
-                paths = []
-            lib_combo["values"] = paths
-            if paths:
-                cur = path_var.get()
-                if cur in paths:
-                    lib_combo.set(cur)
-                else:
-                    lib_combo.set(paths[0])
-                    path_var.set(paths[0])
-                _update_badge(path_var.get())
-            else:
-                lib_combo.set("")
-                badge_lbl.configure(
-                    text="No folders yet", foreground=_M_TEXT2)
-
         def _update_badge(selected: str) -> None:
             if not selected:
                 badge_lbl.configure(text="", foreground=_M_TEXT2)
@@ -2395,20 +2382,13 @@ class App:
             else:
                 badge_lbl.configure(text="✗  Missing", foreground=_M_ERROR)
 
-        def _on_combo_select(_event=None) -> None:
-            selected = lib_combo.get()
-            path_var.set(selected)
-            _update_badge(selected)
-
-        lib_combo.bind("<<ComboboxSelected>>", _on_combo_select)
-
         def _on_mode() -> None:
             # Hide all children first, then show only what's needed.
             # Operating within container keeps pack position stable in parent.
             for child in (browse_row, lib_row, trust_row):
                 child.pack_forget()
             if mode_var.get() == "library":
-                _refresh_combo()
+                _update_badge(path_var.get())
                 lib_row.pack(fill=tk.X, pady=2)
                 trust_row.pack(fill=tk.X, pady=(0, 4))
             else:
@@ -3235,7 +3215,8 @@ class App:
                 _lib_cache = None
                 try:
                     from library import Library, get_library_dir
-                    _lib_cache = Library.load(get_library_dir()).load_cache(str(src.resolve()))
+                    _lib = Library.load(get_library_dir())
+                    _lib_cache = _lib.load_cache_merged(str(src.resolve()))
                 except Exception:
                     _lib_cache = None
                 # trust_library (skip staleness check) only applies when the

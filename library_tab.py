@@ -10,6 +10,7 @@ Public API:
 """
 from __future__ import annotations
 
+import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -46,6 +47,7 @@ _TEXT2       = "#616161"
 _TEXT3       = "#9E9E9E"
 _DISABLED    = "#BDBDBD"
 
+_DUMMY_PREFIX = "DUMMY:"   # prefix for placeholder treeview items used in LibFolderPickerDialog
 
 # ── Status badge helpers ──────────────────────────────────────────────────────
 
@@ -112,6 +114,176 @@ def _mat_enable(btn: tk.Button) -> None:
 
 def _mat_disable(btn: tk.Button) -> None:
     btn.configure(state=tk.DISABLED, bg=_DISABLED, cursor="")
+
+
+class LibFolderPickerDialog:
+    """Modal dialog for picking any folder from the library hierarchy.
+
+    Shows tracked library folders (bold) in a hierarchical tree.  Each node
+    can be expanded to browse its filesystem sub-directories so the user can
+    pick a sub-folder that is covered by a tracked ancestor's cache.
+
+    Usage::
+
+        dlg = LibFolderPickerDialog(parent_widget)
+        if dlg.result:
+            do_something(dlg.result)  # absolute path string
+    """
+
+    def __init__(self, parent: tk.Widget,
+                 title: str = "Select Folder from Library") -> None:
+        from library import Library, get_library_dir
+        self._lib    = Library.load(get_library_dir())
+        self._result: Optional[str] = None
+
+        top = tk.Toplevel(parent)
+        top.title(title)
+        top.geometry("660x500")
+        top.resizable(True, True)
+        top.transient(parent)
+        top.grab_set()
+
+        # ── Instruction label ─────────────────────────────────────────────
+        tk.Label(
+            top,
+            text="Tracked library folders are shown in bold.\n"
+                 "Expand any folder to browse its sub-folders — all benefit from the parent's cached hashes.",
+            justify=tk.LEFT,
+            font=("Segoe UI", 9),
+            bg=top.cget("bg"),
+        ).pack(anchor=tk.W, padx=12, pady=(10, 4))
+
+        # ── Tree ──────────────────────────────────────────────────────────
+        tree_frame = tk.Frame(top)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10)
+
+        tree = ttk.Treeview(tree_frame, selectmode="browse")
+        tree.heading("#0", text="Folder", anchor=tk.W)
+        tree.column("#0", stretch=True)
+
+        vsb = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
+        tree.configure(yscrollcommand=vsb.set)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        tree.pack(fill=tk.BOTH, expand=True)
+
+        tree.tag_configure("tracked_ok",      font=("Segoe UI", 9, "bold"), foreground=_SUCCESS)
+        tree.tag_configure("tracked_missing", font=("Segoe UI", 9, "bold"), foreground=_ERROR)
+
+        self._tree = tree
+        self._top  = top
+
+        self._populate_tracked()
+        tree.bind("<<TreeviewOpen>>", self._on_expand)
+        tree.bind("<Double-1>",       self._on_double_click)
+
+        # ── Buttons ───────────────────────────────────────────────────────
+        btn_frame = tk.Frame(top, bg=top.cget("bg"))
+        btn_frame.pack(fill=tk.X, padx=10, pady=(6, 10))
+
+        _mat_btn(btn_frame, "Select", self._confirm, _ACCENT).pack(side=tk.RIGHT, padx=(4, 0))
+        tk.Button(btn_frame, text="Cancel", command=top.destroy,
+                  relief=tk.FLAT, padx=10, pady=4).pack(side=tk.RIGHT)
+
+        top.wait_window()
+
+    # ── Population ────────────────────────────────────────────────────────
+
+    def _populate_tracked(self) -> None:
+        """Insert tracked folders in a parent→child hierarchy."""
+        entries  = sorted(self._lib.folders, key=lambda e: e.path)
+        inserted: list[str] = []
+
+        for entry in entries:
+            path       = entry.path
+            parent_iid = self._best_parent(path, inserted)
+
+            if parent_iid:
+                try:
+                    display = str(Path(path).relative_to(Path(parent_iid)))
+                except ValueError:
+                    display = Path(path).name
+            else:
+                display = path
+
+            st  = self._lib.check_drive_status(entry)
+            tag = "tracked_ok" if st.state == "ok" else "tracked_missing"
+
+            if not self._tree.exists(path):
+                self._tree.insert(parent_iid, tk.END,
+                                  iid=path, text=display, tags=(tag,))
+
+            inserted.append(path)
+            self._maybe_add_dummy(path)
+
+    @staticmethod
+    def _best_parent(path: str, candidates: list) -> str:
+        """Return the longest candidate that is a proper ancestor of *path*."""
+        best, best_len = "", 0
+        for c in candidates:
+            if path.startswith(c + os.sep) and len(c) > best_len:
+                best, best_len = c, len(c)
+        return best
+
+    def _maybe_add_dummy(self, folder_iid: str) -> None:
+        """Add a placeholder child if the folder contains sub-directories."""
+        try:
+            has_sub = any(p.is_dir() for p in Path(folder_iid).iterdir())
+            if has_sub:
+                dummy = _DUMMY_PREFIX + folder_iid
+                if not self._tree.exists(dummy):
+                    self._tree.insert(folder_iid, tk.END, iid=dummy, text="")
+        except (PermissionError, OSError):
+            pass
+
+    # ── Lazy expansion ────────────────────────────────────────────────────
+
+    def _on_expand(self, _event=None) -> None:
+        iid   = self._tree.focus()
+        dummy = _DUMMY_PREFIX + iid
+        if dummy not in self._tree.get_children(iid):
+            return  # already fully loaded
+        self._tree.delete(dummy)
+
+        try:
+            subdirs = sorted(
+                p for p in Path(iid).iterdir()
+                if p.is_dir() and not p.name.startswith(".")
+            )
+        except (PermissionError, OSError):
+            return
+
+        tracked = {e.path for e in self._lib.folders}
+        existing = set(self._tree.get_children(iid))
+
+        for subdir in subdirs:
+            sub_str = str(subdir)
+            if sub_str in existing:
+                continue  # already inserted as a tracked child
+            tag = ("tracked_ok",) if sub_str in tracked else ()
+            self._tree.insert(iid, tk.END, iid=sub_str, text=subdir.name, tags=tag)
+            self._maybe_add_dummy(sub_str)
+
+    # ── Confirmation ──────────────────────────────────────────────────────
+
+    def _on_double_click(self, event=None) -> None:
+        item = self._tree.identify_row(event.y) if event else ""
+        if item and not item.startswith(_DUMMY_PREFIX):
+            self._result = item
+            self._top.destroy()
+
+    def _confirm(self) -> None:
+        sel = self._tree.selection()
+        if not sel:
+            return
+        iid = sel[0]
+        if iid.startswith(_DUMMY_PREFIX):
+            return
+        self._result = iid
+        self._top.destroy()
+
+    @property
+    def result(self) -> Optional[str]:
+        return self._result
 
 
 # ── Main builder ──────────────────────────────────────────────────────────────
@@ -236,17 +408,17 @@ class _LibraryTabController:
                              highlightbackground=_DIVIDER, highlightthickness=1)
         tree_card.pack(fill=tk.BOTH, expand=True)
 
-        cols = ("path", "status", "type", "files", "updated")
-        self._tree = ttk.Treeview(tree_card, columns=cols, show="headings",
+        cols = ("status", "type", "files", "updated")
+        self._tree = ttk.Treeview(tree_card, columns=cols, show="tree headings",
                                   selectmode="browse")
 
-        self._tree.heading("path",    text="Folder",        anchor=tk.W)
+        self._tree.heading("#0",      text="Folder",        anchor=tk.W)
         self._tree.heading("status",  text="Drive Status",  anchor=tk.W)
         self._tree.heading("type",    text="Drive Type",    anchor=tk.W)
         self._tree.heading("files",   text="Cached Files",  anchor=tk.E)
         self._tree.heading("updated", text="Last Updated",  anchor=tk.W)
 
-        self._tree.column("path",    width=380, minwidth=200, stretch=True)
+        self._tree.column("#0",      width=340, minwidth=180, stretch=True)
         self._tree.column("status",  width=110, minwidth=90,  stretch=False)
         self._tree.column("type",    width=100, minwidth=80,  stretch=False)
         self._tree.column("files",   width=90,  minwidth=60,  stretch=False, anchor=tk.E)
@@ -321,7 +493,7 @@ class _LibraryTabController:
     # ── Table helpers ─────────────────────────────────────────────────────
 
     def _reload_table(self) -> None:
-        """Re-read the library from disk and repopulate the treeview."""
+        """Re-read the library from disk and repopulate the treeview in folder hierarchy order."""
         self._lib = Library.load(get_library_dir())
         children = self._tree.get_children()
         if children:
@@ -333,16 +505,34 @@ class _LibraryTabController:
         summary = f"{n} folder{'s' if n != 1 else ''}  ·  {total_files:,} cached files"
         self._summary_lbl.configure(text=summary)
 
-        for entry in entries:
-            status = self._statuses.get(entry.path)
-            self._insert_row(entry, status)
+        # Build parent→child hierarchy (sort by path so parents come first)
+        sorted_entries = sorted(entries, key=lambda e: e.path)
+        inserted: list[str] = []
+
+        for entry in sorted_entries:
+            path       = entry.path
+            parent_iid = ""
+            best_len   = 0
+            for ins in inserted:
+                if path.startswith(ins + os.sep) and len(ins) > best_len:
+                    parent_iid = ins
+                    best_len   = len(ins)
+
+            status = self._statuses.get(path)
+            self._insert_row(entry, status, parent_iid=parent_iid)
+            inserted.append(path)
+
+        # Auto-expand top-level nodes
+        for iid in self._tree.get_children(""):
+            self._tree.item(iid, open=True)
 
         self._selected = None
         self._update_btn_states()
 
     def _insert_row(self, entry: FolderEntry,
-                    status: Optional[DriveStatus] = None) -> None:
-        """Insert or update a single treeview row for *entry*."""
+                    status: Optional[DriveStatus] = None,
+                    parent_iid: str = "") -> None:
+        """Insert a single treeview row for *entry* under *parent_iid*."""
         if status is None:
             status_text = "Checking…"
             tag = "unknown"
@@ -354,12 +544,22 @@ class _LibraryTabController:
         drive_label = _DRIVE_TYPE_LABELS.get(entry.drive_type, entry.drive_type.title())
         updated     = _fmt_date(entry.last_updated)
 
+        # Display name: relative sub-path when nested, full path at root level
+        path = entry.path
+        if parent_iid:
+            try:
+                display = str(Path(path).relative_to(Path(parent_iid)))
+            except ValueError:
+                display = Path(path).name
+        else:
+            display = path
+
         self._tree.insert(
-            "", tk.END,
-            iid   = entry.path,
-            values = (entry.path, status_text, drive_label,
-                      f"{entry.file_count:,}", updated),
-            tags  = (tag,),
+            parent_iid, tk.END,
+            iid    = path,
+            text   = display,
+            values = (status_text, drive_label, f"{entry.file_count:,}", updated),
+            tags   = (tag,),
         )
 
     def _refresh_row(self, entry: FolderEntry) -> None:
@@ -378,8 +578,7 @@ class _LibraryTabController:
 
         self._tree.item(
             entry.path,
-            values = (entry.path, status_text, drive_label,
-                      f"{entry.file_count:,}", updated),
+            values = (status_text, drive_label, f"{entry.file_count:,}", updated),
             tags   = (tag,),
         )
 
