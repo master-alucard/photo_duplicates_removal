@@ -674,9 +674,8 @@ class ReportViewer(tk.Frame):
             ).pack(pady=(2, 0))
 
             fname = rec.path.name
-            fname_short = fname[:15] + "…" if len(fname) > 16 else fname
             tk.Label(
-                tile, text=fname_short,
+                tile, text=fname,
                 font=("Segoe UI", 7), bg=bg, fg="#9E9E9E",
                 wraplength=max_thumb,
             ).pack()
@@ -687,7 +686,6 @@ class ReportViewer(tk.Frame):
         else:
             # ── Normal tile ───────────────────────────────────────────────
             fname = rec.path.name
-            fname_short = fname[:15] + "…" if len(fname) > 16 else fname
 
             if show_checkbox:
                 cb_frame = tk.Frame(tile, bg=bg)
@@ -701,7 +699,7 @@ class ReportViewer(tk.Frame):
                 cb.pack(side=tk.LEFT)
 
                 tk.Label(
-                    cb_frame, text=fname_short,
+                    cb_frame, text=fname,
                     font=("Segoe UI", 7), bg=bg, fg=_M_TEXT1,
                     wraplength=max_thumb,
                 ).pack(side=tk.LEFT)
@@ -721,7 +719,7 @@ class ReportViewer(tk.Frame):
                 var.trace_add("write", _toggle_badge)
             else:
                 tk.Label(
-                    tile, text=fname_short,
+                    tile, text=fname,
                     font=("Segoe UI", 7, "bold"), bg=bg, fg=_M_TEXT1,
                     wraplength=max_thumb,
                 ).pack()

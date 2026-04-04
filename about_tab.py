@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.0.3"
+APP_VERSION   = "1.0.4"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
@@ -279,6 +279,8 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
                           font=("Segoe UI", 9), bg=_SURFACE, fg=_TEXT2)
     status_lbl.pack(anchor=tk.W, pady=(0, 8))
 
+    _download_btn: list[tk.Widget] = []   # single-element list so inner funcs can rebind it
+
     def _do_check() -> None:
         status_var.set("Checking…")
         check_btn.configure(state=tk.DISABLED)
@@ -286,6 +288,14 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
         def _run():
             result = _check_github()
             def _update():
+                # Remove any previous download button before potentially creating a new one
+                if _download_btn:
+                    try:
+                        _download_btn[0].destroy()
+                    except Exception:
+                        pass
+                    _download_btn.clear()
+
                 check_btn.configure(state=tk.NORMAL)
                 if result is None:
                     status_var.set("Could not reach GitHub — check your internet connection.")
@@ -298,10 +308,11 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
                     status_var.set(
                         f"⬆  Version {result['version']} is available!")
                     status_lbl.configure(fg=_PRIMARY)
-                    # Show download button
-                    _mat_btn(upd_inner, f"⬇  Download {result['version']}",
-                             lambda: _open_url(result["url"]),
-                             _PRIMARY, font_size=9).pack(anchor=tk.W, pady=(4, 0))
+                    btn = _mat_btn(upd_inner, f"⬇  Download {result['version']}",
+                                   lambda: _open_url(result["url"]),
+                                   _PRIMARY, font_size=9)
+                    btn.pack(anchor=tk.W, pady=(4, 0))
+                    _download_btn.append(btn)
                 else:
                     status_var.set("No update found.")
                     status_lbl.configure(fg=_TEXT2)

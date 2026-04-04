@@ -114,6 +114,10 @@ class ImageRecord:
     histogram: list[float]          # 96-value normalized (32 bins x 3 RGB channels)
     companions: list[Path] = field(default_factory=list)  # RAW companion paths
     metadata_count: int = 0         # number of EXIF fields
+    # Rotation hashes (None when record came from an old cache / serialised state)
+    phash_r90:  "Optional[imagehash.ImageHash]" = None
+    phash_r180: "Optional[imagehash.ImageHash]" = None
+    phash_r270: "Optional[imagehash.ImageHash]" = None
 
     @property
     def pixels(self) -> int:
@@ -182,10 +186,22 @@ def collect_images(
     stop_flag: Optional[list[bool]] = None,
     pause_flag: Optional[list[bool]] = None,
     failed_paths: Optional[list] = None,
+    library_cache: "Optional[dict]" = None,
+    trust_library: bool = False,
 ) -> List[ImageRecord]:
     """
     Walk folder, compute phash/dhash/histogram/brightness for every qualifying image.
     RAW files are either hashed (if use_rawpy) or stem-matched to their JPEG siblings.
+
+    Args:
+        library_cache:  Optional dict[str, FileRecord] keyed by resolved absolute path
+                        string.  When supplied, cache hits avoid PIL/imagehash entirely.
+                        After the scan the dict is updated in-place with every freshly
+                        hashed record so subsequent scans benefit from the new entries.
+        trust_library:  When True, cached entries are used without checking file
+                        modification time / size (useful for "skip change check" mode).
+                        When False (default) each cached entry is validated via
+                        FileRecord.is_stale() before being trusted.
     """
     skip_names_set = {s.strip() for s in settings.skip_names.split(",") if s.strip()}
 
@@ -243,17 +259,34 @@ def collect_images(
         import os as _os
         n_threads = max(1, (_os.cpu_count() or 1))
 
-    def _hash_one(args: tuple) -> "tuple[int, Path, Optional[ImageRecord], Optional[Exception]]":
+    # Tracks (path, ImageRecord) pairs that were freshly hashed (not from cache)
+    # so we can write them back into library_cache after collection.
+    _freshly_hashed: "list[tuple[Path, ImageRecord]]" = []
+
+    def _hash_one(args: tuple) -> "tuple[int, Path, Optional[ImageRecord], Optional[Exception], bool]":
+        """Returns (index, path, record, exception, was_cache_hit)."""
         i, path = args
+
+        # ── cache lookup ──────────────────────────────────────────────────
+        if library_cache is not None:
+            cached = library_cache.get(str(path.resolve()))
+            if cached is not None:
+                if trust_library or not cached.is_stale(path):
+                    try:
+                        return i, path, cached.to_image_record(), None, True
+                    except Exception:
+                        pass  # corrupted cache entry → fall through to fresh hash
+
+        # ── fresh hash ────────────────────────────────────────────────────
         try:
             ext = path.suffix.lower()
             if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
                 rec = _hash_raw(path, settings)
             else:
                 rec = _hash_image(path, settings)
-            return i, path, rec, None
+            return i, path, rec, None, False
         except Exception as exc:
-            return i, path, None, exc
+            return i, path, None, exc, False
 
     if n_threads > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -266,10 +299,11 @@ def collect_images(
                 futures[pool.submit(_hash_one, (i, path))] = i
 
             ordered: dict[int, Optional[ImageRecord]] = {}
+            ordered_cache_hit: dict[int, bool] = {}
             for fut in as_completed(futures):
                 if stop_flag and stop_flag[0]:
                     break
-                idx, path, rec, exc = fut.result()
+                idx, path, rec, exc, was_cache_hit = fut.result()
                 completed += 1
                 if progress_cb:
                     progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
@@ -278,6 +312,7 @@ def collect_images(
                         failed_paths.append(path)
                 else:
                     ordered[idx] = rec
+                    ordered_cache_hit[idx] = was_cache_hit
 
         for idx in sorted(ordered):
             rec = ordered[idx]
@@ -286,6 +321,8 @@ def collect_images(
             records.append(rec)
             stem_key = (all_image_paths[idx].parent.resolve(), all_image_paths[idx].stem.lower())
             stem_to_record[stem_key] = rec
+            if not ordered_cache_hit.get(idx, True):
+                _freshly_hashed.append((all_image_paths[idx], rec))
     else:
         for i, path in enumerate(all_image_paths):
             if stop_flag and stop_flag[0]:
@@ -297,12 +334,27 @@ def collect_images(
                 progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
 
             try:
-                ext = path.suffix.lower()
+                rec = None
+                was_cache_hit = False
 
-                if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
-                    rec = _hash_raw(path, settings)
-                else:
-                    rec = _hash_image(path, settings)
+                # ── cache lookup (sequential) ─────────────────────────────
+                if library_cache is not None:
+                    cached = library_cache.get(str(path.resolve()))
+                    if cached is not None:
+                        if trust_library or not cached.is_stale(path):
+                            try:
+                                rec = cached.to_image_record()
+                                was_cache_hit = True
+                            except Exception:
+                                rec = None  # fall through to fresh hash
+
+                # ── fresh hash ────────────────────────────────────────────
+                if rec is None:
+                    ext = path.suffix.lower()
+                    if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
+                        rec = _hash_raw(path, settings)
+                    else:
+                        rec = _hash_image(path, settings)
 
                 if rec is None:
                     continue
@@ -310,6 +362,8 @@ def collect_images(
                 records.append(rec)
                 stem_key = (path.parent.resolve(), path.stem.lower())
                 stem_to_record[stem_key] = rec
+                if not was_cache_hit:
+                    _freshly_hashed.append((path, rec))
 
             except Exception as exc:
                 if progress_cb:
@@ -324,6 +378,24 @@ def collect_images(
             key = (folder_path, stem)
             if key in stem_to_record:
                 stem_to_record[key].companions.append(raw_path)
+
+    # ── write freshly-hashed records back into library_cache ─────────────
+    # This keeps the caller's cache dict up-to-date so the next scan can
+    # benefit from the new entries without needing a separate save step.
+
+    if library_cache is not None and _freshly_hashed:
+        try:
+            from library import FileRecord as _FileRecord
+            for fh_path, fh_rec in _freshly_hashed:
+                try:
+                    st_mtime = fh_path.stat().st_mtime
+                    library_cache[str(fh_path.resolve())] = _FileRecord.from_image_record(
+                        fh_rec, st_mtime=st_mtime
+                    )
+                except Exception:
+                    pass  # best-effort; don't let a stat failure abort the scan
+        except ImportError:
+            pass  # library module not available — cache write-back skipped
 
     return records
 
@@ -349,6 +421,10 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         dh = imagehash.dhash(rgb) if settings.use_dual_hash else imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
         hist = _compute_histogram(rgb) if settings.use_histogram else []
         brightness = _compute_brightness(rgb) if settings.dark_protection else 128.0
+        # Rotation hashes for rotation-aware duplicate detection
+        ph_r90  = imagehash.phash(rgb.rotate(90,  expand=True))
+        ph_r180 = imagehash.phash(rgb.rotate(180, expand=True))
+        ph_r270 = imagehash.phash(rgb.rotate(270, expand=True))
 
     stat = path.stat()
     mtime = min(stat.st_mtime, stat.st_ctime)
@@ -366,6 +442,7 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         brightness=brightness,
         histogram=hist,
         metadata_count=metadata_count,
+        phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
     )
 
 
@@ -388,6 +465,9 @@ def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
     dh = imagehash.dhash(img)
     hist = _compute_histogram(img)
     brightness = _compute_brightness(img)
+    ph_r90  = imagehash.phash(img.rotate(90,  expand=True))
+    ph_r180 = imagehash.phash(img.rotate(180, expand=True))
+    ph_r270 = imagehash.phash(img.rotate(270, expand=True))
 
     stat = path.stat()
     mtime = min(stat.st_mtime, stat.st_ctime)
@@ -400,6 +480,7 @@ def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
         brightness=brightness,
         histogram=hist,
         metadata_count=0,
+        phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
     )
 
 
@@ -427,11 +508,15 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     demosaicing produces a slightly different rendering than the camera's own JPEG
     processor — typical pHash distance is 3-8 bits even for the same shot.
     """
-    # 1. Aspect ratio guard (valid for all pairs including cross-format)
+    # 1. Aspect ratio guard (valid for all pairs including cross-format).
+    #    Also accept the reciprocal AR so that 90°/270° rotated copies pass
+    #    (portrait vs landscape versions of the same image).
     ar_a = a.width / a.height if a.height else 1.0
     ar_b = b.width / b.height if b.height else 1.0
-    ar_diff = abs(ar_a - ar_b) / max(ar_a, ar_b, 0.001)
-    if ar_diff > settings.ar_tolerance_pct / 100:
+    ar_tol = settings.ar_tolerance_pct / 100
+    ar_diff_normal  = abs(ar_a - ar_b) / max(ar_a, ar_b, 0.001)
+    ar_diff_rotated = abs(ar_a - 1.0 / ar_b) / max(ar_a, 1.0 / ar_b, 0.001) if ar_b else 1.0
+    if min(ar_diff_normal, ar_diff_rotated) > ar_tol:
         return False
 
     # Detect cross-format pairs (RAW vs non-RAW or vice versa).
@@ -466,19 +551,26 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
             eff_threshold = max(1, int(eff_threshold * settings.dark_tighten_factor))
 
-    if a.phash - b.phash > eff_threshold:
+    # Rotation-aware pHash: check all orientations of b against a's upright hash.
+    # If any rotation of b is within threshold of a, they are rotation-equivalent.
+    dist_normal = a.phash - b.phash
+    dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
+    dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
+    dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
+    phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270)
+    is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
+
+    if phash_dist > eff_threshold:
         return False
 
     # 4. dHash — also scale for same-dimension pairs.
-    # Skipped for cross-format pairs: rawpy demosaicing produces very different
-    # directional gradients compared to the camera JPEG engine.  Calibration on
-    # Canon EOS M100 shows intra-group dHash up to 18 bits — well above the 15-bit
-    # limit that would be inferred from the pHash threshold — causing false negatives.
-    # Also skipped when pHash == 0: perceptually identical images (same DCT spectrum)
-    # may still diverge on local gradient direction (dHash) due to JPEG quality or
-    # denoising differences.  pHash=0 is already a definitive identity signal, so an
-    # additional dHash gate would only produce false negatives here.
-    if settings.use_dual_hash and not cross_format and a.phash - b.phash > 0:
+    # Skipped for cross-format pairs (rawpy demosaicing produces very different
+    # directional gradients vs the camera JPEG engine).
+    # Skipped for rotation matches: dHash is directional and not rotation-invariant —
+    # a 90°-rotated copy will always fail a naive dHash check.
+    # Also skipped when pHash == 0: a definitive identity signal; dHash would only add
+    # false negatives due to JPEG quality / denoising differences.
+    if settings.use_dual_hash and not cross_format and not is_rotated and dist_normal > 0:
         dhash_thr = eff_threshold * 1.5
         if a.dhash - b.dhash > dhash_thr:
             return False
@@ -579,8 +671,22 @@ def find_groups(
 
     if n > _BKTREE_THRESHOLD:
         # ── BK-tree fast path ─────────────────────────────────────────────
-        # Pre-compute integer hash values once; str(phash) yields hex.
-        hash_ints = [int(str(r.phash), 16) for r in records]
+        # Pre-compute integer hash values for all 4 orientations once.
+        # Querying with all rotation hashes ensures rotated copies are found
+        # even though the BK-tree is indexed only on the upright phash.
+        hash_ints      = [int(str(r.phash), 16) for r in records]
+        hash_ints_r90  = [
+            int(str(r.phash_r90),  16) if r.phash_r90  is not None else hash_ints[i]
+            for i, r in enumerate(records)
+        ]
+        hash_ints_r180 = [
+            int(str(r.phash_r180), 16) if r.phash_r180 is not None else hash_ints[i]
+            for i, r in enumerate(records)
+        ]
+        hash_ints_r270 = [
+            int(str(r.phash_r270), 16) if r.phash_r270 is not None else hash_ints[i]
+            for i, r in enumerate(records)
+        ]
 
         bk = _BKTree()
         for i, h in enumerate(hash_ints):
@@ -605,7 +711,12 @@ def find_groups(
                     i, n, "Comparing",
                 )
 
-            for j in bk.query(hash_ints[i], _max_query_thr):
+            # Query with all 4 rotations to catch rotation-equivalent duplicates
+            candidates: set[int] = set(bk.query(hash_ints[i],      _max_query_thr))
+            candidates.update(    bk.query(hash_ints_r90[i],  _max_query_thr))
+            candidates.update(    bk.query(hash_ints_r180[i], _max_query_thr))
+            candidates.update(    bk.query(hash_ints_r270[i], _max_query_thr))
+            for j in candidates:
                 if j <= i:
                     continue
                 if _can_be_similar(records[i], records[j], settings):

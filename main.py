@@ -10,6 +10,7 @@ import json
 import os
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 
@@ -59,6 +60,7 @@ from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
 from about_tab import build_about_tab
+from library_tab import build_library_tab
 import error_handler
 
 
@@ -163,6 +165,18 @@ def _unique_dest(folder: Path, name: str) -> Path:
         if not p.exists():
             return p
         i += 1
+
+
+def _fmt_duration(seconds: float) -> str:
+    """Format a number of seconds as a human-readable duration string."""
+    s = max(0, int(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
 
 
 def _set_sleep_prevention(enable: bool) -> None:
@@ -390,7 +404,6 @@ class App:
         self._save_after_id = None
         self._tracker: PhaseTracker | None = None
         self._last_scan_info: dict = {}
-        self._results_tab_visible        = False
 
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
@@ -437,20 +450,18 @@ class App:
         self._nb.pack(fill=tk.BOTH, expand=True)
 
         self._tab_scan     = ttk.Frame(self._nb)
-        self._tab_results  = ttk.Frame(self._nb)
         self._tab_custom   = ttk.Frame(self._nb)
         self._tab_history  = ttk.Frame(self._nb)
+        self._tab_library  = ttk.Frame(self._nb)
         self._tab_settings = ttk.Frame(self._nb)
         self._tab_about    = ttk.Frame(self._nb)
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
         self._nb.add(self._tab_custom,   text="  Compare Scan  ")
         self._nb.add(self._tab_history,  text="  History  ")
+        self._nb.add(self._tab_library,  text="  Library  ")
         self._nb.add(self._tab_settings, text="  Settings  ")
         self._nb.add(self._tab_about,    text="  About  ")
-
-        # Results tab inserted dynamically at position 1 after a scan completes
-        self._results_tab_visible = False
 
         # Init all shared vars before building tabs
         self._init_setting_vars()
@@ -459,6 +470,7 @@ class App:
         self._build_results_tab_content()
         self._build_custom_scan_tab()
         self._build_history_tab()
+        self._build_library_tab()
         self._build_settings_tab()
         self._build_about_tab()
 
@@ -522,6 +534,14 @@ class App:
         self.developer_mode_var = tk.BooleanVar(value=s.developer_mode)
         self.developer_mode_var.trace_add("write", self._on_setting_change)
 
+        # Library source mode — "browse" or "library" per folder picker
+        self.src_mode_var        = tk.StringVar(value="browse")
+        self.trust_lib_src_var   = tk.BooleanVar(value=False)
+        self.main_mode_var       = tk.StringVar(value="browse")
+        self.trust_lib_main_var  = tk.BooleanVar(value=False)
+        self.check_mode_var      = tk.StringVar(value="browse")
+        self.trust_lib_check_var = tk.BooleanVar(value=False)
+
         # Custom scan folder vars
         s2 = self.settings
         self._custom_main_var    = tk.StringVar(value=s2.custom_main_folder)
@@ -561,12 +581,17 @@ class App:
     def _build_scan_tab(self) -> None:
         tab = self._tab_scan
 
-        # Scrollable body
-        _, body = _scrollable_frame(tab)
+        # Scrollable body (outer reference saved so we can hide it when showing results)
+        self._scan_form_outer, body = _scrollable_frame(tab)
 
         # Folders
         self._scan_folders_section = _section(body, "Folders")
-        self.src_var = self._folder_row(self._scan_folders_section, "Source folder:", "src_folder")
+        self.src_var = self._lib_folder_row(
+            self._scan_folders_section, "Source folder:", "src_folder",
+            self.src_mode_var, self.trust_lib_src_var,
+            browse_cmd=lambda v: self._browse(v, "src_folder"),
+            change_cb=self._on_folder_change,
+        )
         self.out_var = self._folder_row(self._scan_folders_section, "Output folder:", "out_folder")
 
         # Mode toggle
@@ -652,9 +677,15 @@ class App:
         self.scan_threads_var.trace_add("write", _update_quick_speed)
         _update_quick_speed()
 
+        _qs_fmt_row = ttk.Frame(self._quick_speed_frame)
+        _qs_fmt_row.pack(fill=tk.X, pady=(6, 0))
+        ttk.Checkbutton(_qs_fmt_row, text="Keep all formats (keep best copy per file extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
+        _info_btn(_qs_fmt_row, "keep_all_formats").pack(side=tk.LEFT, padx=2)
+
         # Compact key settings (advanced mode only)
         self._compact_adv_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
-        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(3)]
+        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(4)]
         for cr in _crows:
             cr.pack(fill=tk.X, pady=2)
 
@@ -684,6 +715,10 @@ class App:
         ttk.Radiobutton(_crows[2], text="Oldest file date",
                         variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
         _info_btn(_crows[2], "keep_strategy").pack(side=tk.LEFT, padx=2)
+
+        ttk.Checkbutton(_crows[3], text="Keep all formats (keep best copy per file extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
+        _info_btn(_crows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
 
         # Actions
         act = _section(body, "Actions")
@@ -746,7 +781,8 @@ class App:
         )
 
         # Button bar (fixed, very bottom of tab)
-        btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        self._scan_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        btn_bar = self._scan_btn_bar
         btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
@@ -784,10 +820,14 @@ class App:
 
         self._apply_mode()
 
-    # ── Results tab ───────────────────────────────────────────────────────
+        # Inline results frame — shown after scan completes, replaces the form
+        self._scan_inline_result_frame = tk.Frame(tab, bg=_BG)
+        # (not packed until scan done)
+
+    # ── Scan inline results ───────────────────────────────────────────────
 
     def _build_results_tab_content(self) -> None:
-        tab = self._tab_results
+        tab = self._scan_inline_result_frame
 
         # Container shown when viewer is NOT active (summary + buttons)
         self._results_summary_frame = tk.Frame(tab, bg=_BG)
@@ -837,7 +877,7 @@ class App:
         _mat_btn(self._results_new_frame, "   +  Start New Scan   ",
                  self._new_scan_prompt, _ACCENT, font_size=11).pack()
         ttk.Label(self._results_new_frame,
-                  text="Clears current results and returns to the Scan tab.",
+                  text="Clears current results and starts a new scan.",
                   foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
 
         # Container for the embedded ReportViewer (packed on demand)
@@ -881,14 +921,24 @@ class App:
         viewer.pack(fill=tk.BOTH, expand=True)
 
     def _show_results_tab(self) -> None:
-        if not self._results_tab_visible:
-            self._nb.insert(1, self._tab_results, text="  Results  ")
-            self._results_tab_visible = True
+        """Show inline scan results within the Scan tab (replaces old separate Results tab)."""
+        self._scan_form_outer.pack_forget()
+        self._prog_frame.pack_forget()
+        self._scan_btn_bar.pack_forget()
+        self._scan_inline_result_frame.pack(fill=tk.BOTH, expand=True)
 
     def _hide_results_tab(self) -> None:
-        if self._results_tab_visible:
-            self._nb.forget(self._tab_results)
-            self._results_tab_visible = False
+        """Restore the scan form by hiding the inline results view."""
+        self._scan_inline_result_frame.pack_forget()
+        # Clear any embedded viewer so it's fresh next time
+        for w in self._results_viewer_host.winfo_children():
+            w.destroy()
+        self._results_viewer_host.pack_forget()
+        self._results_summary_frame.pack(fill=tk.BOTH, expand=True)
+        # Restore scan form panels in original pack order
+        self._scan_form_outer.pack(fill=tk.BOTH, expand=True)
+        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self._scan_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
 
     def _update_results_tab_ui(self, extra: "dict | None" = None) -> None:
         """Rebuild the success card and show/enable action buttons on the Results tab."""
@@ -907,6 +957,7 @@ class App:
         n_ambig    = i.get("n_ambiguous", 0)
         space_b    = i.get("space_saved", 0)
         applied    = i.get("applied", False)
+        dur_s      = i.get("duration_s", 0.0)
 
         # Space label
         space_mb = space_b / (1024 * 1024) if space_b else 0.0
@@ -965,6 +1016,8 @@ class App:
         _stat_cell(stats_row, n_dupes,  "duplicates",
                    _M_ERROR if n_dupes > 0 else _M_TEXT1)
         _stat_cell(stats_row, space_lbl, "space to free", _M_SUCCESS if space_b > 0 else _M_TEXT1)
+        if dur_s:
+            _stat_cell(stats_row, _fmt_duration(dur_s), "scan time")
 
         # Summary line
         parts: list[str] = []
@@ -998,19 +1051,20 @@ class App:
         tk.Label(header, text="Scan History", font=("Segoe UI", 10, "bold"),
                  bg=_BG, fg=_M_TEXT1).pack(side=tk.LEFT)
 
-        cols = ("date", "src", "files", "groups", "dups", "dup_pct", "dry_run", "applied")
+        cols = ("date", "duration", "src", "files", "groups", "dups", "dup_pct", "dry_run", "applied")
         self._hist_tree = ttk.Treeview(tab, columns=cols, show="headings",
                                        selectmode="browse", height=16)
 
         col_cfg = [
-            ("date",    "Date",      130, "w"),
-            ("src",     "Source",    220, "w"),
-            ("files",   "Files",      60, "center"),
-            ("groups",  "Groups",     60, "center"),
-            ("dups",    "Dups",       60, "center"),
-            ("dup_pct", "Dup %",      60, "center"),
-            ("dry_run", "Dry Run",    65, "center"),
-            ("applied", "Applied",    65, "center"),
+            ("date",     "Date",      130, "w"),
+            ("duration", "Duration",   70, "center"),
+            ("src",      "Source",    210, "w"),
+            ("files",    "Files",      60, "center"),
+            ("groups",   "Groups",     60, "center"),
+            ("dups",     "Dups",       60, "center"),
+            ("dup_pct",  "Dup %",      60, "center"),
+            ("dry_run",  "Dry Run",    65, "center"),
+            ("applied",  "Applied",    65, "center"),
         ]
         for cid, head, w, anch in col_cfg:
             self._hist_tree.heading(cid, text=head)
@@ -1033,8 +1087,10 @@ class App:
         for item in self._hist_tree.get_children():
             self._hist_tree.delete(item)
         for entry in reversed(self._scan_history):
+            _dur = entry.get("duration_s", 0.0)
             self._hist_tree.insert("", "end", values=(
                 entry.get("date", ""),
+                _fmt_duration(_dur) if _dur else "–",
                 entry.get("src_folder", ""),
                 entry.get("total_files", ""),
                 entry.get("groups", ""),
@@ -1064,10 +1120,12 @@ class App:
     def _log_scan_history(
         self, total_files: int, groups: int, duplicates: int,
         dry_run: bool, src_folder: str, applied: bool = False,
+        duration_s: float = 0.0,
     ) -> None:
         dup_pct = duplicates / total_files * 100 if total_files > 0 else 0.0
         entry = {
             "date":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "duration_s":  round(duration_s, 1),
             "src_folder":  src_folder,
             "total_files": total_files,
             "groups":      groups,
@@ -1325,7 +1383,7 @@ class App:
     def _build_custom_scan_tab(self) -> None:
         """Cross-folder duplicate finder: main folder (read-only) vs check folder."""
         tab = self._tab_custom
-        _, body = _scrollable_frame(tab)
+        self._custom_form_outer, body = _scrollable_frame(tab)
 
         # ── Info banner ───────────────────────────────────────────────────
         banner = tk.Frame(body, bg="#E8F5E9", bd=0)
@@ -1354,15 +1412,27 @@ class App:
                        command=lambda v=var: self._browse_custom(v)).pack(side=tk.RIGHT)
             var.trace_add("write", self._on_custom_folder_change)
 
-        _cust_folder_row(self._custom_folders_section, "Main folder (reference):",   self._custom_main_var,  "custom_main_folder")
-        _cust_folder_row(self._custom_folders_section, "Check folder (find dups):",  self._custom_check_var, "custom_check_folder")
-        _cust_folder_row(self._custom_folders_section, "Output / trash folder:",     self._custom_out_var,   "custom_out_folder")
+        self._lib_folder_row(
+            self._custom_folders_section, "Main folder (reference):", "custom_main_folder",
+            self.main_mode_var, self.trust_lib_main_var,
+            browse_cmd=lambda v: self._browse_custom(v),
+            change_cb=self._on_custom_folder_change,
+            label_width=22, path_var=self._custom_main_var,
+        )
+        self._lib_folder_row(
+            self._custom_folders_section, "Check folder (find dups):", "custom_check_folder",
+            self.check_mode_var, self.trust_lib_check_var,
+            browse_cmd=lambda v: self._browse_custom(v),
+            change_cb=self._on_custom_folder_change,
+            label_width=22, path_var=self._custom_check_var,
+        )
+        _cust_folder_row(self._custom_folders_section, "Output / trash folder:", self._custom_out_var, "custom_out_folder")
 
         # ── Key Settings (identical to Scan → Advanced "Key Settings") ──
         self._custom_ks_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
         ks = self._custom_ks_frame
         ks.pack(fill=tk.X, pady=(0, 6))
-        _ksrows = [ttk.Frame(ks) for _ in range(3)]
+        _ksrows = [ttk.Frame(ks) for _ in range(4)]
         for kr in _ksrows:
             kr.pack(fill=tk.X, pady=2)
 
@@ -1395,6 +1465,11 @@ class App:
         ttk.Radiobutton(_ksrows[2], text="Oldest file date",
                         variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=6)
         _info_btn(_ksrows[2], "keep_strategy").pack(side=tk.LEFT, padx=2)
+
+        # Row 3: Keep all formats
+        ttk.Checkbutton(_ksrows[3], text="Keep all formats (keep best copy per file extension)",
+                        variable=self.all_formats_var).pack(side=tk.LEFT)
+        _info_btn(_ksrows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
 
         # ── Actions ───────────────────────────────────────────────────────
         act = _section(body, "Actions")
@@ -1441,8 +1516,9 @@ class App:
         ttk.Label(self._custom_prog_frame, textvariable=self._custom_eta_var,
                   foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
 
-        # ── Button bar (fixed very bottom) ────────────────────────────────
-        c_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        # ── Button bar (fixed very bottom) ───────────────────────────────���
+        self._custom_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        c_btn_bar = self._custom_btn_bar
         c_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(c_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
@@ -1499,7 +1575,164 @@ class App:
             self._pause_custom_scan, _M_AMBER)
         self._custom_pause_btn.pack(side=tk.LEFT, padx=4)
 
-    # ── custom scan folder helpers ─────────────────────────────────────────
+        # Inline results frame — shown after compare scan completes, replaces the form
+        self._custom_inline_result_frame = tk.Frame(tab, bg=_BG)
+        self._build_custom_inline_results()
+
+    # ── Compare Scan inline results ─────────────────���─────────────────────
+
+    def _build_custom_inline_results(self) -> None:
+        """Build the inline results view for the Compare Scan tab."""
+        tab = self._custom_inline_result_frame
+
+        # Summary container (visible when viewer is NOT active)
+        self._custom_results_summary_frame = tk.Frame(tab, bg=_BG)
+        self._custom_results_summary_frame.pack(fill=tk.BOTH, expand=True)
+        sf = self._custom_results_summary_frame
+
+        # Stats card (rebuilt dynamically after each scan)
+        self._custom_results_info_card = tk.Frame(
+            sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
+            highlightbackground=_M_DIVIDER, highlightthickness=1,
+        )
+
+        # Action buttons row
+        self._custom_results_btn_row = tk.Frame(sf, bg=_BG)
+        cbr = self._custom_results_btn_row
+
+        self._cr_inapp_btn = _mat_btn(cbr, "📋  View Report",
+                                      self._custom_open_inapp_report, _ACCENT, font_size=10)
+        self._cr_inapp_btn.pack(side=tk.LEFT, padx=(0, 6))
+        _mat_disable(self._cr_inapp_btn)
+
+        self._cr_browser_btn = _mat_btn(cbr, "🌐  HTML Report",
+                                        self._custom_open_browser_report, "#546E7A")
+        self._cr_browser_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self._cr_browser_btn)
+
+        self._cr_accept_btn = _mat_btn(cbr, "✓  Accept & Move",
+                                       self._custom_accept_and_move, _M_SUCCESS)
+        self._cr_accept_btn.pack(side=tk.LEFT, padx=4)
+        _mat_disable(self._cr_accept_btn)
+
+        # Divider
+        self._custom_results_divider = tk.Frame(sf, height=1, bg=_M_DIVIDER)
+
+        # Start New Compare Scan
+        self._custom_results_new_frame = tk.Frame(sf, bg=_BG)
+        _mat_btn(self._custom_results_new_frame, "   +  Start New Compare Scan   ",
+                 self._new_custom_scan, _ACCENT, font_size=11).pack()
+        ttk.Label(self._custom_results_new_frame,
+                  text="Clears current results and starts a new compare scan.",
+                  foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
+
+        # Container for embedded ReportViewer (shown on demand)
+        self._custom_results_viewer_host = tk.Frame(tab, bg=_BG)
+
+    def _update_custom_results_ui(
+        self, n_main: int, n_check: int, n_cross: int,
+        n_dups: int, dry_run: bool, src_folder: str,
+        duration_s: float = 0.0,
+    ) -> None:
+        """Rebuild the compare-scan stats card and show action buttons."""
+        for w in self._custom_results_info_card.winfo_children():
+            w.destroy()
+
+        bar_col = _M_SUCCESS if n_dups > 0 else _ACCENT
+        tk.Frame(self._custom_results_info_card, height=4, bg=bar_col).pack(fill=tk.X)
+
+        hdr = tk.Frame(self._custom_results_info_card, bg=_CARD_BG)
+        hdr.pack(fill=tk.X, padx=16, pady=(12, 4))
+        ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+        tk.Label(hdr, text="✅  Compare Scan Complete",
+                 font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
+        tk.Label(hdr, text=ts, font=("Segoe UI", 8),
+                 bg=_CARD_BG, fg="#9E9E9E").pack(side=tk.RIGHT, pady=(2, 0))
+
+        tk.Label(self._custom_results_info_card,
+                 text=f"📁  {src_folder}", font=("Segoe UI", 9),
+                 bg=_CARD_BG, fg=_M_TEXT2, anchor=tk.W,
+                 wraplength=900).pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        tk.Frame(self._custom_results_info_card, height=1, bg=_M_DIVIDER).pack(
+            fill=tk.X, padx=16, pady=(0, 10))
+
+        stats_row = tk.Frame(self._custom_results_info_card, bg=_CARD_BG)
+        stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _stat_cell(parent, value, label, fg=_M_TEXT1):
+            cell = tk.Frame(parent, bg=_CARD_BG)
+            cell.pack(side=tk.LEFT, padx=(0, 28))
+            vstr = f"{value:,}" if isinstance(value, int) else str(value)
+            tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
+                     bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
+            tk.Label(cell, text=label, font=("Segoe UI", 8),
+                     bg=_CARD_BG, fg="#9E9E9E").pack(anchor=tk.W)
+
+        _stat_cell(stats_row, n_main,  "main files")
+        _stat_cell(stats_row, n_check, "check files")
+        _stat_cell(stats_row, n_cross, "matched groups",
+                   _M_ERROR if n_cross > 0 else _M_TEXT1)
+        _stat_cell(stats_row, n_dups,  "duplicates",
+                   _M_ERROR if n_dups > 0 else _M_TEXT1)
+        if duration_s:
+            _stat_cell(stats_row, _fmt_duration(duration_s), "scan time")
+
+        if n_cross == 0:
+            tk.Label(self._custom_results_info_card,
+                     text="No cross-folder duplicates found — folders look clean!",
+                     font=("Segoe UI", 9), bg=_CARD_BG,
+                     fg="#9E9E9E", anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
+
+        # Show card, buttons, divider, new-scan button
+        self._custom_results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
+        self._custom_results_btn_row.pack(fill=tk.X, padx=16, pady=6)
+        self._custom_results_divider.pack(fill=tk.X, padx=16, pady=14)
+        self._custom_results_new_frame.pack(pady=10)
+
+        # Enable appropriate buttons
+        _mat_enable(self._cr_inapp_btn)
+        _mat_enable(self._cr_browser_btn)
+        if dry_run and self._custom_groups:
+            _mat_enable(self._cr_accept_btn)
+
+    def _show_custom_results_in_tab(self) -> None:
+        """Hide the compare-scan form and show inline results."""
+        self._custom_form_outer.pack_forget()
+        self._custom_prog_frame.pack_forget()
+        self._custom_btn_bar.pack_forget()
+        self._custom_inline_result_frame.pack(fill=tk.BOTH, expand=True)
+
+    def _hide_custom_results_in_tab(self) -> None:
+        """Restore the compare-scan form by hiding inline results."""
+        self._custom_inline_result_frame.pack_forget()
+        for w in self._custom_results_viewer_host.winfo_children():
+            w.destroy()
+        self._custom_results_viewer_host.pack_forget()
+        self._custom_results_summary_frame.pack(fill=tk.BOTH, expand=True)
+        # Restore form panels in original pack order
+        self._custom_form_outer.pack(fill=tk.BOTH, expand=True)
+        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self._custom_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+    def _new_custom_scan(self) -> None:
+        """Reset compare scan state and restore the form."""
+        if not messagebox.askyesno(
+            "Start New Compare Scan",
+            "Clear the current results and start a new compare scan?",
+            parent=self.root,
+        ):
+            return
+        self._custom_groups      = []
+        self._custom_broken      = []
+        self._custom_report_path = None
+        _mat_disable(self._cr_accept_btn)
+        _mat_disable(self._cr_browser_btn)
+        _mat_disable(self._cr_inapp_btn)
+        self._custom_phase_label.set("Ready.")
+        self._hide_custom_results_in_tab()
+
+    # ── custom scan folder helpers ───────────────────────────��─────────────
 
     def _browse_custom(self, var: tk.StringVar) -> None:
         folder = filedialog.askdirectory(parent=self.root)
@@ -1617,9 +1850,18 @@ class App:
         self._custom_progress_bar["mode"]  = "indeterminate"
         self._custom_progress_bar.start(12)
 
+        self._custom_scan_start_time = time.perf_counter()
+        _use_lib_main  = self.main_mode_var.get() == "library"
+        _trust_main    = self.trust_lib_main_var.get() if _use_lib_main else False
+        _use_lib_check = self.check_mode_var.get() == "library"
+        _trust_check   = self.trust_lib_check_var.get() if _use_lib_check else False
         threading.Thread(
             target=self._custom_worker,
             args=(main_path, check_path, out_path, self.settings),
+            kwargs={
+                "use_lib_main":  _use_lib_main,  "trust_main":  _trust_main,
+                "use_lib_check": _use_lib_check, "trust_check": _trust_check,
+            },
             daemon=True,
         ).start()
 
@@ -1639,12 +1881,66 @@ class App:
     # ── custom worker ─────────────────────────────────────────────────────
 
     def _custom_worker(
-        self, main_path: Path, check_path: Path, out_path: Path, settings: Settings
+        self, main_path: Path, check_path: Path, out_path: Path, settings: Settings,
+        use_lib_main: bool = False, trust_main: bool = False,
+        use_lib_check: bool = False, trust_check: bool = False,
     ) -> None:
         _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
         def cb(msg, done, total, phase):
             self._custom_progress_cb(msg, done, total, phase)
+
+        def _load_lib_cache(folder: Path, use: bool):
+            """Load cached hashes for *folder* from the library.
+
+            Always attempts to load — cached entries are validated against
+            mtime+size unless *use* is True and the corresponding trust flag
+            is set (explicit Library mode).  Returns (cache, lib) or (None, None).
+            """
+            try:
+                from library import Library, get_library_dir
+                _lib = Library.load(get_library_dir())
+                return _lib.load_cache(str(folder.resolve())), _lib
+            except Exception:
+                return None, None
+
+        def _writeback_to_library(folder: Path, records: list) -> None:
+            """Write scan results back to the library (best-effort).
+
+            Saves the hash cache file and registers/updates the FolderEntry so
+            the folder appears in the Library tab.  Future scans of the same
+            folder reuse these hashes; staleness (mtime+size) is always checked
+            so changed files are re-hashed automatically.
+            """
+            if not records:
+                return
+            try:
+                from library import (Library, get_library_dir, FileRecord,
+                                     FolderEntry, get_drive_info,
+                                     compute_folder_fingerprint)
+                from datetime import datetime as _dt
+                _lib_wb = Library.load(get_library_dir())
+                _wb_cache: dict = {}
+                for _r in records:
+                    try:
+                        _st = _r.path.stat()
+                        _wb_cache[str(_r.path)] = FileRecord.from_image_record(
+                            _r, st_mtime=_st.st_mtime)
+                    except Exception:
+                        _wb_cache[str(_r.path)] = FileRecord.from_image_record(_r)
+                _folder_str = str(folder.resolve())
+                _lib_wb.save_cache(_folder_str, _wb_cache)
+                _di = get_drive_info(folder)
+                _lib_wb.set_folder(FolderEntry(
+                    path               = _folder_str,
+                    drive_type         = _di.drive_type,
+                    volume_serial      = _di.volume_serial,
+                    folder_fingerprint = compute_folder_fingerprint(folder),
+                    last_updated       = _dt.now().isoformat(),
+                    file_count         = len(_wb_cache),
+                ))
+            except Exception:
+                pass   # library write-back is best-effort
 
         try:
             out_path.mkdir(parents=True, exist_ok=True)
@@ -1657,13 +1953,18 @@ class App:
             # Phase 1 — hash main folder
             cb("Scanning main folder…", 0, 1, "Main folder")
             main_failed: list = []
+            _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
             main_records = collect_images(
                 main_path, skip_paths, settings,
                 progress_cb=cb,
                 stop_flag=self._custom_stop_flag,
                 pause_flag=self._custom_pause_flag,
                 failed_paths=main_failed,
+                library_cache=_main_cache,
+                trust_library=trust_main and use_lib_main,
             )
+            # Write main folder scan results back to the library cache.
+            _writeback_to_library(main_path, main_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
@@ -1672,13 +1973,19 @@ class App:
             # Phase 2 — hash check folder
             cb("Scanning check folder…", 0, 1, "Check folder")
             check_failed: list = []
+            _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
             check_records = collect_images(
                 check_path, skip_paths, settings,
                 progress_cb=cb,
                 stop_flag=self._custom_stop_flag,
                 pause_flag=self._custom_pause_flag,
                 failed_paths=check_failed,
+                library_cache=_check_cache,
+                trust_library=trust_check and use_lib_check,
             )
+
+            # Write check folder scan results back to the library cache.
+            _writeback_to_library(check_path, check_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
@@ -1803,16 +2110,19 @@ class App:
         self._custom_phase_label.set(msg)
         self._custom_eta_var.set("")
 
-        if success and self._custom_groups:
-            _mat_enable(self._custom_inapp_btn)
-            _mat_enable(self._custom_browser_btn)
-            if dry_run:
-                _mat_enable(self._custom_accept_btn)
+        if success:
+            # Refresh the Library tab so newly-cached hashes appear there.
+            if hasattr(self, "_library_ctrl"):
+                self._library_ctrl.reload()
 
+        if success and self._custom_groups:
+            _elapsed_s = time.perf_counter() - getattr(self, "_custom_scan_start_time",
+                                                        time.perf_counter())
             # Log to scan history (with note that it's a custom scan)
             dup_pct = n_dups / max(n_main + n_check, 1) * 100
             entry = {
                 "date":        datetime.datetime.now().strftime("%Y-%m-%d %H:%M"),
+                "duration_s":  round(_elapsed_s, 1),
                 "src_folder":  f"[Custom] {src_folder}",
                 "total_files": n_main + n_check,
                 "groups":      n_cross,
@@ -1825,8 +2135,11 @@ class App:
             self._save_scan_history()
             self._refresh_history_view()
 
-            # Auto-open in-app report
-            self.root.after(300, self._custom_open_inapp_report)
+            # Show inline results inside the Compare Scan tab
+            self._update_custom_results_ui(n_main, n_check, n_cross, n_dups, dry_run,
+                                           src_folder, duration_s=_elapsed_s)
+            self._show_custom_results_in_tab()
+            self._nb.select(self._tab_custom)
 
     def _on_custom_error(self, msg: str, tb: str = "") -> None:
         self._custom_progress_bar.stop()
@@ -1855,11 +2168,36 @@ class App:
                 self._save_scan_history()
                 self._refresh_history_view()
 
-        self._show_results_tab()
-        self._nb.select(self._tab_results)
-        self._embed_report_viewer(
-            self._custom_groups, [], self._custom_broken, out, _apply_cb
+        # Ensure inline results frame is visible in the Compare Scan tab
+        if not self._custom_inline_result_frame.winfo_ismapped():
+            self._show_custom_results_in_tab()
+        self._nb.select(self._tab_custom)
+
+        # Embed viewer inside the compare-scan inline results area
+        for w in self._custom_results_viewer_host.winfo_children():
+            w.destroy()
+        self._custom_results_summary_frame.pack_forget()
+        self._custom_results_viewer_host.pack(fill=tk.BOTH, expand=True)
+
+        log_path = ops_log_path(Path(out)) if out else None
+
+        def _on_close():
+            self._custom_results_viewer_host.pack_forget()
+            for w in self._custom_results_viewer_host.winfo_children():
+                w.destroy()
+            self._custom_results_summary_frame.pack(fill=tk.BOTH, expand=True)
+
+        viewer = ReportViewer(
+            self._custom_results_viewer_host,
+            self._custom_groups,
+            ops_log_path=log_path,
+            on_apply_cb=_apply_cb,
+            solo_originals=[],
+            broken_files=self._custom_broken,
+            settings=self.settings,
+            on_close_cb=_on_close,
         )
+        viewer.pack(fill=tk.BOTH, expand=True)
 
     def _custom_open_browser_report(self) -> None:
         if self._custom_report_path and self._custom_report_path.exists():
@@ -1879,7 +2217,7 @@ class App:
         out = self._custom_out_var.get().strip()
         if not out:
             return
-        _mat_disable(self._custom_accept_btn)
+        _mat_disable(self._cr_accept_btn)
         self._custom_phase_label.set("Moving files…")
 
         def _do() -> None:
@@ -1957,6 +2295,131 @@ class App:
         self._schedule_settings_save()
 
     # ── folder row helper ─────────────────────────────────────────────────
+
+    def _lib_folder_row(
+        self,
+        parent: tk.Widget,
+        label: str,
+        setting_key: str,
+        mode_var: tk.StringVar,
+        trust_var: tk.BooleanVar,
+        *,
+        browse_cmd=None,
+        change_cb=None,
+        label_width: int = 16,
+        path_var: "tk.StringVar | None" = None,
+    ) -> tk.StringVar:
+        """Folder picker row with Browse / Library mode toggle.
+
+        In Browse mode: a text Entry + Browse button (identical to _folder_row).
+        In Library mode: a Combobox listing all tracked Library folders, a drive
+        status badge, and a "Skip file change check" checkbox.
+
+        Always returns (or accepts) the StringVar that holds the active path — so
+        existing code that reads the var is unchanged regardless of mode.
+        """
+        if path_var is None:
+            path_var = tk.StringVar(value=getattr(self.settings, setting_key, ""))
+
+        # ── Mode toggle row ───────────────────────────────────────────────
+        hdr = ttk.Frame(parent)
+        hdr.pack(fill=tk.X, pady=(3, 0))
+        ttk.Label(hdr, text=label, width=label_width, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Radiobutton(hdr, text="Browse",  variable=mode_var, value="browse",
+                        command=lambda: _on_mode()).pack(side=tk.LEFT, padx=(0, 4))
+        ttk.Radiobutton(hdr, text="Library", variable=mode_var, value="library",
+                        command=lambda: _on_mode()).pack(side=tk.LEFT)
+
+        # Container keeps the correct pack position in parent regardless of
+        # which child rows are visible.  Without this, pack_forget + re-pack
+        # would append lib_row/trust_row after the Output folder row.
+        container = ttk.Frame(parent)
+        container.pack(fill=tk.X)
+
+        # ── Browse row ────────────────────────────────────────────────────
+        browse_row = ttk.Frame(container)
+        ttk.Label(browse_row, width=label_width).pack(side=tk.LEFT)
+        ttk.Entry(browse_row, textvariable=path_var).pack(
+            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        if browse_cmd is None:
+            browse_cmd = lambda v=path_var: self._browse(v, setting_key)  # noqa: E731
+        ttk.Button(browse_row, text="Browse…",
+                   command=lambda: browse_cmd(path_var)).pack(side=tk.RIGHT)
+
+        # ── Library row ───────────────────────────────────────────────────
+        lib_row = ttk.Frame(container)
+        ttk.Label(lib_row, width=label_width).pack(side=tk.LEFT)
+        lib_combo = ttk.Combobox(lib_row, state="readonly")
+        lib_combo.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        badge_lbl = ttk.Label(lib_row, text="", width=12, anchor=tk.W)
+        badge_lbl.pack(side=tk.LEFT)
+
+        # ── Trust row (shown only in Library mode) ────────────────────────
+        trust_row = ttk.Frame(container)
+        ttk.Label(trust_row, width=label_width).pack(side=tk.LEFT)
+        ttk.Checkbutton(
+            trust_row,
+            text="Skip file change check  (trust cached hashes — fastest)",
+            variable=trust_var,
+        ).pack(side=tk.LEFT)
+
+        # ── Helpers ───────────────────────────────────────────────────────
+
+        def _refresh_combo() -> None:
+            """Reload Library folders into the combobox."""
+            try:
+                from library import Library, get_library_dir
+                _lib = Library.load(get_library_dir())
+                paths = [e.path for e in _lib.folders]
+            except Exception:
+                paths = []
+            lib_combo["values"] = paths
+            if paths:
+                cur = path_var.get()
+                if cur in paths:
+                    lib_combo.set(cur)
+                else:
+                    lib_combo.set(paths[0])
+                    path_var.set(paths[0])
+                _update_badge(path_var.get())
+            else:
+                lib_combo.set("")
+                badge_lbl.configure(
+                    text="No folders yet", foreground=_M_TEXT2)
+
+        def _update_badge(selected: str) -> None:
+            if not selected:
+                badge_lbl.configure(text="", foreground=_M_TEXT2)
+            elif Path(selected).exists():
+                badge_lbl.configure(text="✓  OK", foreground=_M_SUCCESS)
+            else:
+                badge_lbl.configure(text="✗  Missing", foreground=_M_ERROR)
+
+        def _on_combo_select(_event=None) -> None:
+            selected = lib_combo.get()
+            path_var.set(selected)
+            _update_badge(selected)
+
+        lib_combo.bind("<<ComboboxSelected>>", _on_combo_select)
+
+        def _on_mode() -> None:
+            # Hide all children first, then show only what's needed.
+            # Operating within container keeps pack position stable in parent.
+            for child in (browse_row, lib_row, trust_row):
+                child.pack_forget()
+            if mode_var.get() == "library":
+                _refresh_combo()
+                lib_row.pack(fill=tk.X, pady=2)
+                trust_row.pack(fill=tk.X, pady=(0, 4))
+            else:
+                trust_var.set(False)
+                browse_row.pack(fill=tk.X, pady=2)
+
+        _on_mode()   # apply initial state
+
+        if change_cb:
+            path_var.trace_add("write", lambda *_: change_cb())
+        return path_var
 
     def _folder_row(self, parent: tk.Widget, label: str, setting_key: str) -> tk.StringVar:
         frame = ttk.Frame(parent)
@@ -2258,6 +2721,10 @@ class App:
             s.use_dual_hash   = self.dual_hash_var.get()
             s.use_histogram   = self.hist_var.get()
             s.dark_protection = self.dark_var.get()
+
+    def _build_library_tab(self) -> None:
+        """Populate the Library tab using the library_tab module."""
+        build_library_tab(self._tab_library, self)
 
     def _build_about_tab(self) -> None:
         """Populate the About tab using the about_tab module."""
@@ -2602,9 +3069,13 @@ class App:
         self._progress_bar.start(12)
 
         _set_sleep_prevention(True)
+        self._scan_start_time = time.perf_counter()
+        _use_lib  = self.src_mode_var.get() == "library"
+        _trust    = self.trust_lib_src_var.get() if _use_lib else False
         threading.Thread(
             target=self._worker,
             args=(src_path, out_path, self.settings, resume_state),
+            kwargs={"use_library": _use_lib, "trust_library": _trust},
             daemon=True,
         ).start()
 
@@ -2649,6 +3120,15 @@ class App:
         if event.widget is self.root:
             self.root.after(150, self.root.update_idletasks)
 
+    def bring_to_front(self) -> None:
+        """Raise this window to the front and give it focus.
+
+        Called by SingleInstance when a second launch is detected.
+        """
+        self.root.deiconify()   # restore if minimised
+        self.root.lift()
+        self.root.focus_force()
+
     def _new_scan_prompt(self) -> None:
         if not messagebox.askyesno(
             "Start New Scan",
@@ -2668,7 +3148,6 @@ class App:
         _mat_disable(self.inapp_report_btn)
         _mat_disable(self.revert_all_btn)
         self._phase_label_var.set("Ready.")
-        self._nb.select(self._tab_scan)
 
     # ── progress callback ─────────────────────────────────────────────────
 
@@ -2726,7 +3205,10 @@ class App:
 
     # ── worker thread ─────────────────────────────────────────────────────
 
-    def _worker(self, src: Path, out: Path, settings: Settings, resume_state=None) -> None:
+    def _worker(
+        self, src: Path, out: Path, settings: Settings, resume_state=None,
+        use_library: bool = False, trust_library: bool = False,
+    ) -> None:
         def cb(msg, done, total, phase):
             self._progress_cb(msg, done, total, phase)
 
@@ -2745,13 +3227,61 @@ class App:
             else:
                 cb("Discovering images…", 0, 1, "Discovery")
                 failed: list = []
+
+                # ── Library cache injection ───────────────────────────────
+                # Always load cached hashes for this folder if available.
+                # Staleness is verified per-file (mtime + size) unless the
+                # user explicitly enabled "Trust library" in Library mode.
+                _lib_cache = None
+                try:
+                    from library import Library, get_library_dir
+                    _lib_cache = Library.load(get_library_dir()).load_cache(str(src.resolve()))
+                except Exception:
+                    _lib_cache = None
+                # trust_library (skip staleness check) only applies when the
+                # user explicitly chose Library mode *and* enabled that option.
+                _effective_trust = trust_library and use_library
+
                 records = collect_images(
                     src, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._stop_flag,
                     pause_flag=self._pause_flag,
                     failed_paths=failed,
+                    library_cache=_lib_cache,
+                    trust_library=_effective_trust,
                 )
+                # Write scan results back to the library cache so future
+                # scans skip re-hashing unchanged files (staleness check via
+                # mtime+size guards against serving stale hashes).
+                if records:
+                    try:
+                        from library import (Library, get_library_dir, FileRecord,
+                                             FolderEntry, get_drive_info,
+                                             compute_folder_fingerprint)
+                        from datetime import datetime as _dt
+                        _lib_wb = Library.load(get_library_dir())
+                        _wb_cache: dict = {}
+                        for _r in records:
+                            try:
+                                _st = _r.path.stat()
+                                _wb_cache[str(_r.path)] = FileRecord.from_image_record(
+                                    _r, st_mtime=_st.st_mtime)
+                            except Exception:
+                                _wb_cache[str(_r.path)] = FileRecord.from_image_record(_r)
+                        _src_str = str(src.resolve())
+                        _lib_wb.save_cache(_src_str, _wb_cache)
+                        _di = get_drive_info(src)
+                        _lib_wb.set_folder(FolderEntry(
+                            path               = _src_str,
+                            drive_type         = _di.drive_type,
+                            volume_serial      = _di.volume_serial,
+                            folder_fingerprint = compute_folder_fingerprint(src),
+                            last_updated       = _dt.now().isoformat(),
+                            file_count         = len(_wb_cache),
+                        ))
+                    except Exception:
+                        pass   # library write-back is best-effort
                 self._broken_files = failed
 
             if self._stop_flag[0]:
@@ -2973,6 +3503,14 @@ class App:
                 if out and ops_log_path(Path(out)).exists():
                     _mat_enable(self.revert_all_btn)
 
+            # Refresh the Library tab so newly-cached hashes appear there.
+            if hasattr(self, "_library_ctrl"):
+                self._library_ctrl.reload()
+
+            # Compute elapsed scan time.
+            _elapsed_s = time.perf_counter() - getattr(self, "_scan_start_time",
+                                                        time.perf_counter())
+
             # Log to history and show Results tab
             self._log_scan_history(
                 total_files=total_scanned,
@@ -2981,14 +3519,16 @@ class App:
                 dry_run=dry_run,
                 src_folder=src_folder,
                 applied=not dry_run,
+                duration_s=_elapsed_s,
             )
             self._update_results_tab_ui({
                 "n_solo":      n_solo,
                 "n_ambiguous": n_ambiguous,
                 "space_saved": space_saved,
+                "duration_s":  _elapsed_s,
             })
             self._show_results_tab()
-            self._nb.select(self._tab_results)
+            self._nb.select(self._tab_scan)
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         _set_sleep_prevention(False)
@@ -3115,7 +3655,7 @@ class App:
                 delete_results(Path(out))
 
         self._show_results_tab()
-        self._nb.select(self._tab_results)
+        self._nb.select(self._tab_scan)
         self._embed_report_viewer(
             self.scan_groups, self._solo_originals, self._broken_files, out, _apply_cb
         )
@@ -3197,9 +3737,16 @@ class App:
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main() -> None:
+    from single_instance import SingleInstance
+    si = SingleInstance()
+    if si.is_secondary():
+        si.signal_and_exit()   # focus the first window, then exit immediately
+
     root = tk.Tk()
-    app = App(root)
+    app  = App(root)
+    si.start_listener(root, app.bring_to_front)
     root.mainloop()
+    si.cleanup()
 
 
 if __name__ == "__main__":
