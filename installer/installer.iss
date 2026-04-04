@@ -4,7 +4,7 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName      "Image Deduper"
-#define AppVersion   "1.0.2"
+#define AppVersion   "1.0.4"
 #define AppPublisher "Katador.net"
 #define AppURL       "https://github.com/master-alucard/photo_duplicates_removal"
 #define AppEmail     "office@katador.net"
@@ -60,43 +60,61 @@ Filename: "{app}\{#AppExeName}"; \
     Flags: nowait postinstall skipifsilent
 
 ; ── User data is intentionally NOT listed in [UninstallDelete] ───────────────
-; Removal of %APPDATA%\ImageDeduper is handled in the [Code] section below,
-; where we ask the user whether to keep or delete their settings.
+; Settings/history and the hash Library live in separate AppData locations and
+; are handled individually in the [Code] section below so the user can choose
+; to keep or delete each one independently.
 
 [Code]
 
-// ── Ask "keep or remove user data?" during uninstall ─────────────────────────
-var
-  DataPage: TInputOptionWizardPage;
-
-procedure InitializeUninstallProgressForm();
-begin
-  // Nothing needed here — page is shown in InitializeUninstall
-end;
+// ── Ask about each data store separately during uninstall ─────────────────────
+//
+//  1. Settings & scan history  →  %APPDATA%\ImageDeduper\
+//  2. Hash Library             →  %APPDATA%\Katador\ImageDeduper\library\
+//
+// Both questions default to "No" (keep data) so a quick Enter-through of the
+// uninstaller never accidentally deletes user data.
 
 function InitializeUninstall(): Boolean;
 var
-  AppDataPath: String;
+  SettingsPath: String;
+  LibraryPath:  String;
 begin
   Result := True;
-  AppDataPath := ExpandConstant('{userappdata}\{#AppDataName}');
 
-  // Only show the question if the folder actually exists
-  if DirExists(AppDataPath) then
+  SettingsPath := ExpandConstant('{userappdata}\{#AppDataName}');
+  LibraryPath  := ExpandConstant('{userappdata}\Katador\{#AppDataName}\library');
+
+  // ── Question 1: settings & scan history ──────────────────────────────────
+  if DirExists(SettingsPath) then
   begin
     case SuppressibleMsgBox(
-      'Do you want to remove your personal settings and scan history?' + #13#10 + #13#10 +
+      'Do you want to remove your settings and scan history?' + #13#10 + #13#10 +
       'Selecting "Yes" will permanently delete:' + #13#10 +
       '  • Settings and preferences' + #13#10 +
       '  • Scan history and logs' + #13#10 + #13#10 +
       'Selecting "No" will keep your data so it is available if you reinstall.',
       mbConfirmation, MB_YESNO, IDNO)
     of
-      IDYES:
-        begin
-          DelTree(AppDataPath, True, True, True);
-        end;
-      // IDNO: do nothing — data is preserved
+      IDYES: DelTree(SettingsPath, True, True, True);
+      // IDNO: preserved
+    end;
+  end;
+
+  // ── Question 2: hash Library ──────────────────────────────────────────────
+  if DirExists(LibraryPath) then
+  begin
+    case SuppressibleMsgBox(
+      'Do you want to remove your image hash Library?' + #13#10 + #13#10 +
+      'The Library stores pre-computed image hashes so repeat scans skip' + #13#10 +
+      're-hashing unchanged files.  It can be several hundred MB for large' + #13#10 +
+      'photo collections.' + #13#10 + #13#10 +
+      'Selecting "Yes" will permanently delete all cached hashes.' + #13#10 +
+      'Selecting "No" will keep the Library — if you reinstall, your next' + #13#10 +
+      'scan will reuse it immediately without re-hashing anything.',
+      mbConfirmation, MB_YESNO, IDNO)
+    of
+      IDYES: DelTree(LibraryPath, True, True, True);
+      // IDNO: preserved
     end;
   end;
 end;

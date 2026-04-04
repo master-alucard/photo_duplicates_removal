@@ -195,6 +195,9 @@ def serialize_record(rec) -> dict:
         "histogram": rec.histogram,
         "companions": [str(c) for c in rec.companions],
         "metadata_count": rec.metadata_count,
+        "phash_r90":  str(rec.phash_r90)  if rec.phash_r90  is not None else None,
+        "phash_r180": str(rec.phash_r180) if rec.phash_r180 is not None else None,
+        "phash_r270": str(rec.phash_r270) if rec.phash_r270 is not None else None,
     }
 
 
@@ -204,6 +207,9 @@ def deserialize_record(data: dict):
     Imports ImageRecord from scanner to avoid circular imports.
     """
     from scanner import ImageRecord  # local import to avoid circular
+    _r90  = data.get("phash_r90")
+    _r180 = data.get("phash_r180")
+    _r270 = data.get("phash_r270")
     return ImageRecord(
         path=Path(data["path"]),
         width=data["width"],
@@ -216,4 +222,7 @@ def deserialize_record(data: dict):
         histogram=data["histogram"],
         companions=[Path(c) for c in data.get("companions", [])],
         metadata_count=data.get("metadata_count", 0),
+        phash_r90  = imagehash.hex_to_hash(_r90)  if _r90  else None,
+        phash_r180 = imagehash.hex_to_hash(_r180) if _r180 else None,
+        phash_r270 = imagehash.hex_to_hash(_r270) if _r270 else None,
     )
