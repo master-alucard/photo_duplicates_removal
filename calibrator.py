@@ -80,6 +80,9 @@ _ROUND4_IMPACT_THR = 0.005
 # 3 means "avoiding a false positive is 3× more important than finding one more dup."
 _NEG_WEIGHT = 3
 
+# Relaxed histogram floor for cross-format pairs — must match scanner constant.
+_CF_HIST_FLOOR = 0.25
+
 
 # ── ground truth ──────────────────────────────────────────────────────────────
 
@@ -868,9 +871,12 @@ def _find_groups_fast(
             if pd.dhash_dist >= 0 and pd.dhash_dist > eff_thr * 1.5:
                 continue
 
-        # 9. Histogram gate (skipped for cross-format)
-        if use_hist and not pd.cross_format and pd.hist_sim >= 0.0:
-            if pd.hist_sim < hist_min:
+        # 9. Histogram gate (relaxed floor for cross-format pairs)
+        if use_hist and pd.hist_sim >= 0.0:
+            if pd.cross_format:
+                if pd.hist_sim < _CF_HIST_FLOOR:
+                    continue
+            elif pd.hist_sim < hist_min:
                 continue
 
         _union(pd.i, pd.j)
