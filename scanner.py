@@ -551,14 +551,30 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
             eff_threshold = max(1, int(eff_threshold * settings.dark_tighten_factor))
 
-    # Rotation-aware pHash: check all orientations of b against a's upright hash.
-    # If any rotation of b is within threshold of a, they are rotation-equivalent.
+    # Rotation-aware pHash: check all orientations of both images.
+    # We check b's rotations vs a's upright hash AND a's rotations vs b's upright
+    # hash, so it doesn't matter which image is the "rotated" one.
     dist_normal = a.phash - b.phash
+    # b's rotations vs a's upright hash
     dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
     dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
     dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
-    phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270)
+    # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
+    dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
+    dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
+    dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
+    phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
+                      dist_ar90, dist_ar180, dist_ar270)
     is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
+
+    # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of
+    # pHash drift even for pixel-identical content.  Apply a rotation-lenient
+    # threshold floor so that 90°/180°/270°-rotated JPEG duplicates are not
+    # filtered out.  rotation_threshold_factor=3.0 (default) → thr = 2×3 = 6,
+    # which covers 100% of photo-like JPEG pairs at quality≥85.
+    if is_rotated:
+        rotation_thr = int(settings.threshold * getattr(settings, "rotation_threshold_factor", 3.0))
+        eff_threshold = max(eff_threshold, rotation_thr)
 
     if phash_dist > eff_threshold:
         return False
@@ -661,12 +677,14 @@ def find_groups(
 
     # Maximum effective threshold used across all pair types.
     # Series pairs use a multiplied threshold; cross-format RAW/JPEG pairs use
-    # cross_format_threshold_factor.  We query the BK-tree with the widest radius
-    # and let _can_be_similar apply the exact per-pair logic.
+    # cross_format_threshold_factor; rotation pairs use rotation_threshold_factor.
+    # We query the BK-tree with the widest radius and let _can_be_similar apply
+    # the exact per-pair logic.
     _max_query_thr = max(
         settings.threshold,
-        int(settings.threshold * getattr(settings, "series_threshold_factor", 2.0)),
+        int(settings.threshold * getattr(settings, "series_threshold_factor",    2.0)),
         int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
+        int(settings.threshold * getattr(settings, "rotation_threshold_factor",  3.0)),
     )
 
     if n > _BKTREE_THRESHOLD:
@@ -985,9 +1003,40 @@ def _classify_group(
                 for dup_idx in bucket_indices[1:]:
                     exact_dup_indices.add(dup_idx)
             else:
-                # Genuine series / burst: keep every member.
-                is_series = True
-                series_indices.update(bucket_indices)
+                # Possible series OR rotation-equivalent pair with elevated direct pHash.
+                # 180°-rotated JPEG copies have the same dimensions but large direct
+                # pHash distance; their rotation-aware minimum distance is small (≤ 6).
+                # Detect rotation duplicates by checking if ALL intra-bucket pairs have
+                # a rotation-aware minimum distance within the rotation threshold.
+                rot_thr = int(
+                    settings.threshold
+                    * getattr(settings, "rotation_threshold_factor", 3.0)
+                )
+
+                def _rot_aware_dist(ra: "ImageRecord", rb: "ImageRecord") -> int:
+                    d = int(ra.phash - rb.phash)
+                    for rh in (rb.phash_r90, rb.phash_r180, rb.phash_r270):
+                        if rh is not None:
+                            d = min(d, int(ra.phash - rh))
+                    for rh in (ra.phash_r90, ra.phash_r180, ra.phash_r270):
+                        if rh is not None:
+                            d = min(d, int(rh - rb.phash))
+                    return d
+
+                all_rotation_pairs = all(
+                    _rot_aware_dist(recs[a], recs[b]) <= rot_thr
+                    for a in range(len(recs))
+                    for b in range(a + 1, len(recs))
+                )
+
+                if all_rotation_pairs:
+                    # Same image saved at different orientations.  Keep best; trash rest.
+                    for dup_idx in bucket_indices[1:]:
+                        exact_dup_indices.add(dup_idx)
+                else:
+                    # Genuine series / burst: keep every member.
+                    is_series = True
+                    series_indices.update(bucket_indices)
 
     # ── classify originals vs previews ───────────────────────────────────
     preview_ratio_gap = 1.0 - settings.preview_ratio
@@ -1026,18 +1075,28 @@ def _is_preview(member: ImageRecord, best: ImageRecord, ratio_gap: float) -> boo
     """
     Return True if member should be treated as a duplicate/preview of best.
 
-    Two cases:
+    Three cases:
     1. Same resolution: all members other than best are previews (burst shots /
        same-quality duplicates). The one with the most pixels (best) is kept;
        the rest are sent to trash.  ratio_gap is ignored because there is no
        meaningful size difference to measure.
-    2. Different resolution: member must be strictly smaller in BOTH dimensions
+    2. Rotation-equivalent: member is the same image at a 90°/270° orientation
+       (width and height exactly swapped vs best).  The non-best member is the
+       copy to trash; the best (higher quality / larger file) is kept.
+    3. Different resolution: member must be strictly smaller in BOTH dimensions
        by at least ratio_gap fraction (original resize/compress workflow).
     """
     if best.width == 0 or best.height == 0:
         return False
+    if member is best:
+        return False
     # Same-resolution duplicates (burst shots, re-saves, same-quality copies)
-    if member is not best and member.width == best.width and member.height == best.height:
+    if member.width == best.width and member.height == best.height:
+        return True
+    # Rotation-equivalent duplicates: 90° or 270°-rotated copies swap w↔h exactly.
+    # pHash comparison has already confirmed visual similarity; here we just need
+    # to recognise the transposed-dimension signature so the non-best copy is trashed.
+    if member.width == best.height and member.height == best.width:
         return True
     # Downscaled / compressed copies
     w_threshold = best.width * (1.0 - ratio_gap)
