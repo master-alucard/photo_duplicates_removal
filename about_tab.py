@@ -30,21 +30,22 @@ GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
 WEBSITE_URL   = "https://katador.net"
 RELEASES_API  = "https://api.github.com/repos/master-alucard/photo_duplicates_removal/releases/latest"
 
-# ── Colour palette (matches main.py / report_viewer.py) ─────────────────────
+# ── Material Design 3 colour palette (matches main.py) ──────────────────────
 
-_BG          = "#F5F5F5"
+_BG          = "#F2F4F7"
 _SURFACE     = "#FFFFFF"
 _PRIMARY     = "#1565C0"
-_PRIMARY_TINT= "#E3F2FD"
+_PRIMARY_TINT= "#E8EFF9"
 _SUCCESS     = "#2E7D32"
 _SUCCESS_TINT= "#E8F5E9"
 _ERROR       = "#C62828"
 _ERROR_TINT  = "#FFEBEE"
 _WARNING     = "#E65100"
-_DIVIDER     = "#E0E0E0"
-_TEXT1       = "#212121"
-_TEXT2       = "#616161"
-_TEXT3       = "#9E9E9E"
+_DIVIDER     = "#DDE1E6"
+_TEXT1       = "#1B1B1F"
+_TEXT2       = "#49454F"
+_TEXT3       = "#79747E"
+_SURFACE2    = "#ECEEF2"
 
 # ── Privacy policy text ───────────────────────────────────────────────────────
 

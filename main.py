@@ -71,19 +71,24 @@ HISTORY_PATH  = Path(__file__).parent / "scan_history.json"
 PHASE_NAMES   = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
 _CUSTOM_PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
-_ACCENT         = "#1565C0"   # Blue 800
-_ACCENT_DARK    = "#0D47A1"   # Blue 900
-_ACCENT_TINT    = "#E3F2FD"   # Blue 50
-_BG             = "#F5F5F5"   # Grey 100
-_CARD_BG        = "#FFFFFF"   # Surface white
+# ── Material Design 3 colour tokens ──────────────────────────────────────────
+_ACCENT         = "#1565C0"   # Primary – Blue 800
+_ACCENT_DARK    = "#0D47A1"   # Primary container variant
+_ACCENT_TINT    = "#E8EFF9"   # Surface tint (blueish grey, less saturated)
+_BG             = "#F2F4F7"   # Surface dim – cool grey
+_CARD_BG        = "#FFFFFF"   # Surface – cards, sheets
 _M_SUCCESS      = "#2E7D32"   # Green 800
 _M_ERROR        = "#C62828"   # Red 800
 _M_WARNING      = "#E65100"   # Deep Orange 900
 _M_AMBER        = "#F57F17"   # Amber 900
-_M_DIVIDER      = "#E0E0E0"   # Grey 300
-_M_TEXT1        = "#212121"   # Grey 900
-_M_TEXT2        = "#616161"   # Grey 700
-_MAT_DISABLED   = "#BDBDBD"   # Grey 400
+_M_DIVIDER      = "#DDE1E6"   # Outline variant – softer dividers
+_M_TEXT1        = "#1B1B1F"   # On-surface (M3 near-black)
+_M_TEXT2        = "#49454F"   # On-surface-variant
+_MAT_DISABLED   = "#C4C7C5"   # Disabled state
+_M3_SURFACE1    = "#F7F8FA"   # Surface container lowest
+_M3_SURFACE2    = "#ECEEF2"   # Surface container low
+_M3_SURFACE3    = "#E2E5EA"   # Surface container
+_M3_ON_PRIMARY  = "#FFFFFF"   # On primary
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -193,27 +198,39 @@ def _set_sleep_prevention(enable: bool) -> None:
         pass
 
 
-def _darken_color(hex_color: str) -> str:
+def _darken_color(hex_color: str, factor: float = 0.88) -> str:
     try:
         r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
-        f = 0.85
-        return f"#{int(r*f):02x}{int(g*f):02x}{int(b*f):02x}"
+        return f"#{int(r*factor):02x}{int(g*factor):02x}{int(b*factor):02x}"
+    except Exception:
+        return hex_color
+
+
+def _lighten_color(hex_color: str, factor: float = 0.12) -> str:
+    """Mix a colour towards white by *factor* (0.0 = original, 1.0 = white)."""
+    try:
+        r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
+        r = int(r + (255 - r) * factor)
+        g = int(g + (255 - g) * factor)
+        b = int(b + (255 - b) * factor)
+        return f"#{r:02x}{g:02x}{b:02x}"
     except Exception:
         return hex_color
 
 
 def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.Button:
+    """Material Design 3 filled button."""
     btn = tk.Button(
         parent, text=text, command=command,
         bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
-        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        relief=tk.FLAT, bd=0, padx=16, pady=6,
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
     btn._mat_bg = bg
 
     def _enter(_):
         if str(btn["state"]) != "disabled":
-            btn.configure(bg=_darken_color(btn._mat_bg))
+            btn.configure(bg=_lighten_color(btn._mat_bg, 0.15))
 
     def _leave(_):
         if str(btn["state"]) != "disabled":
@@ -229,7 +246,138 @@ def _mat_enable(btn: tk.Button) -> None:
 
 
 def _mat_disable(btn: tk.Button) -> None:
-    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, cursor="")
+    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, fg="#838387", cursor="")
+
+
+# ── Material Design 3 ttk style configuration ─────────────────────────────────
+
+def _configure_material_style(style: ttk.Style) -> None:
+    """Apply a comprehensive Material Design 3 look to all ttk widgets."""
+    _font      = ("Segoe UI", 9)
+    _font_bold = ("Segoe UI", 9, "bold")
+    _font_sm   = ("Segoe UI", 8)
+
+    # ── Global defaults ──────────────────────────────────────────────────
+    style.configure(".", font=_font, background=_BG, foreground=_M_TEXT1,
+                    borderwidth=0, focuscolor=_ACCENT)
+
+    # ── Notebook (top-level tabs) ────────────────────────────────────────
+    style.configure("App.TNotebook", background=_BG, borderwidth=0,
+                    tabmargins=[0, 0, 0, 0])
+    style.configure("App.TNotebook.Tab", font=_font_bold,
+                    padding=[18, 7], background=_M3_SURFACE2,
+                    foreground=_M_TEXT2, borderwidth=0)
+    style.map("App.TNotebook.Tab",
+              background=[("selected", _CARD_BG), ("!selected", _M3_SURFACE2)],
+              foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
+
+    # ── Frames ──��────────────────────────────────────────────────────────
+    style.configure("TFrame", background=_BG)
+    style.configure("Card.TFrame", background=_CARD_BG)
+
+    # ── Labels ───────────────────────────────────────────────────────────
+    style.configure("TLabel", background=_BG, foreground=_M_TEXT1, font=_font)
+    style.configure("Title.TLabel", font=("Segoe UI", 11, "bold"),
+                    foreground=_M_TEXT1, background=_BG)
+    style.configure("Caption.TLabel", font=_font_sm,
+                    foreground=_M_TEXT2, background=_BG)
+
+    # ── LabelFrame (Material card container) ─────────────────────────────
+    style.configure("TLabelframe", background=_CARD_BG,
+                    borderwidth=1, relief="solid",
+                    bordercolor=_M_DIVIDER)
+    style.configure("TLabelframe.Label", font=_font_bold,
+                    foreground=_ACCENT, background=_CARD_BG)
+
+    # ── Buttons ──────────────────────────────────────────────────────────
+    style.configure("TButton", font=_font_bold, padding=[12, 5],
+                    background=_M3_SURFACE2, foreground=_M_TEXT1,
+                    borderwidth=1, relief="solid", bordercolor=_M_DIVIDER)
+    style.map("TButton",
+              background=[("active", _M3_SURFACE3), ("pressed", _M3_SURFACE3),
+                          ("disabled", _BG)],
+              foreground=[("disabled", _MAT_DISABLED)],
+              bordercolor=[("disabled", _M_DIVIDER)])
+
+    # ── Checkbuttons ─────────────────────────────────────────────────────
+    style.configure("TCheckbutton", font=_font, background=_CARD_BG,
+                    foreground=_M_TEXT1, indicatorsize=16)
+    style.map("TCheckbutton",
+              background=[("active", _CARD_BG)],
+              foreground=[("disabled", _MAT_DISABLED)],
+              indicatorcolor=[("selected", _ACCENT),
+                              ("!selected", _M_DIVIDER)])
+
+    # ── Radiobuttons ─────────────────────────────────────────────────────
+    style.configure("TRadiobutton", font=_font, background=_CARD_BG,
+                    foreground=_M_TEXT1)
+    style.map("TRadiobutton",
+              background=[("active", _CARD_BG)],
+              foreground=[("disabled", _MAT_DISABLED)],
+              indicatorcolor=[("selected", _ACCENT),
+                              ("!selected", _M_DIVIDER)])
+
+    # ── Entry ────────────────────────────────────────────────────────────
+    style.configure("TEntry", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
+                    borderwidth=1, padding=[6, 4],
+                    selectbackground=_ACCENT, selectforeground="white")
+    style.map("TEntry",
+              fieldbackground=[("readonly", _M3_SURFACE1),
+                               ("disabled", _M3_SURFACE1)],
+              foreground=[("disabled", _MAT_DISABLED)],
+              bordercolor=[("focus", _ACCENT), ("!focus", _M_DIVIDER)])
+
+    # ── Combobox ─────────────────────────────────────────────────────────
+    style.configure("TCombobox", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
+                    padding=[6, 3], arrowsize=14,
+                    selectbackground=_ACCENT, selectforeground="white")
+    style.map("TCombobox",
+              fieldbackground=[("readonly", _CARD_BG),
+                               ("disabled", _M3_SURFACE1)],
+              foreground=[("disabled", _MAT_DISABLED)],
+              bordercolor=[("focus", _ACCENT), ("!focus", _M_DIVIDER)])
+
+    # ── Scale (slider) ───────────────────────────────────────────────────
+    style.configure("TScale", background=_CARD_BG, troughcolor=_M3_SURFACE3,
+                    sliderthickness=18, borderwidth=0)
+    style.map("TScale",
+              background=[("active", _ACCENT)],
+              troughcolor=[("disabled", _M3_SURFACE2)])
+    # Horizontal.TScale
+    style.configure("Horizontal.TScale", background=_CARD_BG,
+                    troughcolor=_M3_SURFACE3, sliderthickness=18)
+
+    # ── Progressbar ──────────────────────────────────────────────────────
+    style.configure("TProgressbar", troughcolor=_M3_SURFACE3,
+                    background=_ACCENT, borderwidth=0, thickness=6)
+    style.configure("Horizontal.TProgressbar",
+                    troughcolor=_M3_SURFACE3,
+                    background=_ACCENT, borderwidth=0, thickness=6)
+
+    # ── Scrollbar ────────────────────────────────────────────────────────
+    style.configure("TScrollbar", background=_M3_SURFACE2,
+                    troughcolor=_BG, borderwidth=0, arrowsize=14)
+    style.map("TScrollbar",
+              background=[("active", _M3_SURFACE3), ("pressed", _M3_SURFACE3)])
+
+    # ── Treeview ─────────────────────────────────────────────────────────
+    style.configure("Treeview", font=_font, background=_CARD_BG,
+                    foreground=_M_TEXT1, fieldbackground=_CARD_BG,
+                    rowheight=26, borderwidth=0)
+    style.configure("Treeview.Heading", font=_font_bold,
+                    background=_M3_SURFACE2, foreground=_M_TEXT1,
+                    borderwidth=1, relief="flat")
+    style.map("Treeview",
+              background=[("selected", _ACCENT_TINT)],
+              foreground=[("selected", _ACCENT)])
+    style.map("Treeview.Heading",
+              background=[("active", _M3_SURFACE3)])
+
+    # ── Separator ────────────────────────────────────────────────────────
+    style.configure("TSeparator", background=_M_DIVIDER)
+
+    # ── Panedwindow ──────────────────────────────────────────────────────
+    style.configure("TPanedwindow", background=_BG)
 
 
 # ── app icon ─────────────────────────────────────────────────────────────────
@@ -283,26 +431,30 @@ def show_info(parent: tk.Widget, key: str) -> None:
     title, text = INFO_TEXTS.get(key, ("Help", "No help available."))
     win = tk.Toplevel(parent)
     win.title(title)
-    win.geometry("480x280")
+    win.geometry("480x300")
     win.grab_set()
     win.resizable(False, False)
     win.configure(bg=_CARD_BG)
-    tk.Label(win, text=title, font=("Segoe UI", 11, "bold"),
-             bg=_CARD_BG, fg=_M_TEXT1).pack(anchor=tk.W, padx=16, pady=(14, 4))
-    tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=(0, 8))
-    txt = tk.Text(win, wrap=tk.WORD, padx=14, pady=8, relief=tk.FLAT,
-                  bg=_CARD_BG, fg=_M_TEXT2, font=("Segoe UI", 9))
+    # Title
+    tk.Label(win, text=title, font=("Segoe UI", 12, "bold"),
+             bg=_CARD_BG, fg=_ACCENT).pack(anchor=tk.W, padx=20, pady=(16, 6))
+    tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=20, pady=(0, 10))
+    # Body
+    txt = tk.Text(win, wrap=tk.WORD, padx=16, pady=10, relief=tk.FLAT,
+                  bg=_CARD_BG, fg=_M_TEXT2, font=("Segoe UI", 9),
+                  highlightthickness=0)
     txt.insert("1.0", text)
     txt.config(state=tk.DISABLED)
     txt.pack(fill=tk.BOTH, expand=True, padx=4)
-    _mat_btn(win, "Close", win.destroy, _ACCENT).pack(pady=10)
+    _mat_btn(win, "Close", win.destroy, _ACCENT).pack(pady=12)
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
 
 def _section(parent: tk.Widget, title: str) -> ttk.LabelFrame:
-    f = ttk.LabelFrame(parent, text=title, padding=(10, 6, 10, 8))
-    f.pack(fill=tk.X, pady=(0, 6))
+    """Material card section with title."""
+    f = ttk.LabelFrame(parent, text=title, padding=(12, 8, 12, 10))
+    f.pack(fill=tk.X, pady=(0, 8))
     return f
 
 
@@ -334,16 +486,16 @@ def _first_sentence(text: str) -> str:
 
 def _scrollable_frame(parent: tk.Widget):
     """Return (outer_frame, body_frame) where body is inside a scrollable canvas."""
-    outer = tk.Frame(parent)
+    outer = tk.Frame(parent, bg=_BG)
     outer.pack(fill=tk.BOTH, expand=True)
 
-    canvas = tk.Canvas(outer, bg=_BG, highlightthickness=0)
+    canvas = tk.Canvas(outer, bg=_BG, highlightthickness=0, bd=0)
     sb = ttk.Scrollbar(outer, orient=tk.VERTICAL, command=canvas.yview)
     canvas.configure(yscrollcommand=sb.set)
     sb.pack(side=tk.RIGHT, fill=tk.Y)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    body = ttk.Frame(canvas, padding=(14, 8, 14, 8))
+    body = ttk.Frame(canvas, padding=(16, 10, 16, 10))
     bw = canvas.create_window((0, 0), window=body, anchor=tk.NW)
     body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda e: canvas.itemconfig(bw, width=e.width))
@@ -373,6 +525,7 @@ class App:
         self.root = root
         self.root.title("Image Deduper")
         self.root.geometry("1160x800")
+        self.root.configure(bg=_BG)
         self.root.resizable(True, True)
         self.root.minsize(700, 520)
 
@@ -427,30 +580,23 @@ class App:
     # ── UI construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # Header
+        # ── Material Design 3 theme configuration ─────────────────────────
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+        _configure_material_style(style)
+
+        # Header — M3 top app bar
         hdr = tk.Frame(self.root, bg=_ACCENT)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="Image Deduper",
-                 font=("Segoe UI", 15, "bold"), bg=_ACCENT, fg="white").pack(
-            side=tk.LEFT, padx=20, pady=12)
+                 font=("Segoe UI", 14, "bold"), bg=_ACCENT, fg="white").pack(
+            side=tk.LEFT, padx=20, pady=10)
         tk.Label(hdr, text="Find & remove duplicate images",
-                 font=("Segoe UI", 9), bg=_ACCENT, fg="#90CAF9").pack(side=tk.LEFT)
-
-        # Notebook style — white selected tab with blue text works reliably on Windows
-        style = ttk.Style()
-        try:
-            style.theme_use("vista")
-        except Exception:
-            pass
-        try:
-            style.configure("App.TNotebook", background=_BG)
-            style.configure("App.TNotebook.Tab",
-                            font=("Segoe UI", 9, "bold"), padding=[14, 6])
-            style.map("App.TNotebook.Tab",
-                      background=[("selected", _CARD_BG), ("!selected", _ACCENT_TINT)],
-                      foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
-        except Exception:
-            pass
+                 font=("Segoe UI", 9), bg=_ACCENT, fg="#B3D4F0").pack(
+            side=tk.LEFT, padx=(0, 8))
 
         self._nb = ttk.Notebook(self.root, style="App.TNotebook")
         self._nb.pack(fill=tk.BOTH, expand=True)
@@ -602,23 +748,24 @@ class App:
         )
         self.out_var = self._folder_row(self._scan_folders_section, "Output folder:", "out_folder")
 
-        # Mode toggle
-        self._scan_mode_card = ttk.LabelFrame(body, text="Mode", padding=(10, 6, 10, 8))
-        self._scan_mode_card.pack(fill=tk.X, pady=(0, 6))
+        # Mode toggle — M3 segmented button
+        self._scan_mode_card = ttk.LabelFrame(body, text="Mode", padding=(12, 8, 12, 10))
+        self._scan_mode_card.pack(fill=tk.X, pady=(0, 8))
         mode_row = ttk.Frame(self._scan_mode_card)
         mode_row.pack(fill=tk.X)
         for val, lbl in (("quick", "Quick"), ("advanced", "Advanced")):
             rb = tk.Radiobutton(
                 mode_row, text=lbl, variable=self._mode_var, value=val,
-                bg=_ACCENT_TINT, font=("Segoe UI", 9, "bold"),
+                bg=_M3_SURFACE2, fg=_M_TEXT1, font=("Segoe UI", 9, "bold"),
                 indicatoron=False, width=12, relief=tk.FLAT,
                 command=self._on_mode_change,
-                selectcolor=_ACCENT,
+                selectcolor=_ACCENT, activebackground=_M3_SURFACE3,
+                bd=0, pady=5,
             )
             rb.pack(side=tk.LEFT, padx=2)
 
         # Quick Speed card (quick mode only)
-        self._quick_speed_frame = ttk.LabelFrame(body, text="Scan Speed", padding=(10, 8, 10, 10))
+        self._quick_speed_frame = ttk.LabelFrame(body, text="Scan Speed", padding=(12, 8, 12, 10))
         _qs_row = ttk.Frame(self._quick_speed_frame)
         _qs_row.pack(fill=tk.X)
         ttk.Label(_qs_row, text="Quality", foreground="#666",
@@ -770,34 +917,35 @@ class App:
         self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
 
         # Progress panel (fixed, bottom of tab)
-        self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(8, 4, 8, 6))
-        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
+        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 2))
 
         ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
         self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
-        self._progress_bar.pack(fill=tk.X, pady=(4, 2))
+        self._progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._prog_frame, textvariable=self._eta_var,
-                  foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
+                  foreground=_M_TEXT2, font=("Segoe UI", 8)).pack(anchor=tk.W)
         ttk.Checkbutton(
             self._prog_frame, text="Show phase details",
             variable=self._details_var, command=self._toggle_details,
-        ).pack(anchor=tk.W, pady=(2, 0))
+        ).pack(anchor=tk.W, pady=(4, 0))
         self._detail_text = tk.Text(
             self._prog_frame, height=7, state=tk.DISABLED,
-            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT,
+            font=("Consolas", 8), bg=_M3_SURFACE1, fg=_M_TEXT2,
+            relief=tk.FLAT, highlightthickness=0,
         )
 
         # Button bar (fixed, very bottom of tab)
-        self._scan_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        self._scan_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
         btn_bar = self._scan_btn_bar
         btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
-        _GR = "#757575"
+        _GR = "#616161"
 
         # Idle frame: shown when not scanning
-        self._scan_idle_frame = tk.Frame(btn_bar, bg=_ACCENT_TINT)
+        self._scan_idle_frame = tk.Frame(btn_bar, bg=_M3_SURFACE2)
         self._scan_idle_frame.pack(fill=tk.X, padx=4)
 
         _mat_btn(self._scan_idle_frame, "Reset Defaults",
@@ -815,7 +963,7 @@ class App:
         self.scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
 
         # Active frame: shown while scanning
-        self._scan_active_frame = tk.Frame(btn_bar, bg=_ACCENT_TINT)
+        self._scan_active_frame = tk.Frame(btn_bar, bg=_M3_SURFACE2)
         # Not packed initially
 
         self.stop_btn = _mat_btn(self._scan_active_frame, "■  Stop",
@@ -851,7 +999,7 @@ class App:
 
         # Success card (hidden until scan completes; contents rebuilt dynamically)
         self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
-                                           highlightbackground=_M_DIVIDER,
+                                           highlightbackground=_M3_SURFACE3,
                                            highlightthickness=1)
 
         # Action buttons row (separate so _on_done can enable/disable each independently)
@@ -1527,34 +1675,35 @@ class App:
             command=self._discard_custom_resume)
 
         # ── Progress panel (fixed bottom of tab) ──────────────────────────
-        self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(8, 4, 8, 6))
-        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
+        self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
+        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 2))
 
         ttk.Label(self._custom_prog_frame, textvariable=self._custom_phase_label,
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
         self._custom_progress_bar = ttk.Progressbar(
             self._custom_prog_frame, mode="determinate", maximum=100)
-        self._custom_progress_bar.pack(fill=tk.X, pady=(4, 2))
+        self._custom_progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._custom_prog_frame, textvariable=self._custom_eta_var,
-                  foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
+                  foreground=_M_TEXT2, font=("Segoe UI", 8)).pack(anchor=tk.W)
         ttk.Checkbutton(
             self._custom_prog_frame, text="Show phase details",
             variable=self._custom_details_var, command=self._toggle_custom_details,
-        ).pack(anchor=tk.W, pady=(2, 0))
+        ).pack(anchor=tk.W, pady=(4, 0))
         self._custom_detail_text = tk.Text(
             self._custom_prog_frame, height=5, state=tk.DISABLED,
-            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT,
+            font=("Consolas", 8), bg=_M3_SURFACE1, fg=_M_TEXT2,
+            relief=tk.FLAT, highlightthickness=0,
         )
 
         # ── Button bar (fixed very bottom) ───────────────────────────────���
-        self._custom_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
+        self._custom_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
         c_btn_bar = self._custom_btn_bar
         c_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(c_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
         _GR = "#757575"
 
-        self._custom_idle_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
+        self._custom_idle_frame = tk.Frame(c_btn_bar, bg=_M3_SURFACE2)
         self._custom_idle_frame.pack(fill=tk.X, padx=4)
 
         # Left side: Reset Defaults + Last Calibration
@@ -1592,7 +1741,7 @@ class App:
         self._custom_browser_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_browser_btn)
 
-        self._custom_active_frame = tk.Frame(c_btn_bar, bg=_ACCENT_TINT)
+        self._custom_active_frame = tk.Frame(c_btn_bar, bg=_M3_SURFACE2)
         # Not packed initially
 
         self._custom_stop_btn = _mat_btn(
