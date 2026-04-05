@@ -69,6 +69,7 @@ import error_handler
 SETTINGS_PATH = Path(__file__).parent / "settings.json"
 HISTORY_PATH  = Path(__file__).parent / "scan_history.json"
 PHASE_NAMES   = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
+_CUSTOM_PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
 _ACCENT         = "#1565C0"   # Blue 800
 _ACCENT_DARK    = "#0D47A1"   # Blue 900
@@ -549,6 +550,8 @@ class App:
         self._custom_out_var     = tk.StringVar(value=s2.custom_out_folder or s2.out_folder)
         self._custom_phase_label = tk.StringVar(value="Ready.")
         self._custom_eta_var     = tk.StringVar(value="")
+        self._custom_details_var = tk.BooleanVar(value=s2.details_visible)
+        self._custom_tracker: PhaseTracker | None = None
         self._custom_estimate_var = tk.StringVar(value="Select folders to see estimate.")
         self._custom_dry_var     = tk.BooleanVar(value=s2.dry_run)
         self._custom_dry_var.trace_add("write", self._on_setting_change)
@@ -1515,6 +1518,14 @@ class App:
         self._custom_progress_bar.pack(fill=tk.X, pady=(4, 2))
         ttk.Label(self._custom_prog_frame, textvariable=self._custom_eta_var,
                   foreground="#555", font=("Segoe UI", 8)).pack(anchor=tk.W)
+        ttk.Checkbutton(
+            self._custom_prog_frame, text="Show phase details",
+            variable=self._custom_details_var, command=self._toggle_custom_details,
+        ).pack(anchor=tk.W, pady=(2, 0))
+        self._custom_detail_text = tk.Text(
+            self._custom_prog_frame, height=5, state=tk.DISABLED,
+            font=("Consolas", 8), bg="#f8f8f8", relief=tk.FLAT,
+        )
 
         # ── Button bar (fixed very bottom) ───────────────────────────────���
         self._custom_btn_bar = tk.Frame(tab, bg=_ACCENT_TINT, pady=7)
@@ -1849,6 +1860,8 @@ class App:
         self._custom_progress_bar["value"] = 0
         self._custom_progress_bar["mode"]  = "indeterminate"
         self._custom_progress_bar.start(12)
+        self._custom_tracker = PhaseTracker(_CUSTOM_PHASES)
+        self._custom_tracker.start_phase(_CUSTOM_PHASES[0], 1)
 
         self._custom_scan_start_time = time.perf_counter()
         _use_lib_main  = self.main_mode_var.get() == "library"
@@ -2070,27 +2083,74 @@ class App:
     def _custom_progress_cb(
         self, msg: str, done: int, total: int, phase_name: str
     ) -> None:
-        _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
-
         def _update() -> None:
-            pct_per_phase = 100 / len(_PHASES)
-            try:
-                phase_idx = _PHASES.index(phase_name)
-            except ValueError:
-                phase_idx = 0
-            base_pct = phase_idx * pct_per_phase
-            inner    = (done / max(total, 1)) * pct_per_phase if total > 0 else 0
-            pct      = min(100, base_pct + inner)
+            tracker = self._custom_tracker
+            if tracker is None:
+                return
+
+            # Map scanner phase names to custom phases.
+            # collect_images reports "Hashing"; find_groups reports "Comparing".
+            # The worker sets the high-level phase via cb() before each call.
+            mapped = phase_name
+            if phase_name == "Hashing":
+                # Keep the current custom phase ("Main folder" or "Check folder")
+                mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
+            elif phase_name not in _CUSTOM_PHASES:
+                mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
+
+            if tracker.current_phase_name != mapped:
+                tracker.finish_phase()
+                tracker.start_phase(mapped, max(total, 1))
+
+            if total > 0:
+                tracker.update(done)
+
+            pct = tracker.total_pct
+            eta = tracker.format_eta()
+            phase_num = _CUSTOM_PHASES.index(mapped) + 1 if mapped in _CUSTOM_PHASES else "?"
 
             self._custom_progress_bar.stop()
             self._custom_progress_bar["mode"]  = "determinate"
             self._custom_progress_bar["value"] = pct
+
             self._custom_phase_label.set(
-                f"[{phase_name}] {msg[:90]}"
+                f"Phase {phase_num}/{len(_CUSTOM_PHASES)}: {mapped}…"
             )
-            self._custom_eta_var.set(f"{pct:.0f}%")
+            self._custom_eta_var.set(
+                f"{pct:.0f}%  \u00b7  {eta} remaining  \u00b7  {msg[:80]}"
+            )
+            self._update_custom_detail_log()
 
         self.root.after(0, _update)
+
+    def _update_custom_detail_log(self) -> None:
+        if not self._custom_details_var.get() or self._custom_tracker is None:
+            return
+        summaries = self._custom_tracker.phase_summaries
+        lines = []
+        for s in summaries:
+            if s["status"] == "done":
+                icon = "\u2713"
+                info = f"{s['total_units']} units  {s['duration_s']:.1f}s"
+            elif s["status"] == "active":
+                icon = "\u2192"
+                info = f"{s['done_units']}/{s['total_units']}  ongoing"
+            else:
+                icon = "\u25cb"
+                info = "waiting"
+            lines.append(f"{icon} {s['name']:<14} {info}")
+        text = "\n".join(lines)
+        self._custom_detail_text.config(state=tk.NORMAL)
+        self._custom_detail_text.delete("1.0", tk.END)
+        self._custom_detail_text.insert("1.0", text)
+        self._custom_detail_text.config(state=tk.DISABLED)
+
+    def _toggle_custom_details(self) -> None:
+        if self._custom_details_var.get():
+            self._custom_detail_text.pack(fill=tk.X, pady=(4, 0))
+        else:
+            self._custom_detail_text.pack_forget()
+        self._save_settings_now()
 
     def _on_custom_done(
         self, msg: str, success: bool = True,
