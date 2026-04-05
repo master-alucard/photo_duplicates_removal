@@ -28,24 +28,24 @@ from library import (
     update_folder,
 )
 
-# ── Colour palette (matches main.py / about_tab.py) ──────────────────────────
+# ── Material Design 3 colour palette (matches main.py) ──────────────────────
 
-_BG          = "#F5F5F5"
+_BG          = "#F2F4F7"
 _SURFACE     = "#FFFFFF"
 _ACCENT      = "#1565C0"
 _ACCENT_DARK = "#0D47A1"
-_ACCENT_TINT = "#E3F2FD"
+_ACCENT_TINT = "#E8EFF9"
 _SUCCESS     = "#2E7D32"
 _SUCCESS_BG  = "#E8F5E9"
 _ERROR       = "#C62828"
 _ERROR_BG    = "#FFEBEE"
 _WARNING     = "#E65100"
 _WARNING_BG  = "#FFF3E0"
-_DIVIDER     = "#E0E0E0"
-_TEXT1       = "#212121"
-_TEXT2       = "#616161"
-_TEXT3       = "#9E9E9E"
-_DISABLED    = "#BDBDBD"
+_DIVIDER     = "#DDE1E6"
+_TEXT1       = "#1B1B1F"
+_TEXT2       = "#49454F"
+_TEXT3       = "#79747E"
+_DISABLED    = "#C4C7C5"
 
 _DUMMY_PREFIX = "DUMMY:"   # prefix for placeholder treeview items used in LibFolderPickerDialog
 

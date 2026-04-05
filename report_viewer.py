@@ -30,11 +30,11 @@ import error_handler
 
 # ── Material Design colour palette ────────────────────────────────────────────
 
-_M_BG           = "#F5F5F5"   # Grey 100 – window background
+_M_BG           = "#F2F4F7"   # Surface dim – cool grey
 _M_SURFACE      = "#FFFFFF"   # Card surface
-_M_PRIMARY      = "#1565C0"   # Blue 800
-_M_PRIMARY_DARK = "#0D47A1"   # Blue 900
-_M_PRIMARY_TINT = "#E3F2FD"   # Blue 50
+_M_PRIMARY      = "#1565C0"   # Primary – Blue 800
+_M_PRIMARY_DARK = "#0D47A1"   # Primary container variant
+_M_PRIMARY_TINT = "#E8EFF9"   # Surface tint
 _M_SUCCESS      = "#2E7D32"   # Green 800
 _M_SUCCESS_TINT = "#E8F5E9"   # Green 50
 _M_ERROR        = "#C62828"   # Red 800
@@ -42,10 +42,10 @@ _M_ERROR_TINT   = "#FFEBEE"   # Red 50
 _M_WARNING      = "#E65100"   # Deep Orange 900
 _M_WARNING_TINT = "#FFF3E0"   # Orange 50
 _M_PURPLE       = "#6A1B9A"   # Purple 800 (series)
-_M_DIVIDER      = "#E0E0E0"   # Grey 300
-_M_TEXT1        = "#212121"   # Grey 900
-_M_TEXT2        = "#616161"   # Grey 700
-_M_TEXT3        = "#888888"   # Grey 500 — slightly darker for readability
+_M_DIVIDER      = "#DDE1E6"   # Outline variant
+_M_TEXT1        = "#1B1B1F"   # On-surface
+_M_TEXT2        = "#49454F"   # On-surface-variant
+_M_TEXT3        = "#79747E"   # Tertiary text
 _M_SOLO_TINT    = "#E1F5FE"   # Light Blue 50
 _M_SOLO_BORDER  = "#0288D1"   # Light Blue 700
 _M_BROKEN_TINT  = "#FCE4EC"   # Pink 50
