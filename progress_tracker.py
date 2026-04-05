@@ -15,6 +15,9 @@ PHASE_WEIGHTS: dict[str, int] = {
     "Metadata": 10,
     "Moving": 5,
     "Report": 4,
+    # Compare Scan (custom) phases — weights reflect typical wall-clock ratio
+    "Main folder": 40,
+    "Check folder": 40,
 }
 _DEFAULT_WEIGHT = 10  # fallback for unknown phase names
 
