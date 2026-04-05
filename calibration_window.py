@@ -14,16 +14,35 @@ from typing import Callable
 
 from config import Settings
 
-# ── Material Design colour palette ───────────────────────────────────────────
-_BG             = "#F5F5F5"   # Grey 100
-_SURFACE        = "#FFFFFF"   # Card surface
-_M_PRIMARY      = "#1565C0"   # Blue 800
-_M_SUCCESS      = "#2E7D32"   # Green 800
-_M_ERROR        = "#C62828"   # Red 800
-_M_DIVIDER      = "#E0E0E0"   # Grey 300
-_M_TEXT1        = "#212121"   # Grey 900
-_M_TEXT2        = "#616161"   # Grey 700
-_MAT_DISABLED   = "#BDBDBD"   # Grey 400
+# ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
+_BG             = "#F5F5F5"
+_SURFACE        = "#FFFFFF"
+_M_PRIMARY      = "#1565C0"
+_M_SUCCESS      = "#2E7D32"
+_M_ERROR        = "#C62828"
+_M_DIVIDER      = "#E0E0E0"
+_M_TEXT1        = "#212121"
+_M_TEXT2        = "#616161"
+_MAT_DISABLED   = "#BDBDBD"
+_M_DISABLED_FG  = "#838387"
+
+
+def _apply_theme(dark: bool = False) -> None:
+    """Overwrite module colours from the theme palette."""
+    global _BG, _SURFACE, _M_PRIMARY, _M_SUCCESS, _M_ERROR
+    global _M_DIVIDER, _M_TEXT1, _M_TEXT2, _MAT_DISABLED, _M_DISABLED_FG
+    import theme as _t
+    p = _t.get_palette(dark)
+    _BG           = p["BG"]
+    _SURFACE      = p["CARD_BG"]
+    _M_PRIMARY    = p["ACCENT"]
+    _M_SUCCESS    = p["SUCCESS"]
+    _M_ERROR      = p["ERROR"]
+    _M_DIVIDER    = p["DIVIDER"]
+    _M_TEXT1      = p["TEXT1"]
+    _M_TEXT2      = p["TEXT2"]
+    _MAT_DISABLED = p["DISABLED"]
+    _M_DISABLED_FG = p["DISABLED_FG"]
 
 _MONO   = ("Consolas", 9)
 _SMALL  = ("Segoe UI", 8)
@@ -50,6 +69,7 @@ def _mat_btn(parent, text: str, command, bg: str, fg: str = "#FFFFFF",
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
     btn._mat_bg = bg
+    btn._mat_fg = fg
 
     def _enter(_):
         if str(btn["state"]) != "disabled":
@@ -65,11 +85,13 @@ def _mat_btn(parent, text: str, command, bg: str, fg: str = "#FFFFFF",
 
 
 def _mat_enable(btn: "tk.Button") -> None:
-    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, cursor="hand2")
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, fg=btn._mat_fg,
+                  activebackground=_darken_color(btn._mat_bg),
+                  activeforeground=btn._mat_fg, cursor="hand2")
 
 
 def _mat_disable(btn: "tk.Button") -> None:
-    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, cursor="")
+    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, fg=_M_DISABLED_FG, cursor="")
 
 _INSTRUCTIONS = """\
 Calibration lets the app find the best detection settings for YOUR photo

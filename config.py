@@ -56,6 +56,7 @@ class Settings:
     rotation_threshold_factor: float = 3.0     # pHash threshold multiplier for rotation-matched pairs
     # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of pHash
     # drift on photo-like images (quality=85).  factor=3.0 → rotation_thr = 2×3 = 6 → 100% coverage.
+    dark_mode: bool = False                      # Night theme (dark background)
     scan_speed: int = 5                          # 1=quality → 10=speed (quick-mode quality slider)
     scan_threads: int = 0                        # parallel hashing threads (0 = os.cpu_count())
     # Calibrated on Canon EOS M100 CR2 vs camera JPEG:

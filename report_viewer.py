@@ -28,32 +28,91 @@ from scanner import DuplicateGroup, ImageRecord
 import error_handler
 
 
-# ── Material Design colour palette ────────────────────────────────────────────
+# ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
 
-_M_BG           = "#F2F4F7"   # Surface dim – cool grey
-_M_SURFACE      = "#FFFFFF"   # Card surface
-_M_PRIMARY      = "#1565C0"   # Primary – Blue 800
-_M_PRIMARY_DARK = "#0D47A1"   # Primary container variant
-_M_PRIMARY_TINT = "#E8EFF9"   # Surface tint
-_M_SUCCESS      = "#2E7D32"   # Green 800
-_M_SUCCESS_TINT = "#E8F5E9"   # Green 50
-_M_ERROR        = "#C62828"   # Red 800
-_M_ERROR_TINT   = "#FFEBEE"   # Red 50
-_M_WARNING      = "#E65100"   # Deep Orange 900
-_M_WARNING_TINT = "#FFF3E0"   # Orange 50
-_M_PURPLE       = "#6A1B9A"   # Purple 800 (series)
-_M_DIVIDER      = "#DDE1E6"   # Outline variant
-_M_TEXT1        = "#1B1B1F"   # On-surface
-_M_TEXT2        = "#49454F"   # On-surface-variant
-_M_TEXT3        = "#79747E"   # Tertiary text
-_M_SOLO_TINT    = "#E1F5FE"   # Light Blue 50
-_M_SOLO_BORDER  = "#0288D1"   # Light Blue 700
-_M_BROKEN_TINT  = "#FCE4EC"   # Pink 50
-_M_BROKEN_BDR   = "#AD1457"   # Pink 800
-_M_MANUAL      = "#5C6BC0"   # Indigo 400
-_M_MANUAL_TINT = "#E8EAF6"   # Indigo 50
-_M_MANUAL_HDR  = "#EDE7F6"   # Purple 50
-_M_MANUAL_DARK = "#4527A0"   # Deep Purple 800
+_M_BG           = "#F2F4F7"
+_M_SURFACE      = "#FFFFFF"
+_M_PRIMARY      = "#1565C0"
+_M_PRIMARY_DARK = "#0D47A1"
+_M_PRIMARY_TINT = "#E8EFF9"
+_M_SUCCESS      = "#2E7D32"
+_M_SUCCESS_TINT = "#E8F5E9"
+_M_ERROR        = "#C62828"
+_M_ERROR_TINT   = "#FFEBEE"
+_M_WARNING      = "#E65100"
+_M_WARNING_TINT = "#FFF3E0"
+_M_PURPLE       = "#6A1B9A"
+_M_DIVIDER      = "#DDE1E6"
+_M_TEXT1        = "#1B1B1F"
+_M_TEXT2        = "#49454F"
+_M_TEXT3        = "#79747E"
+_M_SOLO_TINT    = "#E1F5FE"
+_M_SOLO_BORDER  = "#0288D1"
+_M_BROKEN_TINT  = "#FCE4EC"
+_M_BROKEN_BDR   = "#AD1457"
+_M_MANUAL      = "#5C6BC0"
+_M_MANUAL_TINT = "#E8EAF6"
+_M_MANUAL_HDR  = "#EDE7F6"
+_M_MANUAL_DARK = "#4527A0"
+
+
+def _apply_theme(dark: bool = False) -> None:
+    """Overwrite module colours from the theme palette."""
+    global _M_BG, _M_SURFACE, _M_PRIMARY, _M_PRIMARY_DARK, _M_PRIMARY_TINT
+    global _M_SUCCESS, _M_SUCCESS_TINT, _M_ERROR, _M_ERROR_TINT
+    global _M_WARNING, _M_WARNING_TINT, _M_PURPLE
+    global _M_DIVIDER, _M_TEXT1, _M_TEXT2, _M_TEXT3
+    global _M_SOLO_TINT, _M_SOLO_BORDER, _M_BROKEN_TINT, _M_BROKEN_BDR
+    global _M_MANUAL, _M_MANUAL_TINT, _M_MANUAL_HDR, _M_MANUAL_DARK
+    global _CARD_BG, _ORIG_BG, _PREV_BG, _HEADER_BG, _SERIES_COLOR
+    global _SOLO_BG, _BROKEN_BG
+    import theme as _t
+    p = _t.get_palette(dark)
+    _M_BG           = p["BG"]
+    _M_SURFACE      = p["CARD_BG"]
+    _M_PRIMARY      = p["ACCENT"]
+    _M_PRIMARY_DARK = p["ACCENT_DARK"]
+    _M_PRIMARY_TINT = p["PRIMARY_TINT"]
+    _M_SUCCESS      = p["SUCCESS"]
+    _M_SUCCESS_TINT = p["SUCCESS_TINT"]
+    _M_ERROR        = p["ERROR"]
+    _M_ERROR_TINT   = p["ERROR_TINT"]
+    _M_WARNING      = p["WARNING"]
+    _M_WARNING_TINT = p["WARNING_TINT"]
+    _M_DIVIDER      = p["DIVIDER"]
+    _M_TEXT1        = p["TEXT1"]
+    _M_TEXT2        = p["TEXT2"]
+    _M_TEXT3        = p["TEXT3"]
+    # Report-specific semantic colours — keep readable in both themes
+    if dark:
+        _M_PURPLE       = "#CE93D8"   # Purple 200
+        _M_SOLO_TINT    = "#1A2A33"   # Dark teal tint
+        _M_SOLO_BORDER  = "#4FC3F7"   # Light Blue 300
+        _M_BROKEN_TINT  = "#2E1A22"   # Dark pink tint
+        _M_BROKEN_BDR   = "#F48FB1"   # Pink 200
+        _M_MANUAL       = "#9FA8DA"   # Indigo 200
+        _M_MANUAL_TINT  = "#1A1D33"   # Dark indigo tint
+        _M_MANUAL_HDR   = "#1E1A2E"   # Dark purple tint
+        _M_MANUAL_DARK  = "#B39DDB"   # Deep Purple 200
+    else:
+        _M_PURPLE       = "#6A1B9A"
+        _M_SOLO_TINT    = "#E1F5FE"
+        _M_SOLO_BORDER  = "#0288D1"
+        _M_BROKEN_TINT  = "#FCE4EC"
+        _M_BROKEN_BDR   = "#AD1457"
+        _M_MANUAL       = "#5C6BC0"
+        _M_MANUAL_TINT  = "#E8EAF6"
+        _M_MANUAL_HDR   = "#EDE7F6"
+        _M_MANUAL_DARK  = "#4527A0"
+    # Legacy aliases
+    _CARD_BG      = _M_SURFACE
+    _ORIG_BG      = _M_SUCCESS_TINT
+    _PREV_BG      = _M_ERROR_TINT
+    _HEADER_BG    = _M_PRIMARY
+    _SERIES_COLOR = _M_PURPLE
+    _SOLO_BG      = _M_SOLO_TINT
+    _BROKEN_BG    = _M_BROKEN_TINT
+
 
 _THUMB_SIZE = 156
 

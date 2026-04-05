@@ -30,7 +30,7 @@ GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
 WEBSITE_URL   = "https://katador.net"
 RELEASES_API  = "https://api.github.com/repos/master-alucard/photo_duplicates_removal/releases/latest"
 
-# ── Material Design 3 colour palette (matches main.py) ──────────────────────
+# ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
 _BG          = "#F2F4F7"
 _SURFACE     = "#FFFFFF"
@@ -46,6 +46,29 @@ _TEXT1       = "#1B1B1F"
 _TEXT2       = "#49454F"
 _TEXT3       = "#79747E"
 _SURFACE2    = "#ECEEF2"
+
+
+def _apply_theme(dark: bool = False) -> None:
+    """Overwrite module colours from the theme palette."""
+    global _BG, _SURFACE, _PRIMARY, _PRIMARY_TINT
+    global _SUCCESS, _SUCCESS_TINT, _ERROR, _ERROR_TINT, _WARNING
+    global _DIVIDER, _TEXT1, _TEXT2, _TEXT3, _SURFACE2
+    import theme as _t
+    p = _t.get_palette(dark)
+    _BG          = p["BG"]
+    _SURFACE     = p["CARD_BG"]
+    _PRIMARY     = p["ACCENT"]
+    _PRIMARY_TINT= p["PRIMARY_TINT"]
+    _SUCCESS     = p["SUCCESS"]
+    _SUCCESS_TINT= p["SUCCESS_TINT"]
+    _ERROR       = p["ERROR"]
+    _ERROR_TINT  = p["ERROR_TINT"]
+    _WARNING     = p["WARNING"]
+    _DIVIDER     = p["DIVIDER"]
+    _TEXT1       = p["TEXT1"]
+    _TEXT2       = p["TEXT2"]
+    _TEXT3       = p["TEXT3"]
+    _SURFACE2    = p["SURFACE2"]
 
 # ── Privacy policy text ───────────────────────────────────────────────────────
 
