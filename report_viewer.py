@@ -45,7 +45,7 @@ _M_PURPLE       = "#6A1B9A"   # Purple 800 (series)
 _M_DIVIDER      = "#E0E0E0"   # Grey 300
 _M_TEXT1        = "#212121"   # Grey 900
 _M_TEXT2        = "#616161"   # Grey 700
-_M_TEXT3        = "#9E9E9E"   # Grey 500
+_M_TEXT3        = "#888888"   # Grey 500 — slightly darker for readability
 _M_SOLO_TINT    = "#E1F5FE"   # Light Blue 50
 _M_SOLO_BORDER  = "#0288D1"   # Light Blue 700
 _M_BROKEN_TINT  = "#FCE4EC"   # Pink 50
@@ -676,12 +676,12 @@ class ReportViewer(tk.Frame):
             fname = rec.path.name
             tk.Label(
                 tile, text=fname,
-                font=("Segoe UI", 7), bg=bg, fg="#9E9E9E",
+                font=("Segoe UI", 8), bg=bg, fg="#757575",
                 wraplength=max_thumb,
             ).pack()
             tk.Label(
                 tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                font=("Segoe UI", 7), bg=bg, fg="#BDBDBD",
+                font=("Segoe UI", 8), bg=bg, fg="#9E9E9E",
             ).pack()
         else:
             # ── Normal tile ───────────────────────────────────────────────
@@ -700,7 +700,7 @@ class ReportViewer(tk.Frame):
 
                 tk.Label(
                     cb_frame, text=fname,
-                    font=("Segoe UI", 7), bg=bg, fg=_M_TEXT1,
+                    font=("Segoe UI", 8), bg=bg, fg=_M_TEXT1,
                     wraplength=max_thumb,
                 ).pack(side=tk.LEFT)
 
@@ -709,7 +709,7 @@ class ReportViewer(tk.Frame):
                 # "Different image" badge (shown when unchecked)
                 diff_badge = tk.Label(
                     tile, text="≠ different image",
-                    font=("Segoe UI", 7, "italic"), bg=bg, fg=_M_WARNING,
+                    font=("Segoe UI", 8, "italic"), bg=bg, fg=_M_WARNING,
                 )
                 def _toggle_badge(*_):
                     if var.get():
@@ -720,17 +720,17 @@ class ReportViewer(tk.Frame):
             else:
                 tk.Label(
                     tile, text=fname,
-                    font=("Segoe UI", 7, "bold"), bg=bg, fg=_M_TEXT1,
+                    font=("Segoe UI", 8, "bold"), bg=bg, fg=_M_TEXT1,
                     wraplength=max_thumb,
                 ).pack()
 
             tk.Label(
                 tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                font=("Segoe UI", 7), bg=bg, fg=_M_TEXT2,
+                font=("Segoe UI", 8), bg=bg, fg=_M_TEXT2,
             ).pack()
             tk.Label(
                 tile, text=rec.date_label(),
-                font=("Segoe UI", 7), bg=bg, fg=_M_TEXT3,
+                font=("Segoe UI", 8), bg=bg, fg=_M_TEXT3,
             ).pack()
 
         return tile
@@ -1334,7 +1334,7 @@ class ReportViewer(tk.Frame):
                 tk.Label(
                     tile,
                     text=(path.name[:15] + "…" if len(path.name) > 16 else path.name),
-                    font=("Segoe UI", 7), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
+                    font=("Segoe UI", 8), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
                 ).pack()
             # Per-image remove button → sends image to Unsorted
             _mat_btn(tile, "↩ Unsorted",
@@ -1453,13 +1453,13 @@ class ReportViewer(tk.Frame):
 
             if rec is not None:
                 tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                         font=("Segoe UI", 7), bg=_M_WARNING_TINT, fg=_M_TEXT2).pack()
+                         font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT2).pack()
 
             fname = path.name
             tk.Label(
                 cell,
                 text=(fname[:14] + "…" if len(fname) > 15 else fname),
-                font=("Segoe UI", 7), bg=_M_WARNING_TINT, fg=_M_TEXT1,
+                font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT1,
             ).pack()
 
             _mat_btn(cell, "↩ Return to Unique",
@@ -1682,12 +1682,12 @@ class ReportViewer(tk.Frame):
             tk.Label(
                 cell,
                 text=(fname[:15] + "…" if len(fname) > 16 else fname),
-                font=("Segoe UI", 7), bg=_M_ERROR_TINT, fg=_M_TEXT2,
+                font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT2,
                 wraplength=_THUMB_SIZE,
             ).pack()
             if rec is not None:
                 tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                         font=("Segoe UI", 7), bg=_M_ERROR_TINT, fg=_M_TEXT3).pack()
+                         font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT3).pack()
 
             _mat_btn(cell, "↩ Revert",
                      lambda it=item: self._on_revert_manual_item(it),
