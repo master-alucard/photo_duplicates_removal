@@ -285,7 +285,7 @@ def collect_images(
                     except Exception:
                         pass  # corrupted cache entry → fall through to fresh hash
 
-        # ── fresh hash ────────────────────────────────────────────────────
+        # ── fresh hash (with single retry for stale handles after sleep) ──
         try:
             ext = path.suffix.lower()
             if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
@@ -293,6 +293,17 @@ def collect_images(
             else:
                 rec = _hash_image(path, settings)
             return i, path, rec, None, False
+        except (OSError, IOError):
+            # File handle may be stale after system sleep — retry once
+            try:
+                ext = path.suffix.lower()
+                if ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
+                    rec = _hash_raw(path, settings)
+                else:
+                    rec = _hash_image(path, settings)
+                return i, path, rec, None, False
+            except Exception as exc2:
+                return i, path, None, exc2, False
         except Exception as exc:
             return i, path, None, exc, False
 
@@ -304,6 +315,8 @@ def collect_images(
             for i, path in enumerate(all_image_paths):
                 if stop_flag and stop_flag[0]:
                     break
+                if pause_flag and pause_flag[0]:
+                    break
                 futures[pool.submit(_hash_one, (i, path))] = i
 
             ordered: dict[int, Optional[ImageRecord]] = {}
@@ -311,7 +324,13 @@ def collect_images(
             for fut in as_completed(futures):
                 if stop_flag and stop_flag[0]:
                     break
-                idx, path, rec, exc, was_cache_hit = fut.result()
+                if pause_flag and pause_flag[0]:
+                    break
+                try:
+                    idx, path, rec, exc, was_cache_hit = fut.result()
+                except Exception:
+                    completed += 1
+                    continue
                 completed += 1
                 if progress_cb:
                     progress_cb(f"Hashing {path.name}", completed, total, "Hashing")

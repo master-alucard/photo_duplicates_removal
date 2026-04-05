@@ -405,10 +405,13 @@ class App:
         self._save_after_id = None
         self._tracker: PhaseTracker | None = None
         self._last_scan_info: dict = {}
+        self._last_heartbeat: float = time.monotonic()
 
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
         self._custom_pause_flag: list[bool] = [False]
+        self._custom_paused_state = None
+        self._custom_is_paused: bool = False
         self._custom_groups:     list = []
         self._custom_broken:     list = []
         self._custom_report_path: Path | None = None
@@ -416,8 +419,10 @@ class App:
 
         self._build_ui()
         self._check_resume_state()
+        self._check_custom_resume_state()
         self._check_last_results()
         self._schedule_estimate_update()
+        self._heartbeat_tick()
 
     # ── UI construction ───────────────────────────────────────────────────
 
@@ -1507,6 +1512,20 @@ class App:
         ttk.Label(self._custom_estimate_frame, textvariable=self._custom_estimate_var,
                   foreground="#555", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
 
+        # Resume notice (Compare Scan)
+        self._custom_resume_frame = ttk.Frame(body)
+        self._custom_resume_frame.pack(fill=tk.X, pady=(2, 2))
+        self._custom_resume_var = tk.StringVar()
+        self._custom_resume_lbl = ttk.Label(
+            self._custom_resume_frame, textvariable=self._custom_resume_var,
+            foreground="#7c3aed", font=("Segoe UI", 8, "bold"))
+        self._custom_resume_btn = ttk.Button(
+            self._custom_resume_frame, text="Resume",
+            command=self._resume_custom_scan)
+        self._custom_discard_btn = ttk.Button(
+            self._custom_resume_frame, text="Discard",
+            command=self._discard_custom_resume)
+
         # ── Progress panel (fixed bottom of tab) ──────────────────────────
         self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(8, 4, 8, 6))
         self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM)
@@ -1801,7 +1820,7 @@ class App:
 
     # ── custom scan control ────────────────────────────────────────────────
 
-    def _start_custom_scan(self) -> None:
+    def _start_custom_scan(self, resume_state=None) -> None:
         if self._scanning:
             error_handler.show_warning(self.root, "Scan In Progress",
                 "A scan is already running.\nPlease wait for it to finish.")
@@ -1844,6 +1863,7 @@ class App:
         self._scanning = True
         self._custom_stop_flag[0]  = False
         self._custom_pause_flag[0] = False
+        self._custom_is_paused     = False
         self._custom_groups        = []
         self._custom_broken        = []
         self._custom_report_path   = None
@@ -1852,6 +1872,11 @@ class App:
         # Swap button frames
         self._custom_idle_frame.pack_forget()
         self._custom_active_frame.pack(fill=tk.X, padx=4)
+        # Ensure pause button is in correct state
+        self._custom_pause_btn.configure(
+            text="⏸  Pause", command=self._pause_custom_scan)
+        _mat_enable(self._custom_pause_btn)
+        _mat_enable(self._custom_stop_btn)
         _mat_disable(self._custom_accept_btn)
         _mat_disable(self._custom_inapp_btn)
         _mat_disable(self._custom_browser_btn)
@@ -1863,6 +1888,7 @@ class App:
         self._custom_tracker = PhaseTracker(_CUSTOM_PHASES)
         self._custom_tracker.start_phase(_CUSTOM_PHASES[0], 1)
 
+        _set_sleep_prevention(True)
         self._custom_scan_start_time = time.perf_counter()
         _use_lib_main  = self.main_mode_var.get() == "library"
         _trust_main    = self.trust_lib_main_var.get() if _use_lib_main else False
@@ -1874,6 +1900,7 @@ class App:
             kwargs={
                 "use_lib_main":  _use_lib_main,  "trust_main":  _trust_main,
                 "use_lib_check": _use_lib_check, "trust_check": _trust_check,
+                "resume_state":  resume_state,
             },
             daemon=True,
         ).start()
@@ -1883,7 +1910,35 @@ class App:
         _mat_disable(self._custom_pause_btn)
         self._custom_phase_label.set("Pausing…")
 
+    def _resume_custom_in_place(self) -> None:
+        """Resume a paused Compare Scan without going back to the idle state."""
+        self._custom_is_paused = False
+        self._custom_pause_btn.configure(
+            text="⏸  Pause", command=self._pause_custom_scan)
+        _mat_enable(self._custom_stop_btn)
+        self._start_custom_scan(resume_state=self._custom_paused_state)
+
     def _stop_custom_scan(self) -> None:
+        if self._custom_is_paused:
+            # Scan already paused; stopping discards the paused state
+            if not messagebox.askyesno("Discard Paused Scan",
+                                       "Discard the paused compare scan?",
+                                       parent=self.root):
+                return
+            self._custom_is_paused = False
+            self._custom_paused_state = None
+            self._unlock_settings()
+            self._custom_active_frame.pack_forget()
+            self._custom_idle_frame.pack(fill=tk.X, padx=4)
+            self._custom_phase_label.set("Paused scan discarded.")
+            self._custom_pause_btn.configure(
+                text="⏸  Pause", command=self._pause_custom_scan)
+            # Delete on-disk state
+            out = self._custom_out_var.get().strip()
+            if out:
+                from scan_state import delete_custom_state
+                delete_custom_state(Path(out))
+            return
         if not messagebox.askyesno("Stop Scan", "Stop the custom scan?", parent=self.root):
             return
         self._custom_stop_flag[0] = True
@@ -1897,6 +1952,7 @@ class App:
         self, main_path: Path, check_path: Path, out_path: Path, settings: Settings,
         use_lib_main: bool = False, trust_main: bool = False,
         use_lib_check: bool = False, trust_check: bool = False,
+        resume_state=None,
     ) -> None:
         _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
@@ -1904,12 +1960,7 @@ class App:
             self._custom_progress_cb(msg, done, total, phase)
 
         def _load_lib_cache(folder: Path, use: bool):
-            """Load cached hashes for *folder* from the library.
-
-            Always attempts to load — cached entries are validated against
-            mtime+size unless *use* is True and the corresponding trust flag
-            is set (explicit Library mode).  Returns (cache, lib) or (None, None).
-            """
+            """Load cached hashes for *folder* from the library."""
             try:
                 from library import Library, get_library_dir
                 _lib = Library.load(get_library_dir())
@@ -1917,14 +1968,23 @@ class App:
             except Exception:
                 return None, None
 
-        def _writeback_to_library(folder: Path, records: list) -> None:
-            """Write scan results back to the library (best-effort).
+        def _inject_records_into_cache(records_list, lib_cache):
+            """Inject already-hashed records into the in-memory cache."""
+            if lib_cache is None:
+                lib_cache = {}
+            try:
+                from library import FileRecord as _FR
+                for _r in records_list:
+                    try:
+                        lib_cache[str(_r.path.resolve())] = _FR.from_image_record(_r)
+                    except Exception:
+                        pass
+            except ImportError:
+                pass
+            return lib_cache
 
-            Saves the hash cache file and registers/updates the FolderEntry so
-            the folder appears in the Library tab.  Future scans of the same
-            folder reuse these hashes; staleness (mtime+size) is always checked
-            so changed files are re-hashed automatically.
-            """
+        def _writeback_to_library(folder: Path, records: list) -> None:
+            """Write scan results back to the library (best-effort)."""
             if not records:
                 return
             try:
@@ -1955,6 +2015,26 @@ class App:
             except Exception:
                 pass   # library write-back is best-effort
 
+        def _save_custom_pause(phase, main_records, check_records,
+                               compare_i=0, union_parent=None):
+            """Persist the custom scan state so it can be resumed."""
+            from scan_state import (CustomScanState, save_custom_state,
+                                    custom_state_path, serialize_record)
+            from dataclasses import asdict
+            st = CustomScanState(
+                main_folder=str(main_path),
+                check_folder=str(check_path),
+                output_folder=str(out_path),
+                settings_snapshot=asdict(settings),
+                phase=phase,
+                main_records=[serialize_record(r) for r in main_records],
+                check_records=[serialize_record(r) for r in check_records],
+                compare_i=compare_i,
+                union_parent=list(union_parent) if union_parent else [],
+            )
+            save_custom_state(st, custom_state_path(out_path))
+            self._custom_paused_state = st
+
         try:
             out_path.mkdir(parents=True, exist_ok=True)
             skip_paths = {
@@ -1963,61 +2043,141 @@ class App:
                 out_path.resolve(),
             }
 
-            # Phase 1 — hash main folder
-            cb("Scanning main folder…", 0, 1, "Main folder")
+            main_records = []
+            check_records = []
             main_failed: list = []
-            _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
-            main_records = collect_images(
-                main_path, skip_paths, settings,
-                progress_cb=cb,
-                stop_flag=self._custom_stop_flag,
-                pause_flag=self._custom_pause_flag,
-                failed_paths=main_failed,
-                library_cache=_main_cache,
-                trust_library=trust_main and use_lib_main,
-            )
-            # Write main folder scan results back to the library cache.
-            _writeback_to_library(main_path, main_records)
+            check_failed: list = []
+            _compare_resume = None     # ScanState for resuming mid-compare
+
+            # ── Determine starting point from resume_state ────────────────
+            _skip_main  = False
+            _skip_check = False
+            if resume_state is not None:
+                from scan_state import deserialize_record
+                rp = resume_state.phase
+                if rp in ("main_done", "check_hashing", "check_done", "comparing"):
+                    main_records = [deserialize_record(r) for r in resume_state.main_records]
+                    _skip_main = True
+                    cb(f"Restored {len(main_records)} main records.", 0, 0, "Main folder")
+                if rp in ("check_done", "comparing"):
+                    check_records = [deserialize_record(r) for r in resume_state.check_records]
+                    _skip_check = True
+                    cb(f"Restored {len(check_records)} check records.", 0, 0, "Check folder")
+                if rp == "comparing" and resume_state.compare_i > 0:
+                    # Build a ScanState for find_groups resume
+                    from scan_state import ScanState
+                    _compare_resume = ScanState(
+                        phase="comparing",
+                        compare_i=resume_state.compare_i,
+                        union_parent=resume_state.union_parent,
+                    )
+                if rp == "main_hashing":
+                    # Partially hashed main folder — inject into cache
+                    _partial_main = [deserialize_record(r) for r in resume_state.main_records]
+                    cb(f"Resuming main folder — {len(_partial_main)} already hashed.", 0, 0, "Main folder")
+                    _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
+                    _main_cache = _inject_records_into_cache(_partial_main, _main_cache)
+                    main_records = collect_images(
+                        main_path, skip_paths, settings,
+                        progress_cb=cb,
+                        stop_flag=self._custom_stop_flag,
+                        pause_flag=self._custom_pause_flag,
+                        failed_paths=main_failed,
+                        library_cache=_main_cache,
+                        trust_library=True,
+                    )
+                    _writeback_to_library(main_path, main_records)
+                    _skip_main = True   # already done
+                if rp == "check_hashing":
+                    # Partially hashed check folder — inject into cache
+                    _partial_check = [deserialize_record(r) for r in resume_state.check_records]
+                    cb(f"Resuming check folder — {len(_partial_check)} already hashed.", 0, 0, "Check folder")
+                    _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
+                    _check_cache = _inject_records_into_cache(_partial_check, _check_cache)
+                    check_records = collect_images(
+                        check_path, skip_paths, settings,
+                        progress_cb=cb,
+                        stop_flag=self._custom_stop_flag,
+                        pause_flag=self._custom_pause_flag,
+                        failed_paths=check_failed,
+                        library_cache=_check_cache,
+                        trust_library=True,
+                    )
+                    _writeback_to_library(check_path, check_records)
+                    _skip_check = True
+
+            # ── Phase 1 — hash main folder ────────────────────────────────
+            if not _skip_main:
+                cb("Scanning main folder…", 0, 1, "Main folder")
+                _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
+                main_records = collect_images(
+                    main_path, skip_paths, settings,
+                    progress_cb=cb,
+                    stop_flag=self._custom_stop_flag,
+                    pause_flag=self._custom_pause_flag,
+                    failed_paths=main_failed,
+                    library_cache=_main_cache,
+                    trust_library=trust_main and use_lib_main,
+                )
+                _writeback_to_library(main_path, main_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
                 return
+            if self._custom_pause_flag[0]:
+                _save_custom_pause("main_hashing", main_records, [])
+                self.root.after(0, lambda: self._on_custom_done(
+                    "Compare Scan paused (main folder).", success=False, paused=True))
+                return
 
-            # Phase 2 — hash check folder
-            cb("Scanning check folder…", 0, 1, "Check folder")
-            check_failed: list = []
-            _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
-            check_records = collect_images(
-                check_path, skip_paths, settings,
-                progress_cb=cb,
-                stop_flag=self._custom_stop_flag,
-                pause_flag=self._custom_pause_flag,
-                failed_paths=check_failed,
-                library_cache=_check_cache,
-                trust_library=trust_check and use_lib_check,
-            )
-
-            # Write check folder scan results back to the library cache.
-            _writeback_to_library(check_path, check_records)
+            # ── Phase 2 — hash check folder ───────────────────────────────
+            if not _skip_check:
+                cb("Scanning check folder…", 0, 1, "Check folder")
+                _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
+                check_records = collect_images(
+                    check_path, skip_paths, settings,
+                    progress_cb=cb,
+                    stop_flag=self._custom_stop_flag,
+                    pause_flag=self._custom_pause_flag,
+                    failed_paths=check_failed,
+                    library_cache=_check_cache,
+                    trust_library=trust_check and use_lib_check,
+                )
+                _writeback_to_library(check_path, check_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
+                return
+            if self._custom_pause_flag[0]:
+                _save_custom_pause("check_hashing", main_records, check_records)
+                self.root.after(0, lambda: self._on_custom_done(
+                    "Compare Scan paused (check folder).", success=False, paused=True))
                 return
 
             all_records = main_records + check_records
             self._custom_broken = main_failed + check_failed
 
-            # Phase 3 — find groups across both folders
+            # ── Phase 3 — find groups across both folders ─────────────────
             cb("Comparing images…", 0, 1, "Comparing")
-            all_groups, _ = find_groups(
+            all_groups, partial_state = find_groups(
                 all_records, settings,
                 progress_cb=cb,
                 stop_flag=self._custom_stop_flag,
                 pause_flag=self._custom_pause_flag,
+                resume_state=_compare_resume,
             )
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
+                return
+            if self._custom_pause_flag[0] and partial_state is not None:
+                _save_custom_pause(
+                    "comparing", main_records, check_records,
+                    compare_i=partial_state.compare_i,
+                    union_parent=partial_state.union_parent,
+                )
+                self.root.after(0, lambda: self._on_custom_done(
+                    "Compare Scan paused (comparing).", success=False, paused=True))
                 return
 
             # Reclassify: main = originals (never moved), check = duplicates (candidates for trash)
@@ -2061,6 +2221,10 @@ class App:
             self._custom_groups      = combined_groups
             self._custom_report_path = report
 
+            # Clean up any paused state file on successful completion
+            from scan_state import delete_custom_state
+            delete_custom_state(out_path)
+
             dry = settings.dry_run
             msg = (
                 f"Done. {len(main_records)} main + {len(check_records)} check images scanned.  "
@@ -2087,6 +2251,7 @@ class App:
             tracker = self._custom_tracker
             if tracker is None:
                 return
+            self._check_sleep_gap(tracker)
 
             # Map scanner phase names to custom phases.
             # collect_images reports "Hashing"; find_groups reports "Comparing".
@@ -2154,18 +2319,32 @@ class App:
 
     def _on_custom_done(
         self, msg: str, success: bool = True,
-        dry_run: bool = True, n_main: int = 0, n_check: int = 0,
+        dry_run: bool = True, paused: bool = False,
+        n_main: int = 0, n_check: int = 0,
         n_cross: int = 0, n_dups: int = 0, src_folder: str = "",
     ) -> None:
+        _set_sleep_prevention(False)
         self._custom_progress_bar.stop()
         self._custom_progress_bar["mode"]  = "determinate"
-        self._custom_progress_bar["value"] = 100 if success else self._custom_progress_bar["value"]
+        self._custom_progress_bar["value"] = 100 if (success and not paused) else self._custom_progress_bar["value"]
         self._scanning = False
-        self._unlock_settings()
 
-        # Restore idle frame
-        self._custom_active_frame.pack_forget()
-        self._custom_idle_frame.pack(fill=tk.X, padx=4)
+        if paused:
+            # Keep the active frame visible; flip Pause → Resume
+            self._custom_is_paused = True
+            self._custom_pause_btn.configure(
+                text="▶  Resume", command=self._resume_custom_in_place,
+            )
+            _mat_enable(self._custom_pause_btn)
+            _mat_enable(self._custom_stop_btn)   # Stop = Discard while paused
+        else:
+            self._unlock_settings()
+            # Restore idle frame
+            self._custom_active_frame.pack_forget()
+            self._custom_idle_frame.pack(fill=tk.X, padx=4)
+            # Reset pause button for next scan
+            self._custom_pause_btn.configure(
+                text="⏸  Pause", command=self._pause_custom_scan)
 
         self._custom_phase_label.set(msg)
         self._custom_eta_var.set("")
@@ -2202,11 +2381,15 @@ class App:
             self._nb.select(self._tab_custom)
 
     def _on_custom_error(self, msg: str, tb: str = "") -> None:
+        _set_sleep_prevention(False)
         self._custom_progress_bar.stop()
         self._custom_phase_label.set("Scan failed — see error message.")
         self._scanning = False
+        self._unlock_settings()
         self._custom_active_frame.pack_forget()
         self._custom_idle_frame.pack(fill=tk.X, padx=4)
+        self._custom_pause_btn.configure(
+            text="⏸  Pause", command=self._pause_custom_scan)
         user_msg, detail = error_handler.format_scan_error(Exception(msg), tb)
         error_handler.show_error(self.root, "Scan Failed", user_msg, detail=detail)
 
@@ -2992,6 +3175,54 @@ class App:
             if sp.exists():
                 sp.unlink()
 
+    # ── Compare Scan resume / discard ─────────────────────────────────────
+
+    def _check_custom_resume_state(self) -> None:
+        """Show resume notice on the Compare Scan tab if a paused state exists."""
+        out = self._custom_out_var.get().strip()
+        if not out:
+            return
+        from scan_state import custom_state_path, load_custom_state
+        sp = custom_state_path(Path(out))
+        st = load_custom_state(sp)
+        if st is None:
+            return
+        ts = ""
+        try:
+            ts = datetime.datetime.fromtimestamp(
+                sp.stat().st_mtime).strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            pass
+        self._custom_paused_state = st
+        phase_label = st.phase.replace("_", " ").title() if st.phase else "unknown"
+        self._custom_resume_var.set(
+            f"Paused compare scan found from {ts}  ·  Phase: {phase_label}")
+        self._custom_resume_lbl.pack(side=tk.LEFT)
+        self._custom_resume_btn.pack(side=tk.LEFT, padx=4)
+        self._custom_discard_btn.pack(side=tk.LEFT, padx=4)
+        # Pre-fill folder fields from the saved state
+        if st.main_folder:
+            self._custom_main_var.set(st.main_folder)
+        if st.check_folder:
+            self._custom_check_var.set(st.check_folder)
+
+    def _resume_custom_scan(self) -> None:
+        """Resume a saved Compare Scan from the resume notice."""
+        self._custom_resume_lbl.pack_forget()
+        self._custom_resume_btn.pack_forget()
+        self._custom_discard_btn.pack_forget()
+        self._start_custom_scan(resume_state=self._custom_paused_state)
+
+    def _discard_custom_resume(self) -> None:
+        self._custom_resume_lbl.pack_forget()
+        self._custom_resume_btn.pack_forget()
+        self._custom_discard_btn.pack_forget()
+        self._custom_paused_state = None
+        out = self._custom_out_var.get().strip()
+        if out:
+            from scan_state import delete_custom_state
+            delete_custom_state(Path(out))
+
     # ── last-results restore ──────────────────────────────────────────────
 
     def _check_last_results(self) -> None:
@@ -3160,6 +3391,21 @@ class App:
         if event.widget is self.root:
             self.root.after(150, self.root.update_idletasks)
 
+    def _heartbeat_tick(self) -> None:
+        """Periodic heartbeat (every 3 s) to detect sleep/hibernate gaps.
+
+        If a gap > 10 s is detected, all active trackers are notified so
+        ETA calculations exclude the sleep duration.
+        """
+        now = time.monotonic()
+        gap = now - self._last_heartbeat
+        if gap > 10.0:
+            for tracker in (self._tracker, getattr(self, '_custom_tracker', None)):
+                if tracker is not None:
+                    tracker.notify_gap(gap - 1.0)
+        self._last_heartbeat = now
+        self.root.after(3000, self._heartbeat_tick)
+
     def bring_to_front(self) -> None:
         """Raise this window to the front and give it focus.
 
@@ -3191,10 +3437,19 @@ class App:
 
     # ── progress callback ─────────────────────────────────────────────────
 
+    def _check_sleep_gap(self, tracker) -> None:
+        """Detect time gaps > 10 s (system sleep/hibernate) and compensate."""
+        now = time.monotonic()
+        gap = now - self._last_heartbeat
+        if gap > 10.0 and tracker is not None:
+            tracker.notify_gap(gap - 1.0)   # keep 1 s margin
+        self._last_heartbeat = now
+
     def _progress_cb(self, msg: str, done: int, total: int, phase_name: str) -> None:
         def _update() -> None:
             if self._tracker is None:
                 return
+            self._check_sleep_gap(self._tracker)
             if self._tracker.current_phase_name != phase_name:
                 self._tracker.finish_phase()
                 phase_num = PHASE_NAMES.index(phase_name) + 1 if phase_name in PHASE_NAMES else "?"
@@ -3264,6 +3519,44 @@ class App:
                 from scan_state import deserialize_record
                 records = [deserialize_record(r) for r in resume_state.records]
                 cb(f"Restored {len(records)} records from paused state.", 0, 0, "Hashing")
+            elif resume_state and resume_state.phase == "hashing" and resume_state.records:
+                # ── Resume hashing: inject saved records into cache ────────
+                from scan_state import deserialize_record
+                _already = [deserialize_record(r) for r in resume_state.records]
+                cb(f"Resuming — {len(_already)} files already hashed.", 0, 0, "Hashing")
+                failed: list = []
+
+                # Build a merged cache: library + already-hashed records
+                _lib_cache = None
+                try:
+                    from library import Library, get_library_dir
+                    _lib = Library.load(get_library_dir())
+                    _lib_cache = _lib.load_cache_merged(str(src.resolve()))
+                except Exception:
+                    _lib_cache = None
+                if _lib_cache is None:
+                    _lib_cache = {}
+                # Add saved records into the in-memory cache so they won't
+                # be re-hashed.  Trust them — they were just computed.
+                try:
+                    from library import FileRecord as _FR
+                    for _r in _already:
+                        try:
+                            _lib_cache[str(_r.path.resolve())] = _FR.from_image_record(_r)
+                        except Exception:
+                            pass
+                except ImportError:
+                    pass
+
+                records = collect_images(
+                    src, skip_paths, settings,
+                    progress_cb=cb,
+                    stop_flag=self._stop_flag,
+                    pause_flag=self._pause_flag,
+                    failed_paths=failed,
+                    library_cache=_lib_cache,
+                    trust_library=True,      # trust injected records
+                )
             else:
                 cb("Discovering images…", 0, 1, "Discovery")
                 failed: list = []
