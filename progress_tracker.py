@@ -1,5 +1,14 @@
 """
 progress_tracker.py — Multi-phase progress tracking with ETA calculation.
+
+ETA strategy:
+  - Primary estimate: elapsed-time extrapolation (stable across the whole phase)
+  - Secondary: sliding-window rate (reacts faster to speed changes mid-phase)
+  - Blend: 60% elapsed-based + 40% window-based once enough data exists
+  - Future phases: projected from current phase speed, with a floor to prevent
+    underestimates when cache hits make the current phase artificially fast.
+  - Guard: no ETA shown until ≥ 2 s elapsed AND ≥ 3% of phase completed,
+    preventing misleading flashes of "~3 s" at start of cached scans.
 """
 from __future__ import annotations
 
@@ -21,6 +30,22 @@ PHASE_WEIGHTS: dict[str, int] = {
 }
 _DEFAULT_WEIGHT = 10  # fallback for unknown phase names
 
+# Minimum elapsed seconds and fraction-done before trusting the rate enough
+# to display a numeric ETA.  Prevents wildly optimistic estimates when the
+# first N files are library-cache hits (instant hash lookups).
+_MIN_ELAPSED_FOR_ETA = 2.0   # seconds
+_MIN_FRACTION_FOR_ETA = 0.03  # 3%
+
+# When projecting time for future phases, enforce at least this many seconds
+# per weight unit.  Prevents an instant-cache Hashing phase (weight 50, 2 s)
+# from estimating the O(n²) Comparing phase (weight 30) at 1.2 s.
+_MIN_SECS_PER_WEIGHT = 0.5
+
+# Minimum sliding-window samples required for the blended estimate.
+# Fewer samples fall back to pure elapsed-time extrapolation.
+_MIN_WINDOW_SAMPLES = 5
+_MIN_WINDOW_ELAPSED = 1.0  # seconds — window span must be ≥ this
+
 
 @dataclass
 class _PhaseInfo:
@@ -41,6 +66,8 @@ class PhaseTracker:
         self._current_idx: int = -1
         self._total_weight: int = 0
         self._speed_samples: list[tuple[float, int]] = []  # (timestamp, cumulative_done)
+        # Track completed phase durations for better cross-phase projection
+        self._completed_time_per_weight: list[float] = []
 
         for name in phases:
             w = PHASE_WEIGHTS.get(name, _DEFAULT_WEIGHT)
@@ -75,8 +102,8 @@ class PhaseTracker:
         phase.done_units = min(done_units, phase.total_units)
         now = time.monotonic()
         self._speed_samples.append((now, done_units))
-        # Keep only the last 20 samples for speed estimation
-        if len(self._speed_samples) > 20:
+        # Keep only the last 30 samples for speed estimation
+        if len(self._speed_samples) > 30:
             self._speed_samples.pop(0)
 
     def finish_phase(self) -> None:
@@ -87,6 +114,10 @@ class PhaseTracker:
         phase.done_units = phase.total_units
         phase.end_time = time.monotonic()
         phase.status = "done"
+        # Record actual time-per-weight for this completed phase
+        duration = phase.end_time - phase.start_time
+        if phase.weight > 0 and duration > 0:
+            self._completed_time_per_weight.append(duration / phase.weight)
 
     # ── properties ───────────────────────────────────────────────────────────
 
@@ -116,48 +147,67 @@ class PhaseTracker:
 
     @property
     def eta_seconds(self) -> Optional[float]:
-        """Estimated seconds remaining. None if not enough data."""
+        """Estimated seconds remaining. None if not enough data.
+
+        Two guards prevent misleading early estimates:
+          1. Must have ≥ _MIN_ELAPSED_FOR_ETA seconds of data.
+          2. Must have completed ≥ _MIN_FRACTION_FOR_ETA of the phase.
+        This prevents showing "~3 s" when 860 cached files flash through
+        the Hashing phase in 2 seconds but Comparing is yet to start.
+        """
         if self._current_idx < 0:
             return None
         phase = self._phases[self._current_idx]
         if phase.done_units == 0 or phase.total_units == 0:
             return None
 
-        # Use speed from recent samples
-        if len(self._speed_samples) >= 2:
+        now = time.monotonic()
+        phase_elapsed = now - phase.start_time if phase.start_time > 0 else 0.0
+        fraction_done = phase.done_units / phase.total_units
+
+        # Guard: don't show a numeric ETA until we have meaningful data
+        if phase_elapsed < _MIN_ELAPSED_FOR_ETA or fraction_done < _MIN_FRACTION_FOR_ETA:
+            return None
+
+        # ── Current phase ETA ────────────────────────────────────────────
+        # Primary: elapsed-time extrapolation (most stable over the whole phase)
+        projected_total = phase_elapsed / fraction_done
+        eta_current = max(0.0, projected_total - phase_elapsed)
+
+        # Secondary: sliding-window rate (reacts faster to mid-phase speed changes)
+        if len(self._speed_samples) >= _MIN_WINDOW_SAMPLES:
             t0, u0 = self._speed_samples[0]
             t1, u1 = self._speed_samples[-1]
-            elapsed = t1 - t0
-            units_done = u1 - u0
-            if elapsed > 0 and units_done > 0:
-                rate = units_done / elapsed  # units per second
-                remaining_in_phase = phase.total_units - phase.done_units
-                # Also add estimates for subsequent phases
-                eta = remaining_in_phase / rate
-                # Estimate remaining phases based on current phase speed
-                current_phase_weight = phase.weight
-                remaining_weight = sum(
-                    p.weight for p in self._phases[self._current_idx + 1:]
-                    if p.status == "waiting"
-                )
-                if current_phase_weight > 0 and phase.done_units > 0:
-                    current_phase_elapsed = time.monotonic() - phase.start_time
-                    phase_fraction_done = phase.done_units / phase.total_units
-                    if phase_fraction_done > 0:
-                        projected_phase_total_time = current_phase_elapsed / phase_fraction_done
-                        time_per_weight_unit = projected_phase_total_time / current_phase_weight
-                        eta += remaining_weight * time_per_weight_unit
-                return max(0.0, eta)
+            window_elapsed = t1 - t0
+            window_units = u1 - u0
+            if window_elapsed >= _MIN_WINDOW_ELAPSED and window_units > 0:
+                rate = window_units / window_elapsed
+                eta_window = (phase.total_units - phase.done_units) / rate
+                # Blend: 60% elapsed-based (stable) + 40% window (responsive)
+                eta_current = 0.6 * eta_current + 0.4 * eta_window
 
-        # Fall back to elapsed-time extrapolation
-        if phase.start_time > 0 and phase.done_units > 0:
-            elapsed = time.monotonic() - phase.start_time
-            fraction_done = phase.done_units / phase.total_units
-            if fraction_done > 0:
-                total_estimated = elapsed / fraction_done
-                return max(0.0, total_estimated - elapsed)
+        # ── Future phases ETA ────────────────────────────────────────────
+        eta_future = 0.0
+        remaining_weight = sum(
+            p.weight for p in self._phases[self._current_idx + 1:]
+            if p.status == "waiting"
+        )
+        if remaining_weight > 0:
+            # Best estimate: use actual completed-phase data if available
+            if self._completed_time_per_weight:
+                # Average across all completed phases for a realistic baseline
+                avg_tpw = sum(self._completed_time_per_weight) / len(self._completed_time_per_weight)
+            else:
+                # Only the current phase is available — project from it
+                current_weight = phase.weight
+                avg_tpw = projected_total / current_weight if current_weight > 0 else 1.0
 
-        return None
+            # Floor: prevent instant-cache phases from producing tiny projections.
+            # O(n²) Comparing after cached Hashing would otherwise estimate ~1 s.
+            avg_tpw = max(avg_tpw, _MIN_SECS_PER_WEIGHT)
+            eta_future = remaining_weight * avg_tpw
+
+        return max(0.0, eta_current + eta_future)
 
     @property
     def phase_summaries(self) -> list[dict]:
@@ -190,7 +240,7 @@ class PhaseTracker:
         """Return human-readable ETA string like '~2m 30s' or 'calculating...'"""
         eta = self.eta_seconds
         if eta is None:
-            return "calculating..."
+            return "calculating\u2026"
         total_s = int(eta)
         if total_s < 5:
             return "almost done"
