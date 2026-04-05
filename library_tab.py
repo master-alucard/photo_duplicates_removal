@@ -28,7 +28,7 @@ from library import (
     update_folder,
 )
 
-# ── Material Design 3 colour palette (matches main.py) ──────────────────────
+# ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
 _BG          = "#F2F4F7"
 _SURFACE     = "#FFFFFF"
@@ -46,6 +46,31 @@ _TEXT1       = "#1B1B1F"
 _TEXT2       = "#49454F"
 _TEXT3       = "#79747E"
 _DISABLED    = "#C4C7C5"
+
+
+def _apply_theme(dark: bool = False) -> None:
+    """Overwrite module colours from the theme palette."""
+    global _BG, _SURFACE, _ACCENT, _ACCENT_DARK, _ACCENT_TINT
+    global _SUCCESS, _SUCCESS_BG, _ERROR, _ERROR_BG, _WARNING, _WARNING_BG
+    global _DIVIDER, _TEXT1, _TEXT2, _TEXT3, _DISABLED
+    import theme as _t
+    p = _t.get_palette(dark)
+    _BG          = p["BG"]
+    _SURFACE     = p["CARD_BG"]
+    _ACCENT      = p["ACCENT"]
+    _ACCENT_DARK = p["ACCENT_DARK"]
+    _ACCENT_TINT = p["ACCENT_TINT"]
+    _SUCCESS     = p["SUCCESS"]
+    _SUCCESS_BG  = p["SUCCESS_TINT"]
+    _ERROR       = p["ERROR"]
+    _ERROR_BG    = p["ERROR_TINT"]
+    _WARNING     = p["WARNING"]
+    _WARNING_BG  = p["WARNING_TINT"]
+    _DIVIDER     = p["DIVIDER"]
+    _TEXT1       = p["TEXT1"]
+    _TEXT2       = p["TEXT2"]
+    _TEXT3       = p["TEXT3"]
+    _DISABLED    = p["DISABLED"]
 
 _DUMMY_PREFIX = "DUMMY:"   # prefix for placeholder treeview items used in LibFolderPickerDialog
 
@@ -94,6 +119,7 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
     btn._mat_bg = bg
+    btn._mat_fg = fg
 
     def _enter(_):
         if str(btn["state"]) != "disabled":
@@ -109,11 +135,14 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
 
 
 def _mat_enable(btn: tk.Button) -> None:
-    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, cursor="hand2")
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, fg=btn._mat_fg,
+                  activebackground=_darken(btn._mat_bg),
+                  activeforeground=btn._mat_fg, cursor="hand2")
 
 
 def _mat_disable(btn: tk.Button) -> None:
-    btn.configure(state=tk.DISABLED, bg=_DISABLED, cursor="")
+    _dfg = "#605C66" if _BG.startswith("#1") else "#838387"
+    btn.configure(state=tk.DISABLED, bg=_DISABLED, fg=_dfg, cursor="")
 
 
 class LibFolderPickerDialog:

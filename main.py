@@ -54,6 +54,7 @@ except ImportError:
 
 from config import Settings, DEFAULTS, load_settings, save_settings
 from info_texts import INFO_TEXTS
+import theme as _theme_mod
 from progress_tracker import PhaseTracker
 from scanner import collect_images, find_groups, IMAGE_EXTENSIONS
 from mover import move_groups, ops_log_path
@@ -71,24 +72,104 @@ HISTORY_PATH  = Path(__file__).parent / "scan_history.json"
 PHASE_NAMES   = ["Discovery", "Hashing", "Comparing", "Metadata", "Moving", "Report"]
 _CUSTOM_PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
-# ── Material Design 3 colour tokens ──────────────────────────────────────────
-_ACCENT         = "#1565C0"   # Primary – Blue 800
-_ACCENT_DARK    = "#0D47A1"   # Primary container variant
-_ACCENT_TINT    = "#E8EFF9"   # Surface tint (blueish grey, less saturated)
-_BG             = "#F2F4F7"   # Surface dim – cool grey
-_CARD_BG        = "#FFFFFF"   # Surface – cards, sheets
-_M_SUCCESS      = "#2E7D32"   # Green 800
-_M_ERROR        = "#C62828"   # Red 800
-_M_WARNING      = "#E65100"   # Deep Orange 900
-_M_AMBER        = "#F57F17"   # Amber 900
-_M_DIVIDER      = "#DDE1E6"   # Outline variant – softer dividers
-_M_TEXT1        = "#1B1B1F"   # On-surface (M3 near-black)
-_M_TEXT2        = "#49454F"   # On-surface-variant
-_MAT_DISABLED   = "#C4C7C5"   # Disabled state
-_M3_SURFACE1    = "#F7F8FA"   # Surface container lowest
-_M3_SURFACE2    = "#ECEEF2"   # Surface container low
-_M3_SURFACE3    = "#E2E5EA"   # Surface container
-_M3_ON_PRIMARY  = "#FFFFFF"   # On primary
+# ── Material Design 3 colour tokens (light defaults, overwritten by _apply_theme) ──
+_ACCENT         = "#1565C0"
+_ACCENT_DARK    = "#0D47A1"
+_ACCENT_TINT    = "#E8EFF9"
+_BG             = "#F2F4F7"
+_CARD_BG        = "#FFFFFF"
+_M_SUCCESS      = "#2E7D32"
+_M_ERROR        = "#C62828"
+_M_WARNING      = "#E65100"
+_M_AMBER        = "#F57F17"
+_M_DIVIDER      = "#DDE1E6"
+_M_TEXT1        = "#1B1B1F"
+_M_TEXT2        = "#49454F"
+_MAT_DISABLED   = "#C4C7C5"
+_M3_SURFACE1    = "#F7F8FA"
+_M3_SURFACE2    = "#ECEEF2"
+_M3_SURFACE3    = "#E2E5EA"
+_M3_ON_PRIMARY  = "#FFFFFF"
+# Extended tokens resolved from theme palette
+_M_HINT         = "#666666"
+_M_HINT2        = "#555555"
+_M_HINT3        = "#888888"
+_M_HINT4        = "#999999"
+_M_HINT5        = "#9E9E9E"
+_M_HEADER_BG    = "#1565C0"
+_M_HEADER_SUB   = "#B3D4F0"
+_M_INFO_BG      = "#E8F5E9"
+_M_INFO_FG      = "#1B5E20"
+_M_INFO_BORDER  = "#2E7D32"
+_M_DEV_BG       = "#FFF8E1"
+_M_DEV_BORDER   = "#FFD54F"
+_M_DEV_TITLE_FG = "#E65100"
+_M_DEV_BODY_FG  = "#795548"
+_M_DETAIL_BG    = "#f4f4f4"
+_M_PURPLE       = "#7c3aed"
+_M_NOT_INST     = "#e03030"
+_M_DISABLED_FG  = "#838387"
+# Button backgrounds — always saturated for white text
+_BTN_PRIMARY    = "#1565C0"
+_BTN_SUCCESS    = "#2E7D32"
+_BTN_ERROR      = "#C62828"
+_BTN_WARNING    = "#E65100"
+_BTN_SECONDARY  = "#546E7A"
+
+
+def _apply_theme(dark: bool = False) -> None:
+    """Overwrite module-level colour constants from the theme palette."""
+    global _ACCENT, _ACCENT_DARK, _ACCENT_TINT, _BG, _CARD_BG
+    global _M_SUCCESS, _M_ERROR, _M_WARNING, _M_AMBER
+    global _M_DIVIDER, _M_TEXT1, _M_TEXT2, _MAT_DISABLED
+    global _M3_SURFACE1, _M3_SURFACE2, _M3_SURFACE3, _M3_ON_PRIMARY
+    global _M_HINT, _M_HINT2, _M_HINT3, _M_HINT4, _M_HINT5
+    global _M_HEADER_BG, _M_HEADER_SUB, _M_INFO_BG, _M_INFO_FG, _M_INFO_BORDER
+    global _M_DEV_BG, _M_DEV_BORDER, _M_DEV_TITLE_FG, _M_DEV_BODY_FG
+    global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
+    global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
+
+    p = _theme_mod.get_palette(dark)
+    _ACCENT        = p["ACCENT"]
+    _ACCENT_DARK   = p["ACCENT_DARK"]
+    _ACCENT_TINT   = p["ACCENT_TINT"]
+    _BG            = p["BG"]
+    _CARD_BG       = p["CARD_BG"]
+    _M_SUCCESS     = p["SUCCESS"]
+    _M_ERROR       = p["ERROR"]
+    _M_WARNING     = p["WARNING"]
+    _M_AMBER       = p["AMBER"]
+    _M_DIVIDER     = p["DIVIDER"]
+    _M_TEXT1       = p["TEXT1"]
+    _M_TEXT2       = p["TEXT2"]
+    _MAT_DISABLED  = p["DISABLED"]
+    _M3_SURFACE1   = p["SURFACE1"]
+    _M3_SURFACE2   = p["SURFACE2"]
+    _M3_SURFACE3   = p["SURFACE3"]
+    _M3_ON_PRIMARY = p["ON_PRIMARY"]
+    _M_HINT        = p["HINT"]
+    _M_HINT2       = p["HINT2"]
+    _M_HINT3       = p["HINT3"]
+    _M_HINT4       = p["HINT4"]
+    _M_HINT5       = p["HINT5"]
+    _M_HEADER_BG   = p["HEADER_BG"]
+    _M_HEADER_SUB  = p["HEADER_SUBTITLE"]
+    _M_INFO_BG     = p["INFO_BG"]
+    _M_INFO_FG     = p["INFO_FG"]
+    _M_INFO_BORDER = p["INFO_BORDER"]
+    _M_DEV_BG      = p["DEV_BG"]
+    _M_DEV_BORDER  = p["DEV_BORDER"]
+    _M_DEV_TITLE_FG = p["DEV_TITLE_FG"]
+    _M_DEV_BODY_FG = p["DEV_BODY_FG"]
+    _M_DETAIL_BG   = p["DETAIL_BG"]
+    _M_PURPLE      = p["PURPLE"]
+    _M_NOT_INST    = p["NOT_INSTALLED"]
+    _M_DISABLED_FG = p["DISABLED_FG"]
+    _BTN_PRIMARY   = p["BTN_PRIMARY"]
+    _BTN_SUCCESS   = p["BTN_SUCCESS"]
+    _BTN_ERROR     = p["BTN_ERROR"]
+    _BTN_WARNING   = p["BTN_WARNING"]
+    _BTN_SECONDARY = p["BTN_SECONDARY"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -227,6 +308,7 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
     btn._mat_bg = bg
+    btn._mat_fg = fg
 
     def _enter(_):
         if str(btn["state"]) != "disabled":
@@ -242,11 +324,13 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
 
 
 def _mat_enable(btn: tk.Button) -> None:
-    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, cursor="hand2")
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, fg=btn._mat_fg,
+                  activebackground=_darken_color(btn._mat_bg),
+                  activeforeground=btn._mat_fg, cursor="hand2")
 
 
 def _mat_disable(btn: tk.Button) -> None:
-    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, fg="#838387", cursor="")
+    btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, fg=_M_DISABLED_FG, cursor="")
 
 
 # ── Material Design 3 ttk style configuration ─────────────────────────────────
@@ -446,7 +530,7 @@ def show_info(parent: tk.Widget, key: str) -> None:
     txt.insert("1.0", text)
     txt.config(state=tk.DISABLED)
     txt.pack(fill=tk.BOTH, expand=True, padx=4)
-    _mat_btn(win, "Close", win.destroy, _ACCENT).pack(pady=12)
+    _mat_btn(win, "Close", win.destroy, _BTN_PRIMARY).pack(pady=12)
 
 
 # ── UI helpers ────────────────────────────────────────────────────────────────
@@ -543,6 +627,19 @@ class App:
 
         self.settings = load_settings(SETTINGS_PATH)
         error_handler.set_settings(self.settings)
+
+        # Apply colour theme before any widget is created
+        _apply_theme(self.settings.dark_mode)
+        import about_tab as _about_mod, library_tab as _lib_mod, report_viewer as _rv_mod
+        _about_mod._apply_theme(self.settings.dark_mode)
+        _lib_mod._apply_theme(self.settings.dark_mode)
+        _rv_mod._apply_theme(self.settings.dark_mode)
+        try:
+            import calibration_window as _cal_mod
+            _cal_mod._apply_theme(self.settings.dark_mode)
+        except Exception:
+            pass
+
         self._scan_history: list[dict] = self._load_scan_history()
 
         # Scan state
@@ -589,13 +686,13 @@ class App:
         _configure_material_style(style)
 
         # Header — M3 top app bar
-        hdr = tk.Frame(self.root, bg=_ACCENT)
+        hdr = tk.Frame(self.root, bg=_M_HEADER_BG)
         hdr.pack(fill=tk.X)
         tk.Label(hdr, text="Image Deduper",
-                 font=("Segoe UI", 14, "bold"), bg=_ACCENT, fg="white").pack(
+                 font=("Segoe UI", 14, "bold"), bg=_M_HEADER_BG, fg="white").pack(
             side=tk.LEFT, padx=20, pady=10)
         tk.Label(hdr, text="Find & remove duplicate images",
-                 font=("Segoe UI", 9), bg=_ACCENT, fg="#B3D4F0").pack(
+                 font=("Segoe UI", 9), bg=_M_HEADER_BG, fg=_M_HEADER_SUB).pack(
             side=tk.LEFT, padx=(0, 8))
 
         self._nb = ttk.Notebook(self.root, style="App.TNotebook")
@@ -685,6 +782,8 @@ class App:
         self._calib_info_var = tk.StringVar(value=self._calib_info_text())
         self.developer_mode_var = tk.BooleanVar(value=s.developer_mode)
         self.developer_mode_var.trace_add("write", self._on_setting_change)
+        self.dark_mode_var = tk.BooleanVar(value=s.dark_mode)
+        self.dark_mode_var.trace_add("write", self._on_dark_mode_toggle)
 
         # Library source mode — "browse" or "library" per folder picker
         self.src_mode_var        = tk.StringVar(value="browse")
@@ -768,14 +867,14 @@ class App:
         self._quick_speed_frame = ttk.LabelFrame(body, text="Scan Speed", padding=(12, 8, 12, 10))
         _qs_row = ttk.Frame(self._quick_speed_frame)
         _qs_row.pack(fill=tk.X)
-        ttk.Label(_qs_row, text="Quality", foreground="#666",
+        ttk.Label(_qs_row, text="Quality", foreground=_M_HINT,
                   font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(0, 6))
         self._quick_spd_slider = ttk.Scale(
             _qs_row, from_=1, to=10, orient=tk.HORIZONTAL, length=220,
             variable=self.quick_scan_speed_var,
         )
         self._quick_spd_slider.pack(side=tk.LEFT)
-        ttk.Label(_qs_row, text="Speed", foreground="#666",
+        ttk.Label(_qs_row, text="Speed", foreground=_M_HINT,
                   font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=(6, 16))
         self._quick_spd_info = ttk.Label(_qs_row, text="", foreground=_ACCENT,
                                          font=("Segoe UI", 9, "bold"))
@@ -783,7 +882,7 @@ class App:
 
         # Dev-mode parameter detail row (shown below slider)
         self._quick_spd_dev_lbl = ttk.Label(
-            self._quick_speed_frame, text="", foreground="#888",
+            self._quick_speed_frame, text="", foreground=_M_HINT3,
             font=("Segoe UI", 7), justify=tk.LEFT,
         )
 
@@ -861,7 +960,7 @@ class App:
         )
         self._compact_rawpy_cb.pack(side=tk.LEFT)
         if not _RAWPY_AVAILABLE:
-            ttk.Label(_crows[1], text="(not installed)", foreground="#e03",
+            ttk.Label(_crows[1], text="(not installed)", foreground=_M_NOT_INST,
                       font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=2)
 
         ttk.Label(_crows[2], text="Prefer to keep:", width=14, anchor=tk.W).pack(side=tk.LEFT)
@@ -882,7 +981,7 @@ class App:
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
         _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
         ttk.Label(r, text="Create date subfolders in results/ and trash/",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         # Date format
         r = _row(act)
@@ -897,21 +996,21 @@ class App:
         self._date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
         _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
         ttk.Label(r, textvariable=self._date_fmt_example,
-                  foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
+                  foreground=_M_HINT2, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
         self._refresh_date_order_choices(init_sep, init_order_idx)
 
         # Estimate
         self._estimate_frame = ttk.Frame(body)
         self._estimate_frame.pack(fill=tk.X, pady=(2, 4))
         ttk.Label(self._estimate_frame, textvariable=self._estimate_var,
-                  foreground="#555", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
 
         # Resume notice
         self._resume_frame = ttk.Frame(body)
         self._resume_frame.pack(fill=tk.X, pady=(2, 2))
         self._resume_lbl = ttk.Label(
             self._resume_frame, textvariable=self._resume_var,
-            foreground="#7c3aed", font=("Segoe UI", 8, "bold"))
+            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"))
         self._resume_lbl.pack(side=tk.LEFT)
         self._resume_btn  = ttk.Button(self._resume_frame, text="Resume",  command=self._resume_scan)
         self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
@@ -953,13 +1052,13 @@ class App:
 
         self._scan_last_calib_btn = _mat_btn(
             self._scan_idle_frame, "↩ Last Calibration",
-            self._apply_last_calibration, _ACCENT)
+            self._apply_last_calibration, _BTN_PRIMARY)
         self._scan_last_calib_btn.pack(side=tk.LEFT, padx=4)
         if self.settings.calibrated_threshold == 0:
             _mat_disable(self._scan_last_calib_btn)
 
         self.scan_btn = _mat_btn(self._scan_idle_frame, "▶  Start Scan",
-                                 self._start_scan, _M_SUCCESS)
+                                 self._start_scan, _BTN_SUCCESS)
         self.scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
 
         # Active frame: shown while scanning
@@ -967,7 +1066,7 @@ class App:
         # Not packed initially
 
         self.stop_btn = _mat_btn(self._scan_active_frame, "■  Stop",
-                                 self._stop_scan, _M_ERROR)
+                                 self._stop_scan, _BTN_ERROR)
         self.stop_btn.pack(side=tk.LEFT, padx=(8, 4))
 
         self.pause_btn = _mat_btn(self._scan_active_frame, "⏸  Pause",
@@ -993,7 +1092,7 @@ class App:
         # Placeholder shown before first scan
         self._results_placeholder = tk.Label(
             sf, text="Run a scan to review results here.",
-            font=("Segoe UI", 11), bg=_BG, fg="#9E9E9E",
+            font=("Segoe UI", 11), bg=_BG, fg=_M_HINT5,
         )
         self._results_placeholder.pack(expand=True)
 
@@ -1007,21 +1106,21 @@ class App:
         btn_row = self._results_btn_row
 
         self.inapp_report_btn = _mat_btn(btn_row, "📋  View Report",
-                                         self._open_inapp_report, _ACCENT, font_size=10)
+                                         self._open_inapp_report, _BTN_PRIMARY, font_size=10)
         self.inapp_report_btn.pack(side=tk.LEFT, padx=(0, 6))
         _mat_disable(self.inapp_report_btn)
 
         self.browser_report_btn = _mat_btn(btn_row, "🌐  HTML Report",
-                                           self._open_browser_report, "#546E7A")
+                                           self._open_browser_report, _BTN_SECONDARY)
         self.browser_report_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.browser_report_btn)
 
         self.accept_btn = _mat_btn(btn_row, "✓  Accept & Move",
-                                   self._accept_and_move, _M_SUCCESS)
+                                   self._accept_and_move, _BTN_SUCCESS)
         self.accept_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.accept_btn)
 
-        self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _M_WARNING)
+        self.revert_all_btn = _mat_btn(btn_row, "⟲  Revert All", self._revert_all, _BTN_WARNING)
         self.revert_all_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self.revert_all_btn)
 
@@ -1031,10 +1130,10 @@ class App:
         # Start New Scan
         self._results_new_frame = tk.Frame(sf, bg=_BG)
         _mat_btn(self._results_new_frame, "   +  Start New Scan   ",
-                 self._new_scan_prompt, _ACCENT, font_size=11).pack()
+                 self._new_scan_prompt, _BTN_PRIMARY, font_size=11).pack()
         ttk.Label(self._results_new_frame,
                   text="Clears current results and starts a new scan.",
-                  foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
+                  foreground=_M_HINT3, font=("Segoe UI", 8)).pack(pady=(6, 0))
 
         # Container for the embedded ReportViewer (packed on demand)
         self._results_viewer_host = tk.Frame(tab, bg=_BG)
@@ -1142,7 +1241,7 @@ class App:
                  font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
         if ts:
             tk.Label(hdr, text=ts, font=("Segoe UI", 8),
-                     bg=_CARD_BG, fg="#9E9E9E").pack(side=tk.RIGHT, pady=(2, 0))
+                     bg=_CARD_BG, fg=_M_HINT5).pack(side=tk.RIGHT, pady=(2, 0))
 
         # Source path
         tk.Label(self._results_info_card,
@@ -1164,7 +1263,7 @@ class App:
             tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
                      bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
             tk.Label(cell, text=label, font=("Segoe UI", 8),
-                     bg=_CARD_BG, fg="#9E9E9E").pack(anchor=tk.W)
+                     bg=_CARD_BG, fg=_M_HINT5).pack(anchor=tk.W)
 
         _stat_cell(stats_row, files,   "files scanned")
         _stat_cell(stats_row, n_groups, "dup groups",
@@ -1187,7 +1286,7 @@ class App:
             tk.Label(self._results_info_card,
                      text="   ·   ".join(parts),
                      font=("Segoe UI", 9), bg=_CARD_BG,
-                     fg="#9E9E9E", anchor=tk.W).pack(
+                     fg=_M_HINT5, anchor=tk.W).pack(
                          fill=tk.X, padx=16, pady=(0, 14))
 
         # Show card and buttons (hide placeholder)
@@ -1233,7 +1332,7 @@ class App:
 
         btn_bar = tk.Frame(tab, bg=_BG)
         btn_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
-        _mat_btn(btn_bar, "Clear History", self._clear_history, "#757575").pack(side=tk.LEFT)
+        _mat_btn(btn_bar, "Clear History", self._clear_history, _BTN_SECONDARY).pack(side=tk.LEFT)
 
         self._refresh_history_view()
 
@@ -1333,7 +1432,7 @@ class App:
             r, text="Disable Series Detection", variable=self.disable_series_var)
         self.disable_series_cb.pack(side=tk.LEFT)
         ttk.Label(r, text="Treat all same-size duplicates normally instead of keeping burst shots",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         # ── Parallel threads ──────────────────────────────────────────────
         import os as _os
@@ -1353,7 +1452,7 @@ class App:
         )
         self._threads_combo.pack(side=tk.LEFT)
         ttk.Label(thr_r, text=f"(max: {_max_thr} on this machine)",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         # Calibration
         calib_sec = _section(body, "Calibration")
@@ -1361,11 +1460,11 @@ class App:
         calib_btn_row.pack(fill=tk.X, pady=(2, 4))
 
         _mat_btn(calib_btn_row, "⚙  Calibrate Detection Settings…",
-                 self._open_calibration, _ACCENT, font_size=10).pack(side=tk.LEFT)
+                 self._open_calibration, _BTN_PRIMARY, font_size=10).pack(side=tk.LEFT)
 
         self._calib_apply_btn = _mat_btn(
             calib_btn_row, "↩  Apply Last Calibration",
-            self._apply_last_calibration, _ACCENT)
+            self._apply_last_calibration, _BTN_PRIMARY)
         self._calib_apply_btn.pack(side=tk.LEFT, padx=10)
         if self.settings.calibrated_threshold == 0:
             _mat_disable(self._calib_apply_btn)
@@ -1377,7 +1476,7 @@ class App:
 
         ttk.Label(calib_sec,
                   text="Calibration finds the best threshold and ratio for your specific photo library.",
-                  foreground="#666", font=("Segoe UI", 8)).pack(anchor=tk.W, pady=(0, 2))
+                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(anchor=tk.W, pady=(0, 2))
 
         # ── Keep Strategy ────────────────────────────────────────────────
         keep = _section(body, "Keep Strategy")
@@ -1507,25 +1606,35 @@ class App:
         rawpy_cb.pack(side=tk.LEFT)
         _info_btn(r, "use_rawpy").pack(side=tk.LEFT, padx=2)
         if not _RAWPY_AVAILABLE:
-            ttk.Label(r, text="not installed", foreground="#e03").pack(side=tk.LEFT, padx=4)
+            ttk.Label(r, text="not installed", foreground=_M_NOT_INST).pack(side=tk.LEFT, padx=4)
             ttk.Button(r, text="Install rawpy",
                        command=self._install_rawpy).pack(side=tk.LEFT, padx=2)
 
+        # ── Appearance ────────────────────────────────────────────────────
+        appear_sec = _section(body, "Appearance")
+        r = _row(appear_sec)
+        ttk.Checkbutton(r, text="Night Mode  (dark background)",
+                        variable=self.dark_mode_var).pack(side=tk.LEFT)
+        self._dark_restart_lbl = ttk.Label(
+            r, text="", foreground=_M_WARNING,
+            font=("Segoe UI", 8, "italic"))
+        self._dark_restart_lbl.pack(side=tk.LEFT, padx=10)
+
         # ── Developer ─────────────────────────────────────────────────────
         dev_sec = _section(body, "Developer")
-        dev_card = tk.Frame(dev_sec, bg="#FFF8E1", padx=12, pady=10,
-                            highlightbackground="#FFD54F", highlightthickness=1)
+        dev_card = tk.Frame(dev_sec, bg=_M_DEV_BG, padx=12, pady=10,
+                            highlightbackground=_M_DEV_BORDER, highlightthickness=1)
         dev_card.pack(fill=tk.X)
         tk.Label(dev_card, text="🛠  Developer Mode",
                  font=("Segoe UI", 9, "bold"),
-                 bg="#FFF8E1", fg="#E65100").pack(anchor=tk.W)
+                 bg=_M_DEV_BG, fg=_M_DEV_TITLE_FG).pack(anchor=tk.W)
         tk.Label(
             dev_card,
             text=(
                 "When ON — all errors show the full technical details and traceback.\n"
                 "When OFF (default) — errors show a simple, plain-language message."
             ),
-            font=("Segoe UI", 8), bg="#FFF8E1", fg="#795548",
+            font=("Segoe UI", 8), bg=_M_DEV_BG, fg=_M_DEV_BODY_FG,
             justify=tk.LEFT,
         ).pack(anchor=tk.W, pady=(2, 8))
         ttk.Checkbutton(
@@ -1542,7 +1651,7 @@ class App:
         self._custom_form_outer, body = _scrollable_frame(tab)
 
         # ── Info banner ───────────────────────────────────────────────────
-        banner = tk.Frame(body, bg="#E8F5E9", bd=0)
+        banner = tk.Frame(body, bg=_M_INFO_BG, bd=0)
         banner.pack(fill=tk.X, pady=(0, 8))
         tk.Frame(banner, height=3, bg=_M_SUCCESS).pack(fill=tk.X)
         tk.Label(
@@ -1552,7 +1661,7 @@ class App:
                 "Files in the Main folder are never moved or deleted.\n"
                 "Only duplicates found in the Check folder are moved to trash."
             ),
-            bg="#E8F5E9", fg="#1B5E20",
+            bg=_M_INFO_BG, fg=_M_INFO_FG,
             font=("Segoe UI", 8), justify=tk.LEFT, padx=12, pady=8,
         ).pack(anchor=tk.W)
 
@@ -1611,7 +1720,7 @@ class App:
         )
         self._compact_rawpy_cb2.pack(side=tk.LEFT)
         if not _RAWPY_AVAILABLE:
-            ttk.Label(_ksrows[1], text="(not installed)", foreground="#e03",
+            ttk.Label(_ksrows[1], text="(not installed)", foreground=_M_NOT_INST,
                       font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=2)
 
         # Row 2: Keep strategy
@@ -1636,7 +1745,7 @@ class App:
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
         _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
         ttk.Label(r, text="Create date subfolders in results/ and trash/",
-                  foreground="#666", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
         # Date format
         r = _row(act)
@@ -1651,14 +1760,14 @@ class App:
         self._custom_date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
         _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
         ttk.Label(r, textvariable=self._date_fmt_example,
-                  foreground="#555", font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
+                  foreground=_M_HINT2, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
         self._refresh_date_order_choices(init_sep2, init_order_idx2)
 
         # Estimate
         self._custom_estimate_frame = ttk.Frame(body)
         self._custom_estimate_frame.pack(fill=tk.X, pady=(2, 4))
         ttk.Label(self._custom_estimate_frame, textvariable=self._custom_estimate_var,
-                  foreground="#555", font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
 
         # Resume notice (Compare Scan)
         self._custom_resume_frame = ttk.Frame(body)
@@ -1666,7 +1775,7 @@ class App:
         self._custom_resume_var = tk.StringVar()
         self._custom_resume_lbl = ttk.Label(
             self._custom_resume_frame, textvariable=self._custom_resume_var,
-            foreground="#7c3aed", font=("Segoe UI", 8, "bold"))
+            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"))
         self._custom_resume_btn = ttk.Button(
             self._custom_resume_frame, text="Resume",
             command=self._resume_custom_scan)
@@ -1712,7 +1821,7 @@ class App:
 
         self._custom_last_calib_btn = _mat_btn(
             self._custom_idle_frame, "↩ Last Calibration",
-            self._apply_last_calibration, _ACCENT)
+            self._apply_last_calibration, _BTN_PRIMARY)
         self._custom_last_calib_btn.pack(side=tk.LEFT, padx=4)
         if self.settings.calibrated_threshold == 0:
             _mat_disable(self._custom_last_calib_btn)
@@ -1720,24 +1829,24 @@ class App:
         # Right side: Start + Accept + Review + Browser
         self._custom_scan_btn = _mat_btn(
             self._custom_idle_frame, "▶  Start Compare Scan",
-            self._start_custom_scan, _M_SUCCESS)
+            self._start_custom_scan, _BTN_SUCCESS)
         self._custom_scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
 
         self._custom_accept_btn = _mat_btn(
             self._custom_idle_frame, "✓  Accept & Move",
-            self._custom_accept_and_move, _M_SUCCESS)
+            self._custom_accept_and_move, _BTN_SUCCESS)
         self._custom_accept_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_accept_btn)
 
         self._custom_inapp_btn = _mat_btn(
             self._custom_idle_frame, "Review In-App",
-            self._custom_open_inapp_report, _ACCENT)
+            self._custom_open_inapp_report, _BTN_PRIMARY)
         self._custom_inapp_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_inapp_btn)
 
         self._custom_browser_btn = _mat_btn(
             self._custom_idle_frame, "Browser Report",
-            self._custom_open_browser_report, "#757575")
+            self._custom_open_browser_report, _BTN_SECONDARY)
         self._custom_browser_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._custom_browser_btn)
 
@@ -1746,7 +1855,7 @@ class App:
 
         self._custom_stop_btn = _mat_btn(
             self._custom_active_frame, "■  Stop",
-            self._stop_custom_scan, _M_ERROR)
+            self._stop_custom_scan, _BTN_ERROR)
         self._custom_stop_btn.pack(side=tk.LEFT, padx=(8, 4))
 
         self._custom_pause_btn = _mat_btn(
@@ -1780,17 +1889,17 @@ class App:
         cbr = self._custom_results_btn_row
 
         self._cr_inapp_btn = _mat_btn(cbr, "📋  View Report",
-                                      self._custom_open_inapp_report, _ACCENT, font_size=10)
+                                      self._custom_open_inapp_report, _BTN_PRIMARY, font_size=10)
         self._cr_inapp_btn.pack(side=tk.LEFT, padx=(0, 6))
         _mat_disable(self._cr_inapp_btn)
 
         self._cr_browser_btn = _mat_btn(cbr, "🌐  HTML Report",
-                                        self._custom_open_browser_report, "#546E7A")
+                                        self._custom_open_browser_report, _BTN_SECONDARY)
         self._cr_browser_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self._cr_browser_btn)
 
         self._cr_accept_btn = _mat_btn(cbr, "✓  Accept & Move",
-                                       self._custom_accept_and_move, _M_SUCCESS)
+                                       self._custom_accept_and_move, _BTN_SUCCESS)
         self._cr_accept_btn.pack(side=tk.LEFT, padx=4)
         _mat_disable(self._cr_accept_btn)
 
@@ -1800,10 +1909,10 @@ class App:
         # Start New Compare Scan
         self._custom_results_new_frame = tk.Frame(sf, bg=_BG)
         _mat_btn(self._custom_results_new_frame, "   +  Start New Compare Scan   ",
-                 self._new_custom_scan, _ACCENT, font_size=11).pack()
+                 self._new_custom_scan, _BTN_PRIMARY, font_size=11).pack()
         ttk.Label(self._custom_results_new_frame,
                   text="Clears current results and starts a new compare scan.",
-                  foreground="#888", font=("Segoe UI", 8)).pack(pady=(6, 0))
+                  foreground=_M_HINT3, font=("Segoe UI", 8)).pack(pady=(6, 0))
 
         # Container for embedded ReportViewer (shown on demand)
         self._custom_results_viewer_host = tk.Frame(tab, bg=_BG)
@@ -1826,7 +1935,7 @@ class App:
         tk.Label(hdr, text="✅  Compare Scan Complete",
                  font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
         tk.Label(hdr, text=ts, font=("Segoe UI", 8),
-                 bg=_CARD_BG, fg="#9E9E9E").pack(side=tk.RIGHT, pady=(2, 0))
+                 bg=_CARD_BG, fg=_M_HINT5).pack(side=tk.RIGHT, pady=(2, 0))
 
         tk.Label(self._custom_results_info_card,
                  text=f"📁  {src_folder}", font=("Segoe UI", 9),
@@ -1846,7 +1955,7 @@ class App:
             tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
                      bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
             tk.Label(cell, text=label, font=("Segoe UI", 8),
-                     bg=_CARD_BG, fg="#9E9E9E").pack(anchor=tk.W)
+                     bg=_CARD_BG, fg=_M_HINT5).pack(anchor=tk.W)
 
         _stat_cell(stats_row, n_main,  "main files")
         _stat_cell(stats_row, n_check, "check files")
@@ -1861,7 +1970,7 @@ class App:
             tk.Label(self._custom_results_info_card,
                      text="No cross-folder duplicates found — folders look clean!",
                      font=("Segoe UI", 9), bg=_CARD_BG,
-                     fg="#9E9E9E", anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
+                     fg=_M_HINT5, anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
 
         # Show card, buttons, divider, new-scan button
         self._custom_results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
@@ -2929,7 +3038,7 @@ class App:
 
         _, detail = INFO_TEXTS.get(key, ("", ""))
         if detail:
-            ttk.Label(outer, text=_first_sentence(detail), foreground="#666",
+            ttk.Label(outer, text=_first_sentence(detail), foreground=_M_HINT,
                       font=("Segoe UI", 8), wraplength=560,
                       justify=tk.LEFT).pack(anchor=tk.W, pady=(1, 0))
 
@@ -3017,6 +3126,11 @@ class App:
             self.ratio_var.set(self.settings.calibrated_preview_ratio)
             self._on_setting_change()
 
+    def _on_dark_mode_toggle(self, *_) -> None:
+        """Save the preference immediately and prompt to restart."""
+        self._on_setting_change()
+        self._dark_restart_lbl.configure(text="⟳  Restart the app to apply the new theme.")
+
     def _on_setting_change(self, *_) -> None:
         self._schedule_settings_save()
 
@@ -3074,6 +3188,7 @@ class App:
         s.custom_out_folder        = self._custom_out_var.get()
         s.auto_update              = self.auto_update_var.get()
         s.developer_mode           = self.developer_mode_var.get()
+        s.dark_mode                = self.dark_mode_var.get()
         # Threads: always from the Settings dropdown
         try:
             s.scan_threads = max(1, int(self.scan_threads_var.get()))
@@ -4181,7 +4296,7 @@ class App:
         ttk.Label(win, text="Installing rawpy via pip…",
                   font=("Segoe UI", 10, "bold")).pack(pady=(18, 6))
         log = tk.Text(win, height=6, state=tk.DISABLED,
-                      font=("Consolas", 8), relief=tk.FLAT, bg="#f4f4f4")
+                      font=("Consolas", 8), relief=tk.FLAT, bg=_M_DETAIL_BG)
         log.pack(fill=tk.BOTH, expand=True, padx=12)
         close_btn = ttk.Button(win, text="Close", state=tk.DISABLED, command=win.destroy)
         close_btn.pack(pady=8)
