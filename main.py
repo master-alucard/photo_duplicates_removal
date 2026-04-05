@@ -115,6 +115,11 @@ _BTN_SUCCESS    = "#2E7D32"
 _BTN_ERROR      = "#C62828"
 _BTN_WARNING    = "#E65100"
 _BTN_SECONDARY  = "#546E7A"
+# Slider canvas colours
+_SL_REC_BAND    = "#c8e6c9"
+_SL_TRACK       = "#bdbdbd"
+_SL_THUMB       = "#1565C0"
+_SL_THUMB_OL    = "#FFFFFF"
 
 
 def _apply_theme(dark: bool = False) -> None:
@@ -128,6 +133,7 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DEV_BG, _M_DEV_BORDER, _M_DEV_TITLE_FG, _M_DEV_BODY_FG
     global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
     global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
+    global _SL_REC_BAND, _SL_TRACK, _SL_THUMB, _SL_THUMB_OL
 
     p = _theme_mod.get_palette(dark)
     _ACCENT        = p["ACCENT"]
@@ -170,6 +176,10 @@ def _apply_theme(dark: bool = False) -> None:
     _BTN_ERROR     = p["BTN_ERROR"]
     _BTN_WARNING   = p["BTN_WARNING"]
     _BTN_SECONDARY = p["BTN_SECONDARY"]
+    _SL_REC_BAND   = p["SLIDER_REC_BAND"]
+    _SL_TRACK      = p["SLIDER_TRACK"]
+    _SL_THUMB      = p["SLIDER_THUMB"]
+    _SL_THUMB_OL   = p["SLIDER_THUMB_OL"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -2966,19 +2976,19 @@ class App:
             # 1 — green recommended band (drawn first → visually behind everything)
             scale_c.create_rectangle(
                 _px(rl, w), 1, _px(rh, w), CANVAS_H - 1,
-                fill="#c8e6c9", outline="",
+                fill=_SL_REC_BAND, outline="",
             )
             # 2 — track line
             scale_c.create_line(
                 PAD, cy, w - PAD, cy,
-                fill="#bdbdbd", width=2, capstyle=tk.ROUND,
+                fill=_SL_TRACK, width=2, capstyle=tk.ROUND,
             )
             # 3 — thumb knob (drawn last → on top)
             tx = _px(var.get(), w)
             r = 7
             scale_c.create_oval(
                 tx - r, cy - r, tx + r, cy + r,
-                fill="#1565C0", outline="#FFFFFF", width=2,
+                fill=_SL_THUMB, outline=_SL_THUMB_OL, width=2,
             )
 
         def _on_input(event):

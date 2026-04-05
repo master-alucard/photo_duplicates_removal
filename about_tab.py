@@ -46,6 +46,13 @@ _TEXT1       = "#1B1B1F"
 _TEXT2       = "#49454F"
 _TEXT3       = "#79747E"
 _SURFACE2    = "#ECEEF2"
+_HERO_BG     = "#1565C0"
+_HERO_NAME   = "#FFFFFF"
+_HERO_VER    = "#BBDEFB"
+_HERO_SUB    = "#90CAF9"
+_HERO_BTN    = "#0D47A1"
+_PRIVACY_BG  = "#FAFAFA"
+_BTN_PRIMARY = "#1565C0"
 
 
 def _apply_theme(dark: bool = False) -> None:
@@ -53,6 +60,8 @@ def _apply_theme(dark: bool = False) -> None:
     global _BG, _SURFACE, _PRIMARY, _PRIMARY_TINT
     global _SUCCESS, _SUCCESS_TINT, _ERROR, _ERROR_TINT, _WARNING
     global _DIVIDER, _TEXT1, _TEXT2, _TEXT3, _SURFACE2
+    global _HERO_BG, _HERO_NAME, _HERO_VER, _HERO_SUB, _HERO_BTN
+    global _PRIVACY_BG, _BTN_PRIMARY
     import theme as _t
     p = _t.get_palette(dark)
     _BG          = p["BG"]
@@ -69,6 +78,13 @@ def _apply_theme(dark: bool = False) -> None:
     _TEXT2       = p["TEXT2"]
     _TEXT3       = p["TEXT3"]
     _SURFACE2    = p["SURFACE2"]
+    _HERO_BG     = p["HERO_BG"]
+    _HERO_NAME   = p["HERO_NAME_FG"]
+    _HERO_VER    = p["HERO_VERSION_FG"]
+    _HERO_SUB    = p["HERO_SUBTLE_FG"]
+    _HERO_BTN    = p["HERO_BTN_BG"]
+    _PRIVACY_BG  = p["PRIVACY_BG"]
+    _BTN_PRIMARY = p["BTN_PRIMARY"]
 
 # ── Privacy policy text ───────────────────────────────────────────────────────
 
@@ -250,40 +266,40 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
     id_outer = tk.Frame(inner, bg=_BG)
     id_outer.pack(fill=tk.X, padx=20, pady=(0, 12))
 
-    id_card = tk.Frame(id_outer, bg=_PRIMARY,
-                       highlightbackground=_PRIMARY, highlightthickness=1)
+    id_card = tk.Frame(id_outer, bg=_HERO_BG,
+                       highlightbackground=_HERO_BG, highlightthickness=1)
     id_card.pack(fill=tk.X)
 
-    id_body = tk.Frame(id_card, bg=_PRIMARY, padx=24, pady=18)
+    id_body = tk.Frame(id_card, bg=_HERO_BG, padx=24, pady=18)
     id_body.pack(fill=tk.X)
 
     tk.Label(id_body, text=APP_NAME,
-             font=("Segoe UI", 20, "bold"), bg=_PRIMARY, fg="#FFFFFF",
+             font=("Segoe UI", 20, "bold"), bg=_HERO_BG, fg=_HERO_NAME,
              ).pack(anchor=tk.W)
     tk.Label(id_body, text=f"Version {APP_VERSION}",
-             font=("Segoe UI", 10), bg=_PRIMARY, fg="#BBDEFB",
+             font=("Segoe UI", 10), bg=_HERO_BG, fg=_HERO_VER,
              ).pack(anchor=tk.W, pady=(2, 0))
     tk.Label(id_body, text=APP_COPYRIGHT,
-             font=("Segoe UI", 9), bg=_PRIMARY, fg="#90CAF9",
+             font=("Segoe UI", 9), bg=_HERO_BG, fg=_HERO_SUB,
              ).pack(anchor=tk.W, pady=(4, 12))
 
     _email_lbl = tk.Label(id_body, text=APP_EMAIL,
-                          font=("Segoe UI", 9), bg=_PRIMARY, fg="#90CAF9",
+                          font=("Segoe UI", 9), bg=_HERO_BG, fg=_HERO_SUB,
                           cursor="hand2")
     _email_lbl.pack(anchor=tk.W, pady=(0, 10))
     _email_lbl.bind("<Button-1>", lambda _: _open_url(f"mailto:{APP_EMAIL}"))
 
-    btn_row = tk.Frame(id_body, bg=_PRIMARY)
+    btn_row = tk.Frame(id_body, bg=_HERO_BG)
     btn_row.pack(anchor=tk.W)
     _mat_btn(btn_row, "🐙  GitHub",
              lambda: _open_url(GITHUB_URL),
-             "#0D47A1", font_size=9).pack(side=tk.LEFT, padx=(0, 8))
+             _HERO_BTN, font_size=9).pack(side=tk.LEFT, padx=(0, 8))
     _mat_btn(btn_row, "🌐  katador.net",
              lambda: _open_url(WEBSITE_URL),
-             "#0D47A1", font_size=9).pack(side=tk.LEFT, padx=(0, 8))
+             _HERO_BTN, font_size=9).pack(side=tk.LEFT, padx=(0, 8))
     _mat_btn(btn_row, "✉  Email",
              lambda: _open_url(f"mailto:{APP_EMAIL}"),
-             "#0D47A1", font_size=9).pack(side=tk.LEFT)
+             _HERO_BTN, font_size=9).pack(side=tk.LEFT)
 
     # ── 2. Updates card ───────────────────────────────────────────────────
     upd_inner = _section(inner, "Updates")
@@ -334,7 +350,7 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
                     status_lbl.configure(fg=_PRIMARY)
                     btn = _mat_btn(upd_inner, f"⬇  Download {result['version']}",
                                    lambda: _open_url(result["url"]),
-                                   _PRIMARY, font_size=9)
+                                   _BTN_PRIMARY, font_size=9)
                     btn.pack(anchor=tk.W, pady=(4, 0))
                     _download_btn.append(btn)
                 else:
@@ -344,7 +360,7 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
 
         threading.Thread(target=_run, daemon=True).start()
 
-    check_btn = _mat_btn(upd_inner, "Check Now", _do_check, _PRIMARY, font_size=9)
+    check_btn = _mat_btn(upd_inner, "Check Now", _do_check, _BTN_PRIMARY, font_size=9)
     check_btn.pack(anchor=tk.W)
 
     # Run auto-check in background if enabled
@@ -359,7 +375,7 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
 
     priv_text = tk.Text(
         priv_inner, wrap=tk.WORD, relief=tk.FLAT, padx=4, pady=4,
-        bg="#FAFAFA", fg=_TEXT2, font=("Segoe UI", 9),
+        bg=_PRIVACY_BG, fg=_TEXT2, font=("Segoe UI", 9),
         height=14, state=tk.DISABLED,
     )
     priv_sb = ttk.Scrollbar(priv_inner, orient=tk.VERTICAL,

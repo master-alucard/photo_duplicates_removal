@@ -62,6 +62,18 @@ LIGHT = {
     "NOT_INSTALLED": "#e03030",
     # disabled button text
     "DISABLED_FG":   "#838387",
+    # slider canvas
+    "SLIDER_REC_BAND": "#c8e6c9",   # green recommended zone
+    "SLIDER_TRACK":    "#bdbdbd",   # track line
+    "SLIDER_THUMB":    "#1565C0",   # thumb knob fill
+    "SLIDER_THUMB_OL": "#FFFFFF",   # thumb outline
+    # about hero card
+    "HERO_BG":         "#1565C0",   # identity card background
+    "HERO_NAME_FG":    "#FFFFFF",   # app name
+    "HERO_VERSION_FG": "#BBDEFB",   # version text
+    "HERO_SUBTLE_FG":  "#90CAF9",   # copyright / email
+    "HERO_BTN_BG":     "#0D47A1",   # hero action buttons
+    "PRIVACY_BG":      "#FAFAFA",   # privacy policy text widget
 }
 
 DARK = {
@@ -118,6 +130,18 @@ DARK = {
     "NOT_INSTALLED": "#EF5350",
     # disabled button text
     "DISABLED_FG":   "#605C66",
+    # slider canvas
+    "SLIDER_REC_BAND": "#1B3A1B",   # dark green recommended zone
+    "SLIDER_TRACK":    "#49454F",   # track line
+    "SLIDER_THUMB":    "#90CAF9",   # thumb knob fill (light blue)
+    "SLIDER_THUMB_OL": "#1E1E22",   # thumb outline (card surface)
+    # about hero card
+    "HERO_BG":         "#1A1A2E",   # dark navy card
+    "HERO_NAME_FG":    "#E6E1E5",   # app name
+    "HERO_VERSION_FG": "#90CAF9",   # version text
+    "HERO_SUBTLE_FG":  "#7BAAD4",   # copyright / email
+    "HERO_BTN_BG":     "#1976D2",   # hero action buttons
+    "PRIVACY_BG":      "#1A1A1E",   # privacy policy text widget
 }
 
 
