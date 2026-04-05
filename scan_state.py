@@ -27,6 +27,77 @@ class ScanState:
     union_parent: list[int] = field(default_factory=list)
 
 
+@dataclass
+class CustomScanState:
+    """Pause/resume state for Compare Scan (two-folder cross-comparison)."""
+    version: int = STATE_VERSION
+    main_folder: str = ""
+    check_folder: str = ""
+    output_folder: str = ""
+    settings_snapshot: dict = field(default_factory=dict)
+    # Phases: "main_hashing", "main_done", "check_hashing",
+    #         "check_done", "comparing"
+    phase: str = ""
+    main_records: list[dict] = field(default_factory=list)
+    check_records: list[dict] = field(default_factory=list)
+    compare_i: int = 0
+    union_parent: list[int] = field(default_factory=list)
+
+
+def custom_state_path(output_folder: Path) -> Path:
+    """Return canonical path for custom_scan_state.json inside output_folder."""
+    return output_folder / "custom_scan_state.json"
+
+
+def save_custom_state(state: CustomScanState, path: Path) -> None:
+    """Serialize CustomScanState to JSON."""
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = asdict(state)
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        import sys
+        print(f"[scan_state] Warning: could not save custom state: {exc}",
+              file=sys.stderr)
+
+
+def load_custom_state(path: Path) -> "Optional[CustomScanState]":
+    """Deserialize CustomScanState from JSON.  Returns None if missing/invalid."""
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != STATE_VERSION:
+            return None
+        return CustomScanState(
+            version=data.get("version", STATE_VERSION),
+            main_folder=data.get("main_folder", ""),
+            check_folder=data.get("check_folder", ""),
+            output_folder=data.get("output_folder", ""),
+            settings_snapshot=data.get("settings_snapshot", {}),
+            phase=data.get("phase", ""),
+            main_records=data.get("main_records", []),
+            check_records=data.get("check_records", []),
+            compare_i=data.get("compare_i", 0),
+            union_parent=data.get("union_parent", []),
+        )
+    except Exception:
+        return None
+
+
+def delete_custom_state(output_folder: Path) -> None:
+    """Delete the custom scan state file if it exists."""
+    p = custom_state_path(output_folder)
+    if p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+
 def save_state(state: ScanState, path: Path) -> None:
     """Serialize ScanState to JSON at the given path."""
     try:

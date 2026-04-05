@@ -106,6 +106,20 @@ class PhaseTracker:
         if len(self._speed_samples) > 30:
             self._speed_samples.pop(0)
 
+    def notify_gap(self, gap_seconds: float) -> None:
+        """Compensate for a detected time gap (e.g., system sleep/hibernate).
+
+        Shifts the active phase's start_time forward by *gap_seconds*,
+        so elapsed-time calculations exclude the gap.  Speed samples are
+        cleared because they span the gap and would produce incorrect rates.
+        """
+        if self._current_idx < 0 or gap_seconds <= 0:
+            return
+        phase = self._phases[self._current_idx]
+        if phase.start_time > 0:
+            phase.start_time += gap_seconds
+        self._speed_samples.clear()
+
     def finish_phase(self) -> None:
         """Mark the current phase as finished."""
         if self._current_idx < 0:
