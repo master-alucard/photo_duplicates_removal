@@ -666,6 +666,9 @@ class App:
         self._tracker: PhaseTracker | None = None
         self._last_scan_info: dict = {}
         self._last_heartbeat: float = time.monotonic()
+        self._heartbeat_after_id = None
+        self._estimate_after_id = None
+        self._custom_estimate_after_id = None
 
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
@@ -1625,10 +1628,6 @@ class App:
         r = _row(appear_sec)
         ttk.Checkbutton(r, text="Night Mode  (dark background)",
                         variable=self.dark_mode_var).pack(side=tk.LEFT)
-        self._dark_restart_lbl = ttk.Label(
-            r, text="", foreground=_M_WARNING,
-            font=("Segoe UI", 8, "italic"))
-        self._dark_restart_lbl.pack(side=tk.LEFT, padx=10)
 
         # ── Developer ─────────────────────────────────────────────────────
         dev_sec = _section(body, "Developer")
@@ -3137,9 +3136,50 @@ class App:
             self._on_setting_change()
 
     def _on_dark_mode_toggle(self, *_) -> None:
-        """Save the preference immediately and prompt to restart."""
-        self._on_setting_change()
-        self._dark_restart_lbl.configure(text="⟳  Restart the app to apply the new theme.")
+        """Apply the new theme live by rebuilding the entire UI."""
+        dark = self.dark_mode_var.get()
+        self.settings.dark_mode = dark
+        save_settings(self.settings, SETTINGS_PATH)
+
+        # Re-apply colour constants in every module
+        _apply_theme(dark)
+        import about_tab as _about_mod, library_tab as _lib_mod
+        import report_viewer as _rv_mod
+        _about_mod._apply_theme(dark)
+        _lib_mod._apply_theme(dark)
+        _rv_mod._apply_theme(dark)
+        try:
+            import calibration_window as _cal_mod
+            _cal_mod._apply_theme(dark)
+        except Exception:
+            pass
+
+        # Cancel pending timers before destroying widgets
+        for attr in ("_save_after_id", "_estimate_after_id",
+                     "_heartbeat_after_id", "_custom_estimate_after_id"):
+            aid = getattr(self, attr, None)
+            if aid is not None:
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        # Tear down & rebuild
+        for child in self.root.winfo_children():
+            child.destroy()
+        self.root.configure(bg=_BG)
+        self._build_ui()
+
+        # Restore persistent state (resume notices, last results, etc.)
+        self._check_resume_state()
+        self._check_custom_resume_state()
+        self._check_last_results()
+        self._schedule_estimate_update()
+        self._heartbeat_tick()
+
+        # Switch back to the Settings tab
+        self._nb.select(self._tab_settings)
 
     def _on_setting_change(self, *_) -> None:
         self._schedule_settings_save()
@@ -3678,7 +3718,7 @@ class App:
                 if tracker is not None:
                     tracker.notify_gap(gap - 1.0)
         self._last_heartbeat = now
-        self.root.after(3000, self._heartbeat_tick)
+        self._heartbeat_after_id = self.root.after(3000, self._heartbeat_tick)
 
     def bring_to_front(self) -> None:
         """Raise this window to the front and give it focus.

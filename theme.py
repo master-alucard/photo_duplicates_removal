@@ -74,6 +74,12 @@ LIGHT = {
     "HERO_SUBTLE_FG":  "#90CAF9",   # copyright / email
     "HERO_BTN_BG":     "#0D47A1",   # hero action buttons
     "PRIVACY_BG":      "#FAFAFA",   # privacy policy text widget
+    # report viewer
+    "RV_REVERT_BG":    "#455A64",   # revert buttons
+    "RV_CALIB_BG":     "#5C6BC0",   # calibrate button
+    "RV_SELECT_BG":    "#FFFFFF",   # select all/none bg
+    "RV_SELECT_FG":    "#1565C0",   # select all/none fg
+    "RV_HEADER_STATS": "#BBDEFB",   # header stats text
 }
 
 DARK = {
@@ -142,6 +148,12 @@ DARK = {
     "HERO_SUBTLE_FG":  "#7BAAD4",   # copyright / email
     "HERO_BTN_BG":     "#1976D2",   # hero action buttons
     "PRIVACY_BG":      "#1A1A1E",   # privacy policy text widget
+    # report viewer
+    "RV_REVERT_BG":    "#607D8B",   # revert buttons
+    "RV_CALIB_BG":     "#7986CB",   # calibrate button
+    "RV_SELECT_BG":    "#2E2E34",   # select all/none bg
+    "RV_SELECT_FG":    "#90CAF9",   # select all/none fg
+    "RV_HEADER_STATS": "#7BAAD4",   # header stats text
 }
 
 

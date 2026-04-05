@@ -64,6 +64,8 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DIVIDER, _M_TEXT1, _M_TEXT2, _M_TEXT3
     global _M_SOLO_TINT, _M_SOLO_BORDER, _M_BROKEN_TINT, _M_BROKEN_BDR
     global _M_MANUAL, _M_MANUAL_TINT, _M_MANUAL_HDR, _M_MANUAL_DARK
+    global _RV_REVERT_BG, _RV_CALIB_BG, _RV_SELECT_BG, _RV_SELECT_FG
+    global _RV_HEADER_STATS, _RV_HEADER_BG, _RV_BTN_PRIMARY, _RV_BTN_SUCCESS
     global _CARD_BG, _ORIG_BG, _PREV_BG, _HEADER_BG, _SERIES_COLOR
     global _SOLO_BG, _BROKEN_BG
     import theme as _t
@@ -104,6 +106,14 @@ def _apply_theme(dark: bool = False) -> None:
         _M_MANUAL_TINT  = "#E8EAF6"
         _M_MANUAL_HDR   = "#EDE7F6"
         _M_MANUAL_DARK  = "#4527A0"
+    _RV_REVERT_BG    = p["RV_REVERT_BG"]
+    _RV_CALIB_BG     = p["RV_CALIB_BG"]
+    _RV_SELECT_BG    = p["RV_SELECT_BG"]
+    _RV_SELECT_FG    = p["RV_SELECT_FG"]
+    _RV_HEADER_STATS = p["RV_HEADER_STATS"]
+    _RV_HEADER_BG    = p["HEADER_BG"]
+    _RV_BTN_PRIMARY  = p["BTN_PRIMARY"]
+    _RV_BTN_SUCCESS  = p["BTN_SUCCESS"]
     # Legacy aliases
     _CARD_BG      = _M_SURFACE
     _ORIG_BG      = _M_SUCCESS_TINT
@@ -113,6 +123,15 @@ def _apply_theme(dark: bool = False) -> None:
     _SOLO_BG      = _M_SOLO_TINT
     _BROKEN_BG    = _M_BROKEN_TINT
 
+
+_RV_REVERT_BG    = "#455A64"
+_RV_CALIB_BG     = "#5C6BC0"
+_RV_SELECT_BG    = "#FFFFFF"
+_RV_SELECT_FG    = "#1565C0"
+_RV_HEADER_STATS = "#BBDEFB"
+_RV_HEADER_BG    = "#1565C0"
+_RV_BTN_PRIMARY  = "#1565C0"
+_RV_BTN_SUCCESS  = "#2E7D32"
 
 _THUMB_SIZE = 156
 
@@ -302,12 +321,12 @@ class ReportViewer(tk.Frame):
         self._setup_style()
 
         # ── Header bar ────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=_M_PRIMARY)
+        hdr = tk.Frame(self, bg=_RV_HEADER_BG)
         hdr.pack(fill=tk.X)
 
         tk.Label(
             hdr, text="Review Scan Results",
-            font=("Segoe UI", 14, "bold"), bg=_M_PRIMARY, fg="#FFFFFF",
+            font=("Segoe UI", 14, "bold"), bg=_RV_HEADER_BG, fg="#FFFFFF",
         ).pack(side=tk.LEFT, padx=18, pady=12)
 
         n_groups   = len(self._groups)
@@ -322,17 +341,17 @@ class ReportViewer(tk.Frame):
             parts.append(f"{len(self._broken_files)} broken")
         tk.Label(
             hdr, text="  ·  ".join(parts),
-            font=("Segoe UI", 9), bg=_M_PRIMARY, fg="#BBDEFB",
+            font=("Segoe UI", 9), bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
         ).pack(side=tk.LEFT, padx=4)
 
-        _mat_btn(hdr, "Select None", self._select_none, "#FFFFFF", fg=_M_PRIMARY,
+        _mat_btn(hdr, "Select None", self._select_none, _RV_SELECT_BG, fg=_RV_SELECT_FG,
                  ).pack(side=tk.RIGHT, padx=6, pady=8)
-        _mat_btn(hdr, "Select All", self._select_all, "#FFFFFF", fg=_M_PRIMARY,
+        _mat_btn(hdr, "Select All", self._select_all, _RV_SELECT_BG, fg=_RV_SELECT_FG,
                  ).pack(side=tk.RIGHT, padx=2, pady=8)
 
         if self._on_close_cb:
             _mat_btn(hdr, "◀  Back to Results", self._on_close_cb,
-                     _M_PRIMARY, fg="#BBDEFB", font_size=9,
+                     _RV_HEADER_BG, fg=_RV_HEADER_STATS, font_size=9,
                      ).pack(side=tk.RIGHT, padx=(0, 12), pady=8)
 
         # ── Action bar ────────────────────────────────────────────────────
@@ -340,16 +359,16 @@ class ReportViewer(tk.Frame):
                        highlightbackground=_M_DIVIDER, highlightthickness=1)
         act.pack(fill=tk.X)
 
-        self._apply_btn = _mat_btn(act, "📦  Move Duplicates", self._on_apply, _M_SUCCESS)
+        self._apply_btn = _mat_btn(act, "📦  Move Duplicates", self._on_apply, _RV_BTN_SUCCESS)
         self._apply_btn.pack(side=tk.LEFT, padx=(12, 4))
 
         # Revert buttons — always created, revealed after first successful apply
         self._revert_frame = tk.Frame(act, bg=_M_SURFACE)
         self._revert_selected_btn = _mat_btn(
-            self._revert_frame, "↩  Revert Selected", self._on_revert_selected, "#455A64")
+            self._revert_frame, "↩  Revert Selected", self._on_revert_selected, _RV_REVERT_BG)
         self._revert_selected_btn.pack(side=tk.LEFT, padx=4)
         self._revert_all_btn = _mat_btn(
-            self._revert_frame, "↩  Revert All", self._on_revert_all, "#455A64")
+            self._revert_frame, "↩  Revert All", self._on_revert_all, _RV_REVERT_BG)
         self._revert_all_btn.pack(side=tk.LEFT, padx=4)
         # Show immediately if an ops log already exists (previous session apply)
         if self._ops_log_path and self._ops_log_path.exists():
@@ -359,7 +378,7 @@ class ReportViewer(tk.Frame):
         tk.Frame(act, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y,
                                                     padx=12, pady=4)
         _mat_btn(act, "⚙  Calibrate from Review",
-                 self._show_calibration_info, "#5C6BC0").pack(side=tk.LEFT, padx=4)
+                 self._show_calibration_info, _RV_CALIB_BG).pack(side=tk.LEFT, padx=4)
         _info_btn(act, "calibrate_review", bg=_M_SURFACE).pack(side=tk.LEFT, padx=0)
 
         self._status_lbl = tk.Label(act, text="", bg=_M_SURFACE,
@@ -374,10 +393,10 @@ class ReportViewer(tk.Frame):
 
         # Prev / Next buttons (left side)
         self._prev_btn = _mat_btn(nav, "◀  Prev", self._prev_page,
-                                  _M_PRIMARY, font_size=8, state=tk.DISABLED)
+                                  _RV_BTN_PRIMARY, font_size=8, state=tk.DISABLED)
         self._prev_btn.pack(side=tk.LEFT, padx=(10, 2), pady=4)
         self._next_btn = _mat_btn(nav, "Next  ▶", self._next_page,
-                                  _M_PRIMARY, font_size=8)
+                                  _RV_BTN_PRIMARY, font_size=8)
         self._next_btn.pack(side=tk.LEFT, padx=(2, 10), pady=4)
 
         self._page_info_var = tk.StringVar(value="")
@@ -391,7 +410,7 @@ class ReportViewer(tk.Frame):
                 nav,
                 f"★  Unique  ({len(self._solo_originals)})",
                 lambda: self._render_page(self._unique_page_index()),
-                _M_SOLO_BORDER, font_size=8,
+                _RV_BTN_PRIMARY, font_size=8,
             )
             self._unique_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
 
@@ -543,7 +562,7 @@ class ReportViewer(tk.Frame):
         _mat_btn(
             btn_frame, "✗  Wrong Group",
             lambda i=idx: self._on_wrong_group(i),
-            bg="#FFEBEE", fg=_M_ERROR, font_size=8,
+            bg=_M_ERROR_TINT, fg=_M_ERROR, font_size=8,
         ).pack(side=tk.RIGHT, padx=4)
 
         _info_btn(btn_frame, "same_image", bg=_M_PRIMARY_TINT).pack(
