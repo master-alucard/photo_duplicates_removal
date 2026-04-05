@@ -197,7 +197,7 @@ def _show_info(parent: tk.Widget, key: str) -> None:
     txt.insert("1.0", text)
     txt.config(state=tk.DISABLED)
     txt.pack(fill=tk.BOTH, expand=True, padx=4)
-    _mat_btn(win, "Close", win.destroy, _M_PRIMARY).pack(pady=10)
+    _mat_btn(win, "Close", win.destroy, _RV_BTN_PRIMARY).pack(pady=10)
 
 
 def _mat_btn(
@@ -210,10 +210,9 @@ def _mat_btn(
     **kw,
 ) -> tk.Button:
     """Flat Material-style button."""
-    def _darken(event):
-        btn.configure(bg=_darken_color(bg))
-    def _restore(event):
-        btn.configure(bg=bg)
+    # Strip state from kw so we can apply it properly via _mat_disable
+    initial_disabled = kw.pop("state", None) == tk.DISABLED
+
     btn = tk.Button(
         parent, text=text, command=command,
         bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
@@ -221,9 +220,33 @@ def _mat_btn(
         font=("Segoe UI", font_size, "bold"),
         cursor="hand2", **kw,
     )
-    btn.bind("<Enter>", _darken)
-    btn.bind("<Leave>", _restore)
+    btn._mat_bg = bg
+    btn._mat_fg = fg
+
+    def _enter(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=_darken_color(btn._mat_bg))
+
+    def _leave(_):
+        if str(btn["state"]) != "disabled":
+            btn.configure(bg=btn._mat_bg)
+
+    btn.bind("<Enter>", _enter)
+    btn.bind("<Leave>", _leave)
+
+    if initial_disabled:
+        _mat_disable(btn)
     return btn
+
+
+def _mat_enable(btn: tk.Button) -> None:
+    btn.configure(state=tk.NORMAL, bg=btn._mat_bg, fg=btn._mat_fg,
+                  activebackground=_darken_color(btn._mat_bg),
+                  activeforeground=btn._mat_fg, cursor="hand2")
+
+
+def _mat_disable(btn: tk.Button) -> None:
+    btn.configure(state=tk.DISABLED, bg=_M_DIVIDER, fg=_M_TEXT3, cursor="")
 
 
 def _darken_color(hex_color: str) -> str:
@@ -1878,9 +1901,15 @@ class ReportViewer(tk.Frame):
 
         # Enable / disable Prev & Next buttons
         if hasattr(self, "_prev_btn") and self._prev_btn.winfo_exists():
-            self._prev_btn.configure(state=tk.NORMAL if page > 0 else tk.DISABLED)
+            if page > 0:
+                _mat_enable(self._prev_btn)
+            else:
+                _mat_disable(self._prev_btn)
         if hasattr(self, "_next_btn") and self._next_btn.winfo_exists():
-            self._next_btn.configure(state=tk.NORMAL if page < total - 1 else tk.DISABLED)
+            if page < total - 1:
+                _mat_enable(self._next_btn)
+            else:
+                _mat_disable(self._next_btn)
 
         # Highlight the unique button when on the unique page
         if hasattr(self, "_unique_btn") and self._unique_btn.winfo_exists():
