@@ -334,7 +334,9 @@ class ReportViewer(tk.Frame):
 
         # Pagination
         self._current_page: int = 0
-        self._page_size: int = 20
+        self._page_size: int = (settings.report_page_size
+                                if settings and hasattr(settings, "report_page_size")
+                                else 100)
 
         self._build_ui()
 
@@ -576,24 +578,44 @@ class ReportViewer(tk.Frame):
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
+        # User-review status badge (from Same Image / Wrong Group buttons)
+        if status == "confirmed":
+            tk.Label(
+                head, text=" ✓ Confirmed ",
+                font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS, fg="#FFFFFF",
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+        elif status == "wrong":
+            tk.Label(
+                head, text=" ✗ Wrong Group ",
+                font=("Segoe UI", 8, "bold"), bg=_M_ERROR, fg="#FFFFFF",
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+
         # Action buttons (right side of header)
         btn_frame = tk.Frame(head, bg=_M_PRIMARY_TINT)
         btn_frame.pack(side=tk.RIGHT, padx=8, pady=6)
 
         _info_btn(btn_frame, "wrong_group", bg=_M_PRIMARY_TINT).pack(
             side=tk.RIGHT, padx=0)
+        # When status is "wrong", show the button as active (solid error bg)
+        wrong_bg = _M_ERROR if status == "wrong" else _M_ERROR_TINT
+        wrong_fg = "#FFFFFF" if status == "wrong" else _M_ERROR
         _mat_btn(
             btn_frame, "✗  Wrong Group",
             lambda i=idx: self._on_wrong_group(i),
-            bg=_M_ERROR_TINT, fg=_M_ERROR, font_size=8,
+            bg=wrong_bg, fg=wrong_fg, font_size=8,
         ).pack(side=tk.RIGHT, padx=4)
 
         _info_btn(btn_frame, "same_image", bg=_M_PRIMARY_TINT).pack(
             side=tk.RIGHT, padx=0)
+        # When status is "confirmed", show the button as active (solid success bg)
+        same_bg = _M_SUCCESS if status == "confirmed" else _M_SUCCESS_TINT
+        same_fg = "#FFFFFF" if status == "confirmed" else _M_SUCCESS
         _mat_btn(
             btn_frame, "✓  Same Image",
             lambda i=idx: self._on_confirm_group(i),
-            bg=_M_SUCCESS_TINT, fg=_M_SUCCESS, font_size=8,
+            bg=same_bg, fg=same_fg, font_size=8,
         ).pack(side=tk.RIGHT, padx=4)
 
         # ── Body: originals | separator | previews ───────────────────────
@@ -875,11 +897,10 @@ class ReportViewer(tk.Frame):
         current = self._group_status.get(idx, "")
         new_status = "" if current == "confirmed" else "confirmed"
         self._group_status[idx] = new_status
-        self._group_vars[idx].set(True)
-        self._on_group_toggle(idx)
-        color = _M_SUCCESS if new_status == "confirmed" else _M_PRIMARY
-        if idx in self._group_border_frames:
-            self._group_border_frames[idx].configure(bg=color)
+        if new_status == "confirmed":
+            self._group_vars[idx].set(True)
+            self._on_group_toggle(idx)
+        self._refresh_page_keep_scroll()
 
     def _on_wrong_group(self, idx: int) -> None:
         """Toggle 'Wrong Group' status for a group."""
@@ -889,9 +910,17 @@ class ReportViewer(tk.Frame):
         if new_status == "wrong":
             self._group_vars[idx].set(False)
             self._on_group_toggle(idx)
-        color = _M_ERROR if new_status == "wrong" else _M_PRIMARY
-        if idx in self._group_border_frames:
-            self._group_border_frames[idx].configure(bg=color)
+        else:
+            # Un-marking as wrong: re-check the group and its images
+            self._group_vars[idx].set(True)
+            self._on_group_toggle(idx)
+        self._refresh_page_keep_scroll()
+
+    def _refresh_page_keep_scroll(self) -> None:
+        """Re-render the current page while preserving scroll position."""
+        scroll_pos = self._canvas.yview()[0]
+        self._render_page(self._current_page)
+        self._canvas.after(10, lambda: self._canvas.yview_moveto(scroll_pos))
 
     # ── selection helpers ─────────────────────────────────────────────────────
 
@@ -1946,6 +1975,16 @@ class ReportViewer(tk.Frame):
         first_group = self._current_page * self._page_size
         self._page_size = new_size
         self._render_page(first_group // new_size)
+        # Persist the choice for next launch
+        if self._settings and hasattr(self._settings, "report_page_size"):
+            self._settings.report_page_size = new_size
+            try:
+                from pathlib import Path as _P
+                from config import save_settings
+                _sp = _P(__file__).parent / "settings.json"
+                save_settings(self._settings, _sp)
+            except Exception:
+                pass
 
     # ── scroll helpers ────────────────────────────────────────────────────────
 
