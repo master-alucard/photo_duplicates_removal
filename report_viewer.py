@@ -28,6 +28,63 @@ from scanner import DuplicateGroup, ImageRecord
 import error_handler
 
 
+class _TrueStub:
+    """Lightweight stand-in for a tk.BooleanVar that always returns True."""
+    __slots__ = ()
+    @staticmethod
+    def get() -> bool:
+        return True
+
+_TRUE_STUB = _TrueStub()
+
+
+def _make_checkbox_pair(
+    size: int = 22,
+    check_fill: str = "#2E7D32",
+    check_outline: str = "#1B5E20",
+    box_outline: str = "#B0B0B0",
+    box_fill: str = "#FFFFFF",
+) -> "tuple[ImageTk.PhotoImage, ImageTk.PhotoImage]":
+    """Render a crisp unchecked/checked checkbox pair at 4× and downscale."""
+    from PIL import ImageDraw
+    S = size * 4  # supersample factor
+    r = int(S * 0.14)  # corner radius
+
+    # ── unchecked ────────────────────────────────────────────────────────
+    img = PILImage.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle(
+        [3, 3, S - 4, S - 4], radius=r,
+        outline=box_outline, width=max(3, S // 12), fill=box_fill,
+    )
+    unchecked = ImageTk.PhotoImage(
+        img.resize((size, size), PILImage.LANCZOS))
+
+    # ── checked (green box + white ✓) ────────────────────────────────────
+    img = PILImage.new("RGBA", (S, S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    d.rounded_rectangle(
+        [3, 3, S - 4, S - 4], radius=r,
+        fill=check_fill, outline=check_outline, width=max(2, S // 16),
+    )
+    # ✓  checkmark: left leg from (22%, 52%) → (40%, 72%), right leg → (78%, 24%)
+    lw = max(4, S // 8)
+    pts = [
+        (int(S * 0.22), int(S * 0.52)),
+        (int(S * 0.40), int(S * 0.72)),
+        (int(S * 0.78), int(S * 0.24)),
+    ]
+    d.line(pts, fill="white", width=lw, joint="curve")
+    # Round the endpoints
+    hr = lw // 2
+    for px, py in (pts[0], pts[-1]):
+        d.ellipse([px - hr, py - hr, px + hr, py + hr], fill="white")
+    checked = ImageTk.PhotoImage(
+        img.resize((size, size), PILImage.LANCZOS))
+
+    return unchecked, checked
+
+
 # ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
 
 _M_BG           = "#F2F4F7"
@@ -300,6 +357,7 @@ class ReportViewer(tk.Frame):
 
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
+        self._placeholder_cache: dict[tuple, ImageTk.PhotoImage] = {}  # (size, bg) → photo
 
         # Per-group: include checkbox, status, border-frame ref
         # (pre-created for ALL groups so page changes don't lose state)
@@ -307,6 +365,9 @@ class ReportViewer(tk.Frame):
         self._group_status: dict[int, str] = {}       # "confirmed" | "wrong" | ""
         self._group_border_frames: dict[int, tk.Frame] = {}  # only current page
         self._group_frames: dict[int, tk.Frame] = {}  # outer frame per group card
+        self._group_calib_containers: dict[int, tk.Frame] = {}  # calibration button area per group
+        self._group_calib_badges: dict[int, tk.Label] = {}     # "In calibration" badge per group
+        self._active_traces: list[tuple[tk.BooleanVar, str]] = []  # (var, trace_id) for cleanup
 
         # Applied state — paths successfully moved to trash (populated after apply)
         self._trashed_paths: set[Path] = set()
@@ -321,6 +382,9 @@ class ReportViewer(tk.Frame):
 
         # Solo original checkboxes
         self._solo_vars: dict[int, tk.BooleanVar] = {}
+
+        # Groups flagged for false-positive calibration
+        self._fp_calib_groups: set[int] = set()
 
         # Manual calibration groups (list of path lists, created by user in the review)
         self._manual_calib_groups: list[list[Path]] = []
@@ -338,16 +402,27 @@ class ReportViewer(tk.Frame):
                                 if settings and hasattr(settings, "report_page_size")
                                 else 100)
 
+        # Deferred thumbnail loading
+        self._pending_thumbs: list[tuple] = []  # (path, label, max_px, grayscale) queued during build
+        self._thumb_batch_id: int = 0           # bumped on page change to cancel stale loads
+
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
         self._setup_style()
+        self._create_checkbox_images()
 
         # ── Header bar ────────────────────────────────────────────────────
         hdr = tk.Frame(self, bg=_RV_HEADER_BG)
         hdr.pack(fill=tk.X)
+        self._header_frame = hdr  # saved for revert-frame packing
+
+        if self._on_close_cb:
+            _mat_btn(hdr, "◀  Back to Results", self._on_close_cb,
+                     _RV_HEADER_BG, fg=_RV_HEADER_STATS, font_size=9,
+                     ).pack(side=tk.LEFT, padx=(12, 0), pady=8)
 
         tk.Label(
             hdr, text="Review Scan Results",
@@ -369,50 +444,27 @@ class ReportViewer(tk.Frame):
             font=("Segoe UI", 9), bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
         ).pack(side=tk.LEFT, padx=4)
 
-        _mat_btn(hdr, "Select None", self._select_none, _RV_SELECT_BG, fg=_RV_SELECT_FG,
-                 ).pack(side=tk.RIGHT, padx=6, pady=8)
-        _mat_btn(hdr, "Select All", self._select_all, _RV_SELECT_BG, fg=_RV_SELECT_FG,
-                 ).pack(side=tk.RIGHT, padx=2, pady=8)
+        # Right side of header: status, revert, apply
+        self._status_lbl = tk.Label(hdr, text="", bg=_RV_HEADER_BG,
+                                    fg=_RV_HEADER_STATS, font=("Segoe UI", 9))
+        self._status_lbl.pack(side=tk.RIGHT, padx=12)
 
-        if self._on_close_cb:
-            _mat_btn(hdr, "◀  Back to Results", self._on_close_cb,
-                     _RV_HEADER_BG, fg=_RV_HEADER_STATS, font_size=9,
-                     ).pack(side=tk.RIGHT, padx=(0, 12), pady=8)
-
-        # ── Action bar ────────────────────────────────────────────────────
-        act = tk.Frame(self, bg=_M_SURFACE, pady=6,
-                       highlightbackground=_M_DIVIDER, highlightthickness=1)
-        act.pack(fill=tk.X)
-
-        self._apply_btn = _mat_btn(act, "📦  Move Duplicates", self._on_apply, _RV_BTN_SUCCESS)
-        self._apply_btn.pack(side=tk.LEFT, padx=(12, 4))
-
-        # Revert buttons — always created, revealed after first successful apply
-        self._revert_frame = tk.Frame(act, bg=_M_SURFACE)
+        # Revert buttons — always created, revealed only after first successful apply
+        self._revert_frame = tk.Frame(hdr, bg=_RV_HEADER_BG)
         self._revert_selected_btn = _mat_btn(
             self._revert_frame, "↩  Revert Selected", self._on_revert_selected, _RV_REVERT_BG)
         self._revert_selected_btn.pack(side=tk.LEFT, padx=4)
         self._revert_all_btn = _mat_btn(
             self._revert_frame, "↩  Revert All", self._on_revert_all, _RV_REVERT_BG)
         self._revert_all_btn.pack(side=tk.LEFT, padx=4)
-        # Show immediately if an ops log already exists (previous session apply)
-        if self._ops_log_path and self._ops_log_path.exists():
-            self._revert_frame.pack(side=tk.LEFT, padx=(0, 4))
+        # Do NOT pack _revert_frame yet — only shown after _on_apply_done succeeds
 
-        # Calibrate from Review
-        tk.Frame(act, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y,
-                                                    padx=12, pady=4)
-        _mat_btn(act, "⚙  Calibrate from Review",
-                 self._show_calibration_info, _RV_CALIB_BG).pack(side=tk.LEFT, padx=4)
-        _info_btn(act, "calibrate_review", bg=_M_SURFACE).pack(side=tk.LEFT, padx=0)
-
-        self._status_lbl = tk.Label(act, text="", bg=_M_SURFACE,
-                                    fg=_M_TEXT2, font=("Segoe UI", 9))
-        self._status_lbl.pack(side=tk.RIGHT, padx=12)
+        self._apply_btn = _mat_btn(hdr, "📦  Move Duplicates", self._on_apply, _RV_BTN_SUCCESS)
+        self._apply_btn.pack(side=tk.RIGHT, padx=(4, 12), pady=8)
 
         # ── Pagination nav bar ────────────────────────────────────────────
         nav = tk.Frame(self, bg=_M_SURFACE,
-                       highlightbackground=_M_DIVIDER, highlightthickness=1)
+                       highlightthickness=0)
         nav.pack(fill=tk.X)
         self._nav_bar_frame = nav   # saved for show/hide during inline panels
 
@@ -439,23 +491,35 @@ class ReportViewer(tk.Frame):
             )
             self._unique_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
 
-        # Per-page size selector (right side)
-        tk.Label(nav, text="Groups per page:",
-                 bg=_M_SURFACE, fg=_M_TEXT2,
-                 font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=(0, 4))
+        # Calibrate False Positives button (hidden until groups are flagged)
+        self._fp_calib_btn = _mat_btn(nav, "🔧  Calibrate False Positives",
+                                       self._run_fp_calibration, _RV_CALIB_BG, font_size=8)
+        # Don't pack yet — shown by _update_fp_calib_btn when groups are flagged
+
+        # Per-page size selector (right side — dropdown at far right, label to its left)
         self._page_size_var = tk.StringVar(value=str(self._page_size))
         ps_cb = ttk.Combobox(nav, textvariable=self._page_size_var,
                              values=["10", "20", "50", "100"],
                              width=5, state="readonly")
         ps_cb.pack(side=tk.RIGHT, padx=(0, 12))
+        tk.Label(nav, text="Groups per page:",
+                 bg=_M_SURFACE, fg=_M_TEXT2,
+                 font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=(0, 4))
         self._page_size_var.trace_add("write", self._on_page_size_change)
+
+        # Select All / Select None (right side of nav, before page-size selector)
+        _mat_btn(nav, "Select None", self._select_none, _RV_SELECT_BG, fg=_RV_SELECT_FG,
+                 ).pack(side=tk.RIGHT, padx=6, pady=4)
+        _mat_btn(nav, "Select All", self._select_all, _RV_SELECT_BG, fg=_RV_SELECT_FG,
+                 ).pack(side=tk.RIGHT, padx=2, pady=4)
 
         # ── Scrollable canvas ─────────────────────────────────────────────
         container = tk.Frame(self, bg=_M_BG)
         container.pack(fill=tk.BOTH, expand=True)
         self._canvas_container = container   # saved for show/hide during inline panels
 
-        self._canvas = tk.Canvas(container, bg=_M_BG, highlightthickness=0)
+        self._canvas = tk.Canvas(container, bg=_M_BG, highlightthickness=0,
+                                yscrollincrement=1)   # 1-pixel granularity for smooth scroll
         scrollbar = ttk.Scrollbar(container, orient=tk.VERTICAL,
                                   command=self._canvas.yview)
         self._canvas.configure(yscrollcommand=scrollbar.set)
@@ -476,7 +540,7 @@ class ReportViewer(tk.Frame):
         self._canvas_container.bind("<MouseWheel>", self._on_mousewheel)
         self._inner_frame.bind("<MouseWheel>", self._on_mousewheel)
 
-        # Pre-create ALL checkbox vars so state persists across page changes
+        # Init solo vars; group vars are created lazily per page by _ensure_group_vars
         self._init_vars()
         # Render the first page
         self._render_page(0)
@@ -488,9 +552,38 @@ class ReportViewer(tk.Frame):
         except Exception:
             pass
 
+    def _get_placeholder(self, size: int, bg: str) -> "ImageTk.PhotoImage":
+        """Return a cached solid-colour placeholder image of the given pixel size.
+        Cached separately from _photo_refs so page changes don't destroy them."""
+        key = (size, bg)
+        ph = self._placeholder_cache.get(key)
+        if ph is not None:
+            return ph
+        if _PIL_AVAILABLE:
+            try:
+                r = int(bg[1:3], 16)
+                g = int(bg[3:5], 16)
+                b = int(bg[5:7], 16)
+            except Exception:
+                r, g, b = 240, 240, 240
+            img = PILImage.new("RGB", (size, size), (r, g, b))
+            ph = ImageTk.PhotoImage(img)
+        else:
+            ph = tk.PhotoImage(width=size, height=size)
+        self._placeholder_cache[key] = ph
+        return ph
+
+    def _create_checkbox_images(self):
+        """Create 22x22 checkbox images rendered at 4× for crisp anti-aliasing."""
+        if not _PIL_AVAILABLE:
+            self._cb_checked = self._cb_unchecked = None
+            return
+        self._cb_unchecked, self._cb_checked = _make_checkbox_pair(22)
+
     # ── group card ────────────────────────────────────────────────────────────
 
     def _build_group_card(self, idx: int, group: DuplicateGroup) -> None:
+        self._ensure_group_vars(idx)
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
         self._group_frames[idx] = outer
@@ -501,8 +594,8 @@ class ReportViewer(tk.Frame):
         n_trashed  = sum(1 for p in prev_paths if p in self._trashed_paths)
         # Only count previews whose checkbox is checked (the ones selected for trash)
         n_checked  = sum(
-            1 for img_idx, rec in enumerate(group.previews)
-            if self._image_vars.get((idx, "prev", img_idx), tk.BooleanVar(value=True)).get()
+            1 for img_idx in range(n_prev)
+            if (self._image_vars.get((idx, "prev", img_idx)) or _TRUE_STUB).get()
         )
         if n_trashed > 0 and n_trashed >= n_checked and n_checked > 0:
             apply_state = "full"    # all selected previews trashed
@@ -512,12 +605,8 @@ class ReportViewer(tk.Frame):
             apply_state = "none"
 
         # Card with left-colour border
-        # Priority: wrong > confirmed > applied (full) > default blue
-        status = self._group_status.get(idx, "")
-        if status == "wrong":
-            border_color = _M_ERROR
-        elif status == "confirmed":
-            border_color = _M_SUCCESS
+        if idx in self._fp_calib_groups:
+            border_color = _M_WARNING
         elif apply_state == "full":
             border_color = _M_SUCCESS
         elif apply_state == "partial":
@@ -526,10 +615,10 @@ class ReportViewer(tk.Frame):
             border_color = _M_PRIMARY
 
         card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_DIVIDER, highlightthickness=1)
+                             highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        left_border = tk.Frame(card_wrap, width=5, bg=border_color)
+        left_border = tk.Frame(card_wrap, width=4, bg=border_color)
         left_border.pack(side=tk.LEFT, fill=tk.Y)
         self._group_border_frames[idx] = left_border
 
@@ -541,10 +630,17 @@ class ReportViewer(tk.Frame):
         head.pack(fill=tk.X)
 
         g_var = self._group_vars[idx]  # pre-created by _init_vars; preserves state across pages
+        _cb_kw = {}
+        if self._cb_unchecked and self._cb_checked:
+            _cb_kw = dict(image=self._cb_unchecked, selectimage=self._cb_checked,
+                          indicatoron=False, bd=0, relief=tk.FLAT, selectcolor=_M_PRIMARY_TINT)
+        else:
+            _cb_kw = dict(selectcolor=_M_SUCCESS)
         tk.Checkbutton(
             head, variable=g_var, bg=_M_PRIMARY_TINT,
             command=lambda i=idx: self._on_group_toggle(i),
             activebackground=_M_PRIMARY_TINT,
+            **_cb_kw,
         ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
         n_orig = len(group.originals)
@@ -578,45 +674,19 @@ class ReportViewer(tk.Frame):
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
-        # User-review status badge (from Same Image / Wrong Group buttons)
-        if status == "confirmed":
-            tk.Label(
-                head, text=" ✓ Confirmed ",
-                font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS, fg="#FFFFFF",
-                padx=6, pady=2,
-            ).pack(side=tk.LEFT, padx=4)
-        elif status == "wrong":
-            tk.Label(
-                head, text=" ✗ Wrong Group ",
-                font=("Segoe UI", 8, "bold"), bg=_M_ERROR, fg="#FFFFFF",
-                padx=6, pady=2,
-            ).pack(side=tk.LEFT, padx=4)
+        # "In calibration" badge — always created, shown/hidden dynamically
+        calib_badge = tk.Label(head, text=" 📋 In calibration ",
+                               font=("Segoe UI", 8, "bold"), bg=_M_WARNING, fg="#FFFFFF",
+                               padx=6, pady=2)
+        if idx in self._fp_calib_groups:
+            calib_badge.pack(side=tk.LEFT, padx=4)
+        self._group_calib_badges[idx] = calib_badge
 
-        # Action buttons (right side of header)
-        btn_frame = tk.Frame(head, bg=_M_PRIMARY_TINT)
-        btn_frame.pack(side=tk.RIGHT, padx=8, pady=6)
-
-        _info_btn(btn_frame, "wrong_group", bg=_M_PRIMARY_TINT).pack(
-            side=tk.RIGHT, padx=0)
-        # When status is "wrong", show the button as active (solid error bg)
-        wrong_bg = _M_ERROR if status == "wrong" else _M_ERROR_TINT
-        wrong_fg = "#FFFFFF" if status == "wrong" else _M_ERROR
-        _mat_btn(
-            btn_frame, "✗  Wrong Group",
-            lambda i=idx: self._on_wrong_group(i),
-            bg=wrong_bg, fg=wrong_fg, font_size=8,
-        ).pack(side=tk.RIGHT, padx=4)
-
-        _info_btn(btn_frame, "same_image", bg=_M_PRIMARY_TINT).pack(
-            side=tk.RIGHT, padx=0)
-        # When status is "confirmed", show the button as active (solid success bg)
-        same_bg = _M_SUCCESS if status == "confirmed" else _M_SUCCESS_TINT
-        same_fg = "#FFFFFF" if status == "confirmed" else _M_SUCCESS
-        _mat_btn(
-            btn_frame, "✓  Same Image",
-            lambda i=idx: self._on_confirm_group(i),
-            bg=same_bg, fg=same_fg, font_size=8,
-        ).pack(side=tk.RIGHT, padx=4)
+        # Calibration toggle container — always created, populated by helper
+        calib_btn_frame = tk.Frame(head, bg=_M_PRIMARY_TINT)
+        calib_btn_frame.pack(side=tk.RIGHT, padx=8, pady=6)
+        self._group_calib_containers[idx] = calib_btn_frame
+        self._populate_calib_area(idx)
 
         # ── Body: originals | separator | previews ───────────────────────
         body = tk.Frame(card, bg=_M_SURFACE)
@@ -637,7 +707,7 @@ class ReportViewer(tk.Frame):
             key = (idx, "orig", img_idx)
             v = self._image_vars[key]  # pre-created by _init_vars
             tile = self._build_image_tile(orig_grid, rec, v, img_idx % 3, img_idx // 3,
-                                          bg=_M_SUCCESS_TINT, show_checkbox=False)
+                                          bg=_M_SUCCESS_TINT, show_checkbox=False, group_idx=idx)
 
         tk.Frame(body, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y)
 
@@ -668,7 +738,7 @@ class ReportViewer(tk.Frame):
             trashed = rec.path in self._trashed_paths
             tile_bg = "#E0E0E0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
-                                   bg=tile_bg, max_thumb=120, trashed=trashed)
+                                   bg=tile_bg, max_thumb=120, trashed=trashed, group_idx=idx)
 
     # ── solo & broken sections ────────────────────────────────────────────────
 
@@ -680,11 +750,10 @@ class ReportViewer(tk.Frame):
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_SOLO_BORDER, highlightthickness=1)
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg=_M_SOLO_BORDER).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=4, bg=_M_SOLO_BORDER).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -740,11 +809,10 @@ class ReportViewer(tk.Frame):
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_BROKEN_BDR, highlightthickness=1)
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg=_M_BROKEN_BDR).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=4, bg=_M_BROKEN_BDR).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -780,12 +848,14 @@ class ReportViewer(tk.Frame):
         max_thumb: int = _THUMB_SIZE,
         trashed: bool = False,
         show_checkbox: bool = True,
+        group_idx: int = -1,
     ) -> tk.Frame:
         tile = tk.Frame(parent, bg=bg, padx=4, pady=4)
         tile.grid(row=row, column=col, padx=4, pady=4, sticky=tk.NW)
 
-        # Thumbnail (grayscale when trashed)
-        thumb_lbl = tk.Label(tile, bg=bg)
+        # Thumbnail with placeholder image (fixed pixel size prevents layout reflow)
+        _placeholder = self._get_placeholder(max_thumb, bg)
+        thumb_lbl = tk.Label(tile, bg=bg, image=_placeholder)
         thumb_lbl.pack()
         self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed)
 
@@ -814,10 +884,22 @@ class ReportViewer(tk.Frame):
                 cb_frame = tk.Frame(tile, bg=bg)
                 cb_frame.pack(fill=tk.X)
 
+                _cb_kw = {}
+                if self._cb_unchecked and self._cb_checked:
+                    _cb_kw = dict(image=self._cb_unchecked, selectimage=self._cb_checked,
+                                  indicatoron=False, bd=0, relief=tk.FLAT, selectcolor=bg)
+                else:
+                    _cb_kw = dict(selectcolor=_M_SUCCESS)
+
+                def _on_image_cb(gi=group_idx):
+                    if gi >= 0:
+                        self._populate_calib_area(gi)
+
                 cb = tk.Checkbutton(
                     cb_frame, variable=var,
                     bg=bg, activebackground=bg,
-                    command=lambda lbl=None, v=var: self._update_tile_label(v, lbl),
+                    command=_on_image_cb,
+                    **_cb_kw,
                 )
                 cb.pack(side=tk.LEFT)
 
@@ -835,11 +917,17 @@ class ReportViewer(tk.Frame):
                     font=("Segoe UI", 8, "italic"), bg=bg, fg=_M_WARNING,
                 )
                 def _toggle_badge(*_):
+                    try:
+                        if not diff_badge.winfo_exists():
+                            return
+                    except Exception:
+                        return
                     if var.get():
                         diff_badge.pack_forget()
                     else:
                         diff_badge.pack(pady=(0, 2))
-                var.trace_add("write", _toggle_badge)
+                _tid = var.trace_add("write", _toggle_badge)
+                self._active_traces.append((var, _tid))
             else:
                 tk.Label(
                     tile, text=fname,
@@ -858,9 +946,6 @@ class ReportViewer(tk.Frame):
 
         return tile
 
-    def _update_tile_label(self, var: tk.BooleanVar, lbl) -> None:
-        pass  # handled by trace
-
     def _bind_tile_select(self, widget: tk.Widget, path: Path) -> None:
         """Recursively bind <Button-1> for manual-group selection, skipping Checkbutton."""
         if not isinstance(widget, tk.Checkbutton):
@@ -870,10 +955,50 @@ class ReportViewer(tk.Frame):
 
     def _load_thumbnail_async(self, path: Path, label: tk.Label, max_px: int,
                               grayscale: bool = False) -> None:
+        """Queue a thumbnail for deferred loading (batched after page renders)."""
+        self._pending_thumbs.append((path, label, max_px, grayscale))
+
+    def _flush_pending_thumbs(self) -> None:
+        """Spawn thumbnail-loading threads in staggered batches to avoid flooding."""
+        if not self._pending_thumbs:
+            return
+        batch_id = self._thumb_batch_id
+        pending = list(self._pending_thumbs)
+        self._pending_thumbs.clear()
+        self._drain_thumb_batch(pending, 0, batch_id)
+
+    _THUMB_BATCH = 12   # thumbnails to start loading per tick
+
+    def _drain_thumb_batch(self, items: list, offset: int, batch_id: int) -> None:
+        """Start the next slice of thumbnail threads, then schedule the rest."""
+        if batch_id != self._thumb_batch_id:
+            return  # page changed — cancel
+        end = min(offset + self._THUMB_BATCH, len(items))
+        for i in range(offset, end):
+            path, label, max_px, grayscale = items[i]
+            self._spawn_thumb_thread(path, label, max_px, grayscale, batch_id)
+        if end < len(items):
+            try:
+                self._canvas.after(16, lambda: self._drain_thumb_batch(items, end, batch_id))
+            except Exception:
+                pass
+
+    def _spawn_thumb_thread(self, path: Path, label: tk.Label, max_px: int,
+                            grayscale: bool, batch_id: int) -> None:
+        """Start a single thumbnail-loading thread."""
         def _load() -> None:
             if not _PIL_AVAILABLE:
                 return
+            if batch_id != self._thumb_batch_id:
+                return
+            try:
+                if not label.winfo_exists():
+                    return
+            except Exception:
+                return
             with _THUMB_SEMAPHORE:
+                if batch_id != self._thumb_batch_id:
+                    return
                 try:
                     with PILImage.open(path) as img:
                         img.thumbnail((max_px, max_px), PILImage.LANCZOS)
@@ -883,38 +1008,98 @@ class ReportViewer(tk.Frame):
                             img = img.convert("RGB")
                         photo = ImageTk.PhotoImage(img)
                         self._photo_refs.append(photo)
-                        label.after(0, lambda p=photo: label.configure(image=p))
+                        try:
+                            if label.winfo_exists():
+                                label.after(0, lambda p=photo: label.configure(image=p))
+                        except Exception:
+                            pass
                 except Exception:
-                    label.after(0, lambda: label.configure(
-                        text="[no preview]", fg=_M_TEXT3))
+                    try:
+                        if label.winfo_exists():
+                            label.after(0, lambda: label.configure(
+                                text="[no preview]", fg=_M_TEXT3))
+                    except Exception:
+                        pass
 
         threading.Thread(target=_load, daemon=True).start()
 
     # ── group confirmation ────────────────────────────────────────────────────
 
-    def _on_confirm_group(self, idx: int) -> None:
-        """Toggle 'Same Image' confirmation status for a group."""
-        current = self._group_status.get(idx, "")
-        new_status = "" if current == "confirmed" else "confirmed"
-        self._group_status[idx] = new_status
-        if new_status == "confirmed":
-            self._group_vars[idx].set(True)
-            self._on_group_toggle(idx)
-        self._refresh_page_keep_scroll()
+    def _group_has_deselected(self, idx: int) -> bool:
+        """Check if any preview image in the group is deselected."""
+        if idx >= len(self._groups):
+            return False
+        grp = self._groups[idx]
+        for img_idx in range(len(grp.previews)):
+            key = (idx, "prev", img_idx)
+            v = self._image_vars.get(key)
+            if v is not None and not v.get():
+                return True
+        return False
 
-    def _on_wrong_group(self, idx: int) -> None:
-        """Toggle 'Wrong Group' status for a group."""
-        current = self._group_status.get(idx, "")
-        new_status = "" if current == "wrong" else "wrong"
-        self._group_status[idx] = new_status
-        if new_status == "wrong":
-            self._group_vars[idx].set(False)
-            self._on_group_toggle(idx)
+    def _populate_calib_area(self, idx: int) -> None:
+        """Fill the calibration button container for a single group (no page redraw)."""
+        container = self._group_calib_containers.get(idx)
+        if container is None or not container.winfo_exists():
+            return
+        # Clear existing content
+        for w in container.winfo_children():
+            w.destroy()
+
+        has_deselected = self._group_has_deselected(idx)
+        if has_deselected or idx in self._fp_calib_groups:
+            if idx in self._fp_calib_groups:
+                _mat_btn(container, "✗  Remove from Calibration",
+                         lambda i=idx: self._toggle_fp_calib(i),
+                         bg=_M_WARNING, fg="#FFFFFF", font_size=8,
+                         ).pack(side=tk.RIGHT, padx=4)
+            else:
+                _mat_btn(container, "+  Add to Calibration",
+                         lambda i=idx: self._toggle_fp_calib(i),
+                         bg=_M_WARNING_TINT, fg=_M_WARNING, font_size=8,
+                         ).pack(side=tk.RIGHT, padx=4)
+
+    def _update_group_calib_area(self, idx: int) -> None:
+        """Update just the calibration button + badge + border colour for one group."""
+        self._populate_calib_area(idx)
+        # Toggle "In calibration" badge
+        badge = self._group_calib_badges.get(idx)
+        if badge is not None:
+            try:
+                if not badge.winfo_exists():
+                    badge = None
+            except Exception:
+                badge = None
+        if badge is not None:
+            if idx in self._fp_calib_groups:
+                if not badge.winfo_ismapped():
+                    badge.pack(side=tk.LEFT, padx=4)
+            else:
+                badge.pack_forget()
+        # Update left-border colour to reflect calibration state
+        border = self._group_border_frames.get(idx)
+        if border and border.winfo_exists():
+            if idx in self._fp_calib_groups:
+                border.configure(bg=_M_WARNING)
+            else:
+                border.configure(bg=_M_PRIMARY)
+
+    def _toggle_fp_calib(self, idx: int) -> None:
+        """Toggle a group's membership in the false-positive calibration set."""
+        if idx in self._fp_calib_groups:
+            self._fp_calib_groups.discard(idx)
         else:
-            # Un-marking as wrong: re-check the group and its images
-            self._group_vars[idx].set(True)
-            self._on_group_toggle(idx)
-        self._refresh_page_keep_scroll()
+            self._fp_calib_groups.add(idx)
+        self._update_fp_calib_btn()
+        self._update_group_calib_area(idx)
+
+    def _update_fp_calib_btn(self) -> None:
+        """Show/hide the 'Calibrate False Positives' button in nav bar."""
+        if self._fp_calib_groups:
+            if not self._fp_calib_btn.winfo_ismapped():
+                self._fp_calib_btn.pack(side=tk.LEFT, padx=(10, 0), pady=4)
+        else:
+            self._fp_calib_btn.pack_forget()
 
     def _refresh_page_keep_scroll(self) -> None:
         """Re-render the current page while preserving scroll position."""
@@ -929,33 +1114,46 @@ class ReportViewer(tk.Frame):
             v.set(True)
         for v in self._image_vars.values():
             v.set(True)
+        # Update calibration buttons for visible groups only
+        for idx in self._group_calib_containers:
+            self._populate_calib_area(idx)
 
     def _select_none(self) -> None:
         for v in self._group_vars.values():
             v.set(False)
         for v in self._image_vars.values():
             v.set(False)
+        # Update calibration buttons for visible groups only
+        for idx in self._group_calib_containers:
+            self._populate_calib_area(idx)
 
     def _on_group_toggle(self, group_idx: int) -> None:
         checked = self._group_vars[group_idx].get()
         for key, var in self._image_vars.items():
             if key[0] == group_idx:
                 var.set(checked)
+        # Update only the calibration button for this group (no full redraw)
+        self._update_group_calib_area(group_idx)
 
     # ── apply / revert ────────────────────────────────────────────────────────
 
     def _on_apply(self) -> None:
         """Collect checked-preview paths and move them to trash. Originals stay."""
-        # Collect only previews from checked groups whose per-image checkbox is also checked
+        # Collect only previews from checked groups whose per-image checkbox is also checked.
+        # Groups the user never viewed still have default state (all checked).
         paths_to_trash: list[Path] = []
-        for idx, g_var in self._group_vars.items():
-            if not g_var.get() or idx >= len(self._groups):
+        for idx, grp in enumerate(self._groups):
+            g_var = self._group_vars.get(idx)
+            # Uninitialized group → default is checked (include all previews)
+            if g_var is not None and not g_var.get():
                 continue
-            grp = self._groups[idx]
             for img_idx, rec in enumerate(grp.previews):
                 key = (idx, "prev", img_idx)
-                if self._image_vars.get(key, tk.BooleanVar(value=True)).get():
-                    paths_to_trash.append(rec.path)
+                v = self._image_vars.get(key)
+                # Uninitialized image var → default is checked
+                if v is not None and not v.get():
+                    continue
+                paths_to_trash.append(rec.path)
 
         if not paths_to_trash:
             self._show_results_panel(0, 0, [],
@@ -1027,9 +1225,9 @@ class ReportViewer(tk.Frame):
                                  trashed_paths=list(newly_trashed))
 
     def _show_revert_buttons(self) -> None:
-        """Reveal the revert buttons in the action bar (idempotent)."""
+        """Reveal the revert buttons in the header bar (idempotent)."""
         if hasattr(self, "_revert_frame") and not self._revert_frame.winfo_ismapped():
-            self._revert_frame.pack(side=tk.LEFT, padx=(0, 4))
+            self._revert_frame.pack(side=tk.RIGHT, padx=(0, 4), pady=8)
 
     def _show_results_panel(
         self,
@@ -1053,7 +1251,7 @@ class ReportViewer(tk.Frame):
 
         # ── Back bar ──────────────────────────────────────────────────────
         back_bar = tk.Frame(self._results_frame, bg=_M_SURFACE,
-                            highlightbackground=_M_DIVIDER, highlightthickness=1)
+                            highlightthickness=0)
         back_bar.pack(fill=tk.X)
         _mat_btn(back_bar, "◀  Back to Review", self._restore_review,
                  "#455A64").pack(side=tk.LEFT, padx=10, pady=6)
@@ -1070,7 +1268,7 @@ class ReportViewer(tk.Frame):
         card_wrap.pack(fill=tk.X, padx=30, pady=24)
 
         card = tk.Frame(card_wrap, bg=_M_SURFACE,
-                        highlightbackground=_M_DIVIDER, highlightthickness=1,
+                        highlightthickness=0,
                         padx=24, pady=20)
         card.pack(fill=tk.X)
 
@@ -1230,7 +1428,7 @@ class ReportViewer(tk.Frame):
         # Re-show Move Duplicates button
         try:
             if not self._apply_btn.winfo_ismapped():
-                self._apply_btn.pack(side=tk.LEFT, padx=(12, 4), before=self._revert_frame)
+                self._apply_btn.pack(side=tk.RIGHT, padx=(4, 12), pady=8)
             self._apply_btn.configure(state=tk.NORMAL)
         except Exception:
             pass
@@ -1294,13 +1492,13 @@ class ReportViewer(tk.Frame):
                 skipped_paths:   list[Path] = []
                 for img_idx, rec in enumerate(grp.originals):
                     key = (idx, "orig", img_idx)
-                    if self._image_vars.get(key, tk.BooleanVar(value=True)).get():
+                    if self._image_vars.get(key, _TRUE_STUB).get():
                         confirmed_paths.append(rec.path)
                     else:
                         skipped_paths.append(rec.path)
                 for img_idx, rec in enumerate(grp.previews):
                     key = (idx, "prev", img_idx)
-                    if self._image_vars.get(key, tk.BooleanVar(value=True)).get():
+                    if self._image_vars.get(key, _TRUE_STUB).get():
                         confirmed_paths.append(rec.path)
                     else:
                         skipped_paths.append(rec.path)
@@ -1321,7 +1519,7 @@ class ReportViewer(tk.Frame):
                     _link(rec.path, ndir / rec.path.name)
 
         for gi, paths in enumerate(self._manual_calib_groups):
-            if not self._manual_group_vars.get(gi, tk.BooleanVar(value=True)).get():
+            if not self._manual_group_vars.get(gi, _TRUE_STUB).get():
                 continue
             if len(paths) < 2:
                 continue
@@ -1373,7 +1571,7 @@ class ReportViewer(tk.Frame):
 
         # Back bar
         back_bar = tk.Frame(self._calib_inline_frame, bg=_M_SURFACE,
-                            highlightbackground=_M_DIVIDER, highlightthickness=1)
+                            highlightthickness=0)
         back_bar.pack(fill=tk.X)
         _mat_btn(back_bar, "◀  Back to Review", self._restore_review,
                  "#455A64").pack(side=tk.LEFT, padx=10, pady=6)
@@ -1391,6 +1589,199 @@ class ReportViewer(tk.Frame):
         )
         panel.pack(fill=tk.BOTH, expand=True)
 
+    # ── false-positive calibration popup ────────────────────────────────────
+
+    def _run_fp_calibration(self) -> None:
+        """Open false-positive calibration popup."""
+        if not self._fp_calib_groups:
+            return
+
+        win = tk.Toplevel(self)
+        win.title("Calibrate False Positives")
+        win.geometry("500x400")
+        win.resizable(False, False)
+        win.configure(bg=_M_BG)
+        win.transient(self.winfo_toplevel())
+        win.grab_set()
+
+        # Summary
+        n_groups = len(self._fp_calib_groups)
+        n_fp = 0
+        for idx in self._fp_calib_groups:
+            grp = self._groups[idx]
+            for img_idx in range(len(grp.previews)):
+                key = (idx, "prev", img_idx)
+                if not self._image_vars.get(key, _TRUE_STUB).get():
+                    n_fp += 1
+
+        tk.Label(win, text="False-Positive Calibration",
+                 font=("Segoe UI", 14, "bold"), bg=_M_BG, fg=_M_TEXT1,
+                 ).pack(padx=20, pady=(20, 4))
+        tk.Label(win, text=f"{n_groups} group{'s' if n_groups != 1 else ''}  \u00b7  {n_fp} false-positive image{'s' if n_fp != 1 else ''}",
+                 font=("Segoe UI", 9), bg=_M_BG, fg=_M_TEXT2,
+                 ).pack(padx=20, pady=(0, 16))
+
+        tk.Frame(win, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=20)
+
+        # Description
+        tk.Label(win, text=(
+            "This will compute pHash distances between false-positive images\n"
+            "and the originals, then suggest a tighter threshold that avoids\n"
+            "these wrong matches.\n\n"
+            "Selected images = correctly matched duplicates\n"
+            "Deselected images = false positives (not real duplicates)"
+        ), font=("Segoe UI", 9), bg=_M_BG, fg=_M_TEXT2,
+                 justify=tk.LEFT, anchor=tk.W,
+                 ).pack(padx=20, pady=16, anchor=tk.W)
+
+        # Progress area
+        progress_frame = tk.Frame(win, bg=_M_BG)
+        progress_frame.pack(fill=tk.X, padx=20, pady=(0, 8))
+        progress_var = tk.DoubleVar(value=0)
+        progress_bar = ttk.Progressbar(progress_frame, variable=progress_var, maximum=100)
+        progress_bar.pack(fill=tk.X, pady=4)
+        progress_lbl = tk.Label(progress_frame, text="Ready", bg=_M_BG, fg=_M_TEXT2,
+                                font=("Segoe UI", 9))
+        progress_lbl.pack()
+
+        # Result area (hidden until calibration done)
+        result_frame = tk.Frame(win, bg=_M_BG)
+
+        # Buttons
+        btn_frame = tk.Frame(win, bg=_M_BG)
+        btn_frame.pack(side=tk.BOTTOM, fill=tk.X, padx=20, pady=16)
+
+        cancel_btn = _mat_btn(btn_frame, "Cancel", win.destroy, "#455A64")
+        cancel_btn.pack(side=tk.RIGHT, padx=4)
+
+        interrupted = [False]
+
+        def _do_calibrate():
+            # Disable start, show interrupt
+            start_btn.pack_forget()
+            cancel_btn.pack_forget()
+            interrupt_btn = _mat_btn(btn_frame, "Interrupt", lambda: interrupted.__setitem__(0, True), _M_ERROR)
+            interrupt_btn.pack(side=tk.RIGHT, padx=4)
+
+            current_threshold = self._settings.threshold if self._settings else 2
+
+            def _worker():
+                fp_distances = []
+                total_pairs = 0
+
+                # Count total work
+                for idx in self._fp_calib_groups:
+                    grp = self._groups[idx]
+                    n_orig = len(grp.originals)
+                    n_fp_in_grp = sum(
+                        1 for i in range(len(grp.previews))
+                        if not self._image_vars.get((idx, "prev", i), _TRUE_STUB).get()
+                    )
+                    total_pairs += n_orig * n_fp_in_grp
+
+                if total_pairs == 0:
+                    self.after(0, lambda: _show_result(win, result_frame, progress_lbl, btn_frame,
+                                                        None, current_threshold, interrupted))
+                    return
+
+                done = 0
+                for idx in self._fp_calib_groups:
+                    if interrupted[0]:
+                        break
+                    grp = self._groups[idx]
+                    for img_idx, rec in enumerate(grp.previews):
+                        if interrupted[0]:
+                            break
+                        key = (idx, "prev", img_idx)
+                        if self._image_vars.get(key, _TRUE_STUB).get():
+                            continue  # This is a correctly matched image, skip
+                        # This is a false positive — compute distance to originals
+                        for orig in grp.originals:
+                            if interrupted[0]:
+                                break
+                            try:
+                                dist = rec.phash - orig.phash
+                                fp_distances.append(dist)
+                            except Exception:
+                                pass
+                            done += 1
+                            pct = done / max(total_pairs, 1) * 100
+                            self.after(0, lambda p=pct, d=done, t=total_pairs:
+                                       _update_progress(progress_var, progress_lbl, p, d, t))
+
+                if interrupted[0]:
+                    self.after(0, lambda: _on_interrupted(win, progress_lbl, btn_frame))
+                    return
+
+                min_fp = min(fp_distances) if fp_distances else None
+                self.after(0, lambda: _show_result(win, result_frame, progress_lbl, btn_frame,
+                                                    min_fp, current_threshold, interrupted))
+
+            threading.Thread(target=_worker, daemon=True).start()
+
+        def _update_progress(pvar, plbl, pct, done, total):
+            pvar.set(pct)
+            plbl.configure(text=f"Computing distances... {done}/{total} pairs")
+
+        def _on_interrupted(w, plbl, bf):
+            plbl.configure(text="Calibration interrupted \u2014 no changes applied.")
+            for child in bf.winfo_children():
+                child.destroy()
+            _mat_btn(bf, "Close", w.destroy, "#455A64").pack(side=tk.RIGHT, padx=4)
+
+        def _show_result(w, rf, plbl, bf, min_fp_dist, current_thr, interrupted_flag):
+            progress_var.set(100)
+
+            for child in bf.winfo_children():
+                child.destroy()
+
+            rf.pack(fill=tk.X, padx=20, pady=8)
+
+            if min_fp_dist is None:
+                plbl.configure(text="No false-positive pairs found.")
+                tk.Label(rf, text="Could not compute distances. Check that groups have originals.",
+                         font=("Segoe UI", 9), bg=_M_BG, fg=_M_TEXT2).pack(anchor=tk.W)
+                _mat_btn(bf, "Close", w.destroy, "#455A64").pack(side=tk.RIGHT, padx=4)
+                return
+
+            suggested = max(1, min_fp_dist - 1)
+            plbl.configure(text="Calibration complete.")
+
+            tk.Label(rf, text=f"Minimum false-positive pHash distance:  {min_fp_dist}",
+                     font=("Segoe UI", 10, "bold"), bg=_M_BG, fg=_M_TEXT1).pack(anchor=tk.W, pady=2)
+            tk.Label(rf, text=f"Current threshold:  {current_thr}",
+                     font=("Segoe UI", 9), bg=_M_BG, fg=_M_TEXT2).pack(anchor=tk.W)
+
+            if suggested < current_thr:
+                tk.Label(rf, text=f"Recommended threshold:  {suggested}",
+                         font=("Segoe UI", 10, "bold"), bg=_M_BG, fg=_M_SUCCESS).pack(anchor=tk.W, pady=4)
+                tk.Label(rf, text="Lowering the threshold will prevent these false-positive matches.",
+                         font=("Segoe UI", 9), bg=_M_BG, fg=_M_TEXT2).pack(anchor=tk.W)
+
+                def _apply_and_close():
+                    if self._settings:
+                        self._settings.threshold = suggested
+                        try:
+                            from pathlib import Path as _P
+                            from config import save_settings
+                            save_settings(self._settings, _P(__file__).parent / "settings.json")
+                        except Exception:
+                            pass
+                    self._fp_calib_groups.clear()
+                    self._update_fp_calib_btn()
+                    w.destroy()
+                    self._refresh_page_keep_scroll()
+
+                _mat_btn(bf, "Apply & Close", _apply_and_close, _RV_BTN_SUCCESS).pack(side=tk.RIGHT, padx=4)
+            else:
+                tk.Label(rf, text="Current threshold is already optimal for these images.",
+                         font=("Segoe UI", 10, "bold"), bg=_M_BG, fg=_M_PRIMARY).pack(anchor=tk.W, pady=4)
+
+            _mat_btn(bf, "Close", w.destroy, "#455A64").pack(side=tk.RIGHT, padx=4)
+
+        start_btn = _mat_btn(btn_frame, "Start Calibration", _do_calibrate, _RV_BTN_PRIMARY)
+        start_btn.pack(side=tk.RIGHT, padx=4)
+
     # ── manual calibration groups section ────────────────────────────────────
 
     def _build_manual_group_card(self, mg_idx: int) -> None:
@@ -1399,11 +1790,10 @@ class ReportViewer(tk.Frame):
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_MANUAL, highlightthickness=1)
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg=_M_MANUAL).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=4, bg=_M_MANUAL).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -1416,9 +1806,16 @@ class ReportViewer(tk.Frame):
             g_var = tk.BooleanVar(value=True)
             self._manual_group_vars[mg_idx] = g_var
 
+        _mcb_kw = {}
+        if self._cb_unchecked and self._cb_checked:
+            _mcb_kw = dict(image=self._cb_unchecked, selectimage=self._cb_checked,
+                           indicatoron=False, bd=0, relief=tk.FLAT, selectcolor=_M_MANUAL_TINT)
+        else:
+            _mcb_kw = dict(selectcolor=_M_SUCCESS)
         tk.Checkbutton(
             head, variable=g_var, bg=_M_MANUAL_TINT,
             activebackground=_M_MANUAL_TINT,
+            **_mcb_kw,
         ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
         tk.Label(
@@ -1458,7 +1855,8 @@ class ReportViewer(tk.Frame):
             else:
                 tile = tk.Frame(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
                 tile.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
-                lbl = tk.Label(tile, bg=_M_MANUAL_TINT)
+                lbl = tk.Label(tile, bg=_M_MANUAL_TINT,
+                              image=self._get_placeholder(_THUMB_SIZE, _M_MANUAL_TINT))
                 lbl.pack()
                 self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
                 tk.Label(
@@ -1548,11 +1946,10 @@ class ReportViewer(tk.Frame):
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_WARNING, highlightthickness=1)
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg=_M_WARNING).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=4, bg=_M_WARNING).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -1577,7 +1974,8 @@ class ReportViewer(tk.Frame):
             cell = tk.Frame(grid_frame, bg=_M_WARNING_TINT, padx=4, pady=4)
             cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
 
-            lbl = tk.Label(cell, bg=_M_WARNING_TINT)
+            lbl = tk.Label(cell, bg=_M_WARNING_TINT,
+                          image=self._get_placeholder(_THUMB_SIZE, _M_WARNING_TINT))
             lbl.pack()
             self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
 
@@ -1767,11 +2165,10 @@ class ReportViewer(tk.Frame):
         outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightbackground=_M_ERROR, highlightthickness=1)
+        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=5, bg=_M_ERROR).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(card_wrap, width=4, bg=_M_ERROR).pack(side=tk.LEFT, fill=tk.Y)
         card = tk.Frame(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -1799,7 +2196,8 @@ class ReportViewer(tk.Frame):
             cell = tk.Frame(grid_frame, bg=_M_ERROR_TINT, padx=4, pady=4)
             cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
 
-            thumb_lbl = tk.Label(cell, bg=_M_ERROR_TINT)
+            thumb_lbl = tk.Label(cell, bg=_M_ERROR_TINT,
+                                image=self._get_placeholder(_THUMB_SIZE, _M_ERROR_TINT))
             thumb_lbl.pack()
             self._load_thumbnail_async(trash_path if trash_path.exists() else path,
                                        thumb_lbl, _THUMB_SIZE, grayscale=True)
@@ -1826,23 +2224,23 @@ class ReportViewer(tk.Frame):
     # ── var initialisation (runs once, preserves state across page changes) ──────
 
     def _init_vars(self) -> None:
-        """Pre-create every BooleanVar for all groups and solo images."""
-        for idx, grp in enumerate(self._groups):
-            if idx not in self._group_vars:
-                self._group_vars[idx] = tk.BooleanVar(value=True)
-            if idx not in self._group_status:
-                self._group_status[idx] = ""
-            for img_idx in range(len(grp.originals)):
-                key = (idx, "orig", img_idx)
-                if key not in self._image_vars:
-                    self._image_vars[key] = tk.BooleanVar(value=True)
-            for img_idx in range(len(grp.previews)):
-                key = (idx, "prev", img_idx)
-                if key not in self._image_vars:
-                    self._image_vars[key] = tk.BooleanVar(value=True)
+        """Pre-create BooleanVars for solo images only.
+        Group/image vars are created lazily by _ensure_group_vars()."""
         for img_idx in range(len(self._solo_originals)):
             if img_idx not in self._solo_vars:
                 self._solo_vars[img_idx] = tk.BooleanVar(value=False)
+
+    def _ensure_group_vars(self, idx: int) -> None:
+        """Lazily create BooleanVars for a single group (idempotent)."""
+        if idx in self._group_vars:
+            return  # already initialised
+        grp = self._groups[idx]
+        self._group_vars[idx] = tk.BooleanVar(value=True)
+        self._group_status[idx] = ""
+        for img_idx in range(len(grp.originals)):
+            self._image_vars[(idx, "orig", img_idx)] = tk.BooleanVar(value=True)
+        for img_idx in range(len(grp.previews)):
+            self._image_vars[(idx, "prev", img_idx)] = tk.BooleanVar(value=True)
 
     def _reinit_manual_vars(self) -> None:
         """Rebuild per-manual-group BooleanVars after the group list changes."""
@@ -1883,16 +2281,30 @@ class ReportViewer(tk.Frame):
 
     def _render_page(self, page: int) -> None:
         """Destroy current page widgets and build the requested page."""
+        # Cancel pending thumbnails
+        self._thumb_batch_id += 1
+        self._pending_thumbs.clear()
+
+        # Remove accumulated var traces from previous page (prevents leaks)
+        for var, tid in self._active_traces:
+            try:
+                var.trace_remove("write", tid)
+            except Exception:
+                pass
+        self._active_traces.clear()
+        # Clear photo refs from previous page to free memory
+        self._photo_refs.clear()
         # Clear old widgets and per-page widget refs
         for widget in self._inner_frame.winfo_children():
             widget.destroy()
         self._group_border_frames.clear()
+        self._group_calib_containers.clear()
+        self._group_calib_badges.clear()
         self._manual_trash_tile_frames.clear()
 
         self._current_page = max(0, min(page, self._total_pages() - 1))
 
         if self._is_unique_page(self._current_page):
-            # ── Dedicated Unique Images page ──────────────────────────────
             self._build_solo_section()
         else:
             if not self._groups:
@@ -1907,7 +2319,9 @@ class ReportViewer(tk.Frame):
                     self._build_group_card(idx, self._groups[idx])
 
             # Manual groups / broken shown on last duplicate-groups page
-            last_dup_page = self._unique_page_index() - 1 if self._solo_originals else self._total_pages() - 1
+            last_dup_page = (self._unique_page_index() - 1
+                             if self._solo_originals
+                             else self._total_pages() - 1)
             if self._current_page >= last_dup_page:
                 self._build_manual_duplicates_section()
                 for mg_idx in range(len(self._manual_calib_groups)):
@@ -1916,11 +2330,13 @@ class ReportViewer(tk.Frame):
                 if self._broken_files:
                     self._build_broken_section()
 
+        # Finalise: set scroll region, scroll to top, bind mousewheel
+        self._canvas.configure(scrollregion=self._canvas.bbox("all") or (0, 0, 0, 0))
         self._canvas.yview_moveto(0)
         self._update_page_nav()
-        # Re-bind mousewheel on all freshly rendered widgets so scroll works
-        # everywhere without relying on bind_all (which affects global mouse input).
-        self._canvas.after(10, lambda: self._bind_mousewheel_recursive(self._inner_frame))
+        self._bind_mousewheel_recursive(self._inner_frame)
+        # Load thumbnails after the layout is stable
+        self._flush_pending_thumbs()
 
     def _update_page_nav(self) -> None:
         total  = self._total_pages()
@@ -1989,25 +2405,30 @@ class ReportViewer(tk.Frame):
     # ── scroll helpers ────────────────────────────────────────────────────────
 
     def _bind_mousewheel_recursive(self, widget: tk.Widget) -> None:
-        """Bind mousewheel scroll to widget and all its descendants (non-interactive only)."""
-        try:
-            # Skip widgets that need their own scroll (Combobox, Scale, Scrollbar)
-            if not isinstance(widget, (ttk.Scrollbar, ttk.Scale, ttk.Combobox)):
-                widget.bind("<MouseWheel>", self._on_mousewheel)
-        except Exception:
-            pass
-        for child in widget.winfo_children():
-            self._bind_mousewheel_recursive(child)
-
-    def _scroll(self, delta: int) -> None:
-        self._canvas.yview_scroll(delta, "units")
+        """Bind mousewheel scroll to widget and all descendants (iterative, non-blocking)."""
+        _skip = (ttk.Scrollbar, ttk.Scale, ttk.Combobox)
+        stack = [widget]
+        handler = self._on_mousewheel
+        while stack:
+            w = stack.pop()
+            try:
+                if not isinstance(w, _skip):
+                    w.bind("<MouseWheel>", handler)
+                stack.extend(w.winfo_children())
+            except Exception:
+                pass
 
     def _on_mousewheel(self, event: tk.Event) -> None:
-        delta = int(-1 * (event.delta / 120))
-        self._canvas.yview_scroll(delta, "units")
+        # yscrollincrement=1 → each unit = 1 pixel; scroll ~100 px per notch
+        px = int(-1 * (event.delta / 120) * 100)
+        self._canvas.yview_scroll(px, "units")
 
     def _on_frame_configure(self, _event=None) -> None:
-        self._canvas.configure(scrollregion=self._canvas.bbox("all"))
+        # Update scrollregion only when the frame actually changed size
+        # (placeholder images keep layout stable so this rarely fires after initial render)
+        bbox = self._canvas.bbox("all")
+        if bbox:
+            self._canvas.configure(scrollregion=bbox)
 
     def _on_canvas_configure(self, event: tk.Event) -> None:
         self._canvas.itemconfig(self._canvas_window, width=event.width)

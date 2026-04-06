@@ -247,6 +247,83 @@ def delete_results(output_folder: Path) -> None:
             pass
 
 
+# ── Custom (Compare Scan) results persistence ────────────────────────────────
+
+def custom_results_path(output_folder: Path) -> Path:
+    """Canonical path for the completed Compare Scan results file."""
+    return output_folder / "custom_scan_results.json"
+
+
+def save_custom_results(
+    groups: list,
+    broken_files: list,
+    total_main: int,
+    total_check: int,
+    output_folder: Path,
+    main_folder: str = "",
+    check_folder: str = "",
+    dry_run: bool = True,
+    report_html: str = "",
+) -> None:
+    """Persist completed Compare Scan results so they can be restored after app restart."""
+    path = custom_results_path(output_folder)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version":       RESULTS_VERSION,
+            "main_folder":   main_folder,
+            "check_folder":  check_folder,
+            "out_folder":    str(output_folder),
+            "total_main":    total_main,
+            "total_check":   total_check,
+            "dry_run":       dry_run,
+            "report_html":   report_html,
+            "groups":        [serialize_group(g) for g in groups],
+            "broken_files":  [str(p) for p in broken_files],
+        }
+        path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+    except Exception as exc:
+        import sys
+        print(f"[scan_state] Warning: could not save custom results: {exc}", file=sys.stderr)
+
+
+def load_custom_results(output_folder: Path) -> "Optional[dict]":
+    """Load persisted Compare Scan results. Returns None if missing or corrupt."""
+    path = custom_results_path(output_folder)
+    if not path.exists():
+        return None
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if data.get("version") != RESULTS_VERSION:
+            return None
+        return {
+            "main_folder":  data.get("main_folder", ""),
+            "check_folder": data.get("check_folder", ""),
+            "out_folder":   data.get("out_folder", str(output_folder)),
+            "total_main":   data.get("total_main", 0),
+            "total_check":  data.get("total_check", 0),
+            "dry_run":      data.get("dry_run", True),
+            "report_html":  data.get("report_html", ""),
+            "groups":       [deserialize_group(g) for g in data.get("groups", [])],
+            "broken_files": [Path(p) for p in data.get("broken_files", [])],
+        }
+    except Exception:
+        return None
+
+
+def delete_custom_results(output_folder: Path) -> None:
+    """Delete the custom results file."""
+    p = custom_results_path(output_folder)
+    if p.exists():
+        try:
+            p.unlink()
+        except Exception:
+            pass
+
+
 # ── ImageRecord <-> dict serialization ──────────────────────────────────────
 
 def serialize_record(rec) -> dict:

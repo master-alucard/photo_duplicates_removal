@@ -343,6 +343,59 @@ def _mat_disable(btn: tk.Button) -> None:
     btn.configure(state=tk.DISABLED, bg=_MAT_DISABLED, fg=_M_DISABLED_FG, cursor="")
 
 
+# ── Custom ttk checkbox images ───────────────────────────────────────────────
+
+# Module-level references to keep checkbox images alive (prevent GC)
+_ttk_cb_refs: list = []
+
+
+def _create_ttk_checkbox_images():
+    """Create 16×16 crisp checkbox images for ttk.Checkbutton indicator.
+
+    Returns (unchecked_PhotoImage, checked_PhotoImage) or None on failure.
+    Images are rendered at 4× resolution and downscaled with LANCZOS.
+    """
+    try:
+        from PIL import ImageDraw
+        size = 16
+        S = size * 4          # supersample at 4×
+        r = int(S * 0.16)     # corner radius
+
+        # Unchecked — grey outline, white fill
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle(
+            [3, 3, S - 4, S - 4], radius=r,
+            outline="#B0B0B0", width=max(3, S // 12), fill="#FFFFFF",
+        )
+        unchecked = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+
+        # Checked — green fill, white ✓
+        img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
+        d = ImageDraw.Draw(img)
+        d.rounded_rectangle(
+            [3, 3, S - 4, S - 4], radius=r,
+            fill=_M_SUCCESS, outline="#1B5E20", width=max(2, S // 16),
+        )
+        lw = max(4, S // 8)
+        pts = [
+            (int(S * 0.22), int(S * 0.52)),
+            (int(S * 0.40), int(S * 0.72)),
+            (int(S * 0.78), int(S * 0.24)),
+        ]
+        d.line(pts, fill="white", width=lw, joint="curve")
+        hr = lw // 2
+        for px, py in (pts[0], pts[-1]):
+            d.ellipse([px - hr, py - hr, px + hr, py + hr], fill="white")
+        checked = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+
+        # Keep references alive
+        _ttk_cb_refs.extend([unchecked, checked])
+        return unchecked, checked
+    except Exception:
+        return None
+
+
 # ── Material Design 3 ttk style configuration ─────────────────────────────────
 
 def _configure_material_style(style: ttk.Style) -> None:
@@ -376,31 +429,41 @@ def _configure_material_style(style: ttk.Style) -> None:
     style.configure("Caption.TLabel", font=_font_sm,
                     foreground=_M_TEXT2, background=_BG)
 
-    # ── LabelFrame (Material card container) ─────────────────────────────
+    # ── LabelFrame (clean card container — no border) ──────────────────
     style.configure("TLabelframe", background=_CARD_BG,
-                    borderwidth=1, relief="solid",
-                    bordercolor=_M_DIVIDER)
+                    borderwidth=0, relief="flat")
     style.configure("TLabelframe.Label", font=_font_bold,
                     foreground=_ACCENT, background=_CARD_BG)
 
     # ── Buttons ──────────────────────────────────────────────────────────
     style.configure("TButton", font=_font_bold, padding=[12, 5],
                     background=_M3_SURFACE2, foreground=_M_TEXT1,
-                    borderwidth=1, relief="solid", bordercolor=_M_DIVIDER)
+                    borderwidth=0, relief="flat")
     style.map("TButton",
               background=[("active", _M3_SURFACE3), ("pressed", _M3_SURFACE3),
                           ("disabled", _BG)],
-              foreground=[("disabled", _MAT_DISABLED)],
-              bordercolor=[("disabled", _M_DIVIDER)])
+              foreground=[("disabled", _MAT_DISABLED)])
 
-    # ── Checkbuttons ─────────────────────────────────────────────────────
+    # ── Checkbuttons (custom image indicator: green ✓ / empty box) ──────
+    _cb_imgs = _create_ttk_checkbox_images()
+    if _cb_imgs:
+        _cb_unchecked, _cb_checked = _cb_imgs
+        style.element_create(
+            "custom_cb_indicator", "image", _cb_unchecked,
+            ("selected", _cb_checked),
+            sticky="",
+        )
+        style.layout("TCheckbutton", [
+            ("Checkbutton.padding", {"children": [
+                ("custom_cb_indicator", {"side": "left", "sticky": ""}),
+                ("Checkbutton.label", {"sticky": "nswe"}),
+            ], "sticky": "nswe"}),
+        ])
     style.configure("TCheckbutton", font=_font, background=_CARD_BG,
-                    foreground=_M_TEXT1, indicatorsize=16)
+                    foreground=_M_TEXT1)
     style.map("TCheckbutton",
               background=[("active", _CARD_BG)],
-              foreground=[("disabled", _MAT_DISABLED)],
-              indicatorcolor=[("selected", _ACCENT),
-                              ("!selected", _M_DIVIDER)])
+              foreground=[("disabled", _MAT_DISABLED)])
 
     # ── Radiobuttons ─────────────────────────────────────────────────────
     style.configure("TRadiobutton", font=_font, background=_CARD_BG,
@@ -413,13 +476,13 @@ def _configure_material_style(style: ttk.Style) -> None:
 
     # ── Entry ────────────────────────────────────────────────────────────
     style.configure("TEntry", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
-                    borderwidth=1, padding=[6, 4],
+                    borderwidth=0, padding=[6, 4],
                     selectbackground=_ACCENT, selectforeground="white")
     style.map("TEntry",
               fieldbackground=[("readonly", _M3_SURFACE1),
                                ("disabled", _M3_SURFACE1)],
               foreground=[("disabled", _MAT_DISABLED)],
-              bordercolor=[("focus", _ACCENT), ("!focus", _M_DIVIDER)])
+              bordercolor=[("focus", _ACCENT), ("!focus", _M3_SURFACE3)])
 
     # ── Combobox ─────────────────────────────────────────────────────────
     style.configure("TCombobox", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
@@ -460,7 +523,7 @@ def _configure_material_style(style: ttk.Style) -> None:
                     rowheight=26, borderwidth=0)
     style.configure("Treeview.Heading", font=_font_bold,
                     background=_M3_SURFACE2, foreground=_M_TEXT1,
-                    borderwidth=1, relief="flat")
+                    borderwidth=0, relief="flat")
     style.map("Treeview",
               background=[("selected", _ACCENT_TINT)],
               foreground=[("selected", _ACCENT)])
@@ -684,6 +747,7 @@ class App:
         self._check_resume_state()
         self._check_custom_resume_state()
         self._check_last_results()
+        self._check_custom_last_results()
         self._schedule_estimate_update()
         self._heartbeat_tick()
 
@@ -1111,8 +1175,7 @@ class App:
 
         # Success card (hidden until scan completes; contents rebuilt dynamically)
         self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
-                                           highlightbackground=_M3_SURFACE3,
-                                           highlightthickness=1)
+                                           highlightthickness=0)
 
         # Action buttons row (separate so _on_done can enable/disable each independently)
         self._results_btn_row = tk.Frame(sf, bg=_BG)
@@ -1632,7 +1695,7 @@ class App:
         # ── Developer ─────────────────────────────────────────────────────
         dev_sec = _section(body, "Developer")
         dev_card = tk.Frame(dev_sec, bg=_M_DEV_BG, padx=12, pady=10,
-                            highlightbackground=_M_DEV_BORDER, highlightthickness=1)
+                            highlightthickness=0)
         dev_card.pack(fill=tk.X)
         tk.Label(dev_card, text="🛠  Developer Mode",
                  font=("Segoe UI", 9, "bold"),
@@ -1890,7 +1953,7 @@ class App:
         # Stats card (rebuilt dynamically after each scan)
         self._custom_results_info_card = tk.Frame(
             sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
-            highlightbackground=_M_DIVIDER, highlightthickness=1,
+            highlightthickness=0,
         )
 
         # Action buttons row
@@ -2489,8 +2552,21 @@ class App:
             self._custom_report_path = report
 
             # Clean up any paused state file on successful completion
-            from scan_state import delete_custom_state
+            from scan_state import delete_custom_state, save_custom_results
             delete_custom_state(out_path)
+
+            # Persist results for restore on next launch / back-to-results
+            save_custom_results(
+                groups=combined_groups,
+                broken_files=main_failed + check_failed,
+                total_main=len(main_records),
+                total_check=len(check_records),
+                output_folder=out_path,
+                main_folder=str(main_path),
+                check_folder=str(check_path),
+                dry_run=settings.dry_run,
+                report_html=str(report) if report else "",
+            )
 
             dry = settings.dry_run
             msg = (
@@ -3175,6 +3251,7 @@ class App:
         self._check_resume_state()
         self._check_custom_resume_state()
         self._check_last_results()
+        self._check_custom_last_results()
         self._schedule_estimate_update()
         self._heartbeat_tick()
 
@@ -3596,6 +3673,42 @@ class App:
         self._phase_label_var.set(
             f"Previous scan ({ts})  ·  {n_groups} groups, {n_prev} duplicates.  "
             "Switch to Results tab to review."
+        )
+
+    def _check_custom_last_results(self) -> None:
+        """Restore Compare Scan results from the previous session."""
+        out = self.settings.custom_out_folder.strip()
+        if not out:
+            return
+        from scan_state import load_custom_results
+        result = load_custom_results(Path(out))
+        if result is None:
+            return
+
+        self._custom_groups = result["groups"]
+        self._custom_broken = result["broken_files"]
+
+        n_groups = len(self._custom_groups)
+        n_dups   = sum(len(g.previews) for g in self._custom_groups)
+        n_main   = result.get("total_main", 0)
+        n_check  = result.get("total_check", 0)
+        dry_run  = result.get("dry_run", True)
+        src      = result.get("main_folder", "")
+
+        html = result.get("report_html", "")
+        if html and Path(html).exists():
+            self._custom_report_path = Path(html)
+
+        _mat_enable(self._cr_inapp_btn)
+        _mat_enable(self._cr_browser_btn)
+        if dry_run and self._custom_groups:
+            _mat_enable(self._cr_accept_btn)
+
+        self._update_custom_results_ui(n_main, n_check, n_groups, n_dups, dry_run, src)
+        self._show_custom_results_in_tab()
+        self._custom_phase_label.set(
+            f"Previous Compare Scan  ·  {n_groups} groups, {n_dups} duplicates.  "
+            "Switch to Compare Scan tab to review."
         )
 
     # ── scan control ──────────────────────────────────────────────────────

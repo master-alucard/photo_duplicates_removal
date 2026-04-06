@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.1.0"
+APP_VERSION   = "1.1.1"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
@@ -167,8 +167,7 @@ def _section(parent, title: str) -> tk.Frame:
     outer = tk.Frame(parent, bg=_BG)
     outer.pack(fill=tk.X, padx=20, pady=(0, 12))
 
-    card = tk.Frame(outer, bg=_SURFACE,
-                    highlightbackground=_DIVIDER, highlightthickness=1)
+    card = tk.Frame(outer, bg=_SURFACE, highlightthickness=0)
     card.pack(fill=tk.X)
 
     tk.Frame(card, width=4, bg=_PRIMARY).pack(side=tk.LEFT, fill=tk.Y)
@@ -266,8 +265,7 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
     id_outer = tk.Frame(inner, bg=_BG)
     id_outer.pack(fill=tk.X, padx=20, pady=(0, 12))
 
-    id_card = tk.Frame(id_outer, bg=_HERO_BG,
-                       highlightbackground=_HERO_BG, highlightthickness=1)
+    id_card = tk.Frame(id_outer, bg=_HERO_BG, highlightthickness=0)
     id_card.pack(fill=tk.X)
 
     id_body = tk.Frame(id_card, bg=_HERO_BG, padx=24, pady=18)

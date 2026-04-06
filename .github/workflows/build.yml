@@ -106,25 +106,23 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🌙 Night Mode
-            - **Dark theme** — full Material Design 3 dark palette with live toggle in Settings. No restart required — theme switches instantly.
+            ### 🖥️ Results Page Overhaul
+            - **Optimized group select/deselect** — targeted calibration button updates instead of full page redraws; no more freezing.
+            - **Smoother page loading** — lazy variable initialization, deferred thumbnail batching, placeholder images prevent layout reflow.
+            - **Crisp custom checkboxes** — 4× supersampled rendering with LANCZOS downscaling; green ✓ replaces the old X indicator across the entire app.
+            - **Swapped nav bar layout** — "Groups per page" label and dropdown positions swapped for better UX.
+            - **Scroll fix** — eliminated visual glitches (overlapping ghost cards) during scrolling.
 
-            ### 🖥️ User Experience
-            - **Material Design 3 styling** — unified colour tokens, clam ttk theme, comprehensive styling across all tabs and dialogs.
-            - **Same Image / Wrong Group buttons** — proper toggle with status badges, button state feedback, border colours, and scroll-position preservation.
-            - **Groups per page** — your preferred page size (default 100) is now saved and restored on next launch.
-            - **Improved pause/resume** — multi-threaded pause fix, Compare Scan pause/resume, sleep/hibernate handling.
-
-            ### ⚡ Performance
-            - **Scan speed slider** — quick-mode quality/speed trade-off (1–10).
-            - **ETA improvements** — blended estimates, phase details, and future phase floor for more accurate remaining time.
+            ### 🔧 Under the Hood
+            - **Compare Scan results persistence** — completed Compare Scan results are now saved/restored across app restarts.
+            - **Trace leak prevention** — `trace_add` callbacks are tracked and cleaned up on page change.
+            - **Lazy BooleanVar creation** — per-group vars created on-demand instead of thousands upfront.
 
             ### 🐛 Bug fixes
-            - Fixed button text becoming unreadable after disable/enable cycles.
-            - Fixed slider recommended band too bright in dark mode.
-            - Fixed About hero card and report viewer header too bright in dark mode.
-            - Fixed Prev/Next button contrast in both themes.
-            - Synced installer version with app version.
+            - Fixed app freezing when toggling group selection on results page.
+            - Fixed pixelated checkbox rendering in report viewer and settings.
+            - Fixed cards rendering on top of each other during scroll.
+            - Fixed ttk Checkbutton showing X instead of ✓ in all app checkboxes.
 
             ---
 

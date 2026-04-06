@@ -372,8 +372,7 @@ class _LibraryTabController:
         hdr_outer = tk.Frame(f, bg=_BG)
         hdr_outer.pack(fill=tk.X, padx=20, pady=(16, 0))
 
-        hdr_card = tk.Frame(hdr_outer, bg=_SURFACE,
-                            highlightbackground=_DIVIDER, highlightthickness=1)
+        hdr_card = tk.Frame(hdr_outer, bg=_SURFACE, highlightthickness=0)
         hdr_card.pack(fill=tk.X)
 
         tk.Frame(hdr_card, width=4, bg=_ACCENT).pack(side=tk.LEFT, fill=tk.Y)
@@ -395,8 +394,7 @@ class _LibraryTabController:
         tb_outer = tk.Frame(f, bg=_BG)
         tb_outer.pack(fill=tk.X, padx=20, pady=(12, 0))
 
-        tb = tk.Frame(tb_outer, bg=_SURFACE,
-                      highlightbackground=_DIVIDER, highlightthickness=1)
+        tb = tk.Frame(tb_outer, bg=_SURFACE, highlightthickness=0)
         tb.pack(fill=tk.X)
         tb_inner = tk.Frame(tb, bg=_SURFACE, padx=10, pady=8)
         tb_inner.pack(fill=tk.X)
@@ -433,8 +431,7 @@ class _LibraryTabController:
         tree_outer = tk.Frame(f, bg=_BG)
         tree_outer.pack(fill=tk.BOTH, expand=True, padx=20, pady=(10, 0))
 
-        tree_card = tk.Frame(tree_outer, bg=_SURFACE,
-                             highlightbackground=_DIVIDER, highlightthickness=1)
+        tree_card = tk.Frame(tree_outer, bg=_SURFACE, highlightthickness=0)
         tree_card.pack(fill=tk.BOTH, expand=True)
 
         cols = ("status", "type", "files", "updated")
