@@ -11,21 +11,21 @@ from __future__ import annotations
 LIGHT = {
     "ACCENT":        "#1565C0",
     "ACCENT_DARK":   "#0D47A1",
-    "ACCENT_TINT":   "#E8EFF9",
-    "BG":            "#F2F4F7",
+    "ACCENT_TINT":   "#EBF2FA",
+    "BG":            "#FFFFFF",
     "CARD_BG":       "#FFFFFF",
     "SUCCESS":       "#2E7D32",
     "ERROR":         "#C62828",
     "WARNING":       "#E65100",
     "AMBER":         "#F57F17",
-    "DIVIDER":       "#DDE1E6",
-    "TEXT1":         "#1B1B1F",
-    "TEXT2":         "#49454F",
-    "TEXT3":         "#79747E",
+    "DIVIDER":       "#E5E7EB",
+    "TEXT1":         "#1A1A1A",
+    "TEXT2":         "#555555",
+    "TEXT3":         "#888888",
     "DISABLED":      "#C4C7C5",
-    "SURFACE1":      "#F7F8FA",
-    "SURFACE2":      "#ECEEF2",
-    "SURFACE3":      "#E2E5EA",
+    "SURFACE1":      "#FAFAFA",
+    "SURFACE2":      "#F5F5F5",
+    "SURFACE3":      "#EEEEEE",
     "ON_PRIMARY":    "#FFFFFF",
     # button backgrounds (saturated, always works with white text)
     "BTN_PRIMARY":   "#1565C0",
@@ -34,37 +34,37 @@ LIGHT = {
     "BTN_WARNING":   "#E65100",
     "BTN_SECONDARY": "#546E7A",
     # semantic aliases used by sub-modules
-    "PRIMARY_TINT":  "#E8EFF9",
-    "SUCCESS_TINT":  "#E8F5E9",
-    "ERROR_TINT":    "#FFEBEE",
-    "WARNING_TINT":  "#FFF3E0",
+    "PRIMARY_TINT":  "#EBF2FA",
+    "SUCCESS_TINT":  "#F0F8F0",
+    "ERROR_TINT":    "#FFF5F5",
+    "WARNING_TINT":  "#FFF8F0",
     # caption / hint text
     "HINT":          "#666666",
     "HINT2":         "#555555",
     "HINT3":         "#888888",
     "HINT4":         "#999999",
-    "HINT5":         "#9E9E9E",
+    "HINT5":         "#AAAAAA",
     # header
     "HEADER_BG":       "#1565C0",
     "HEADER_SUBTITLE": "#B3D4F0",
     # banner colours
-    "INFO_BG":       "#E8F5E9",
+    "INFO_BG":       "#F0F8F0",
     "INFO_FG":       "#1B5E20",
     "INFO_BORDER":   "#2E7D32",
     # developer card
-    "DEV_BG":        "#FFF8E1",
+    "DEV_BG":        "#FFFCF0",
     "DEV_BORDER":    "#FFD54F",
     "DEV_TITLE_FG":  "#E65100",
     "DEV_BODY_FG":   "#795548",
     # misc
-    "DETAIL_BG":     "#f4f4f4",
+    "DETAIL_BG":     "#FAFAFA",
     "PURPLE":        "#7c3aed",
     "NOT_INSTALLED": "#e03030",
     # disabled button text
-    "DISABLED_FG":   "#838387",
+    "DISABLED_FG":   "#AAAAAA",
     # slider canvas
-    "SLIDER_REC_BAND": "#c8e6c9",   # green recommended zone
-    "SLIDER_TRACK":    "#bdbdbd",   # track line
+    "SLIDER_REC_BAND": "#DEF0DE",   # green recommended zone
+    "SLIDER_TRACK":    "#D0D0D0",   # track line
     "SLIDER_THUMB":    "#1565C0",   # thumb knob fill
     "SLIDER_THUMB_OL": "#FFFFFF",   # thumb outline
     # about hero card
@@ -73,7 +73,7 @@ LIGHT = {
     "HERO_VERSION_FG": "#BBDEFB",   # version text
     "HERO_SUBTLE_FG":  "#90CAF9",   # copyright / email
     "HERO_BTN_BG":     "#0D47A1",   # hero action buttons
-    "PRIVACY_BG":      "#FAFAFA",   # privacy policy text widget
+    "PRIVACY_BG":      "#FFFFFF",   # privacy policy text widget
     # report viewer
     "RV_REVERT_BG":    "#455A64",   # revert buttons
     "RV_CALIB_BG":     "#5C6BC0",   # calibrate button

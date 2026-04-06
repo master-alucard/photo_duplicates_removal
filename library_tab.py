@@ -30,21 +30,21 @@ from library import (
 
 # ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
-_BG          = "#F2F4F7"
+_BG          = "#FFFFFF"
 _SURFACE     = "#FFFFFF"
 _ACCENT      = "#1565C0"
 _ACCENT_DARK = "#0D47A1"
-_ACCENT_TINT = "#E8EFF9"
+_ACCENT_TINT = "#EBF2FA"
 _SUCCESS     = "#2E7D32"
-_SUCCESS_BG  = "#E8F5E9"
+_SUCCESS_BG  = "#F0F8F0"
 _ERROR       = "#C62828"
-_ERROR_BG    = "#FFEBEE"
+_ERROR_BG    = "#FFF5F5"
 _WARNING     = "#E65100"
-_WARNING_BG  = "#FFF3E0"
-_DIVIDER     = "#DDE1E6"
-_TEXT1       = "#1B1B1F"
-_TEXT2       = "#49454F"
-_TEXT3       = "#79747E"
+_WARNING_BG  = "#FFF8F0"
+_DIVIDER     = "#E5E7EB"
+_TEXT1       = "#1A1A1A"
+_TEXT2       = "#555555"
+_TEXT3       = "#888888"
 _DISABLED    = "#C4C7C5"
 
 

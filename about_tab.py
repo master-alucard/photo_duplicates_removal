@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.1.2"
+APP_VERSION   = "1.1.3"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
@@ -32,26 +32,26 @@ RELEASES_API  = "https://api.github.com/repos/master-alucard/photo_duplicates_re
 
 # ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
-_BG          = "#F2F4F7"
+_BG          = "#FFFFFF"
 _SURFACE     = "#FFFFFF"
 _PRIMARY     = "#1565C0"
-_PRIMARY_TINT= "#E8EFF9"
+_PRIMARY_TINT= "#EBF2FA"
 _SUCCESS     = "#2E7D32"
-_SUCCESS_TINT= "#E8F5E9"
+_SUCCESS_TINT= "#F0F8F0"
 _ERROR       = "#C62828"
-_ERROR_TINT  = "#FFEBEE"
+_ERROR_TINT  = "#FFF5F5"
 _WARNING     = "#E65100"
-_DIVIDER     = "#DDE1E6"
-_TEXT1       = "#1B1B1F"
-_TEXT2       = "#49454F"
-_TEXT3       = "#79747E"
-_SURFACE2    = "#ECEEF2"
+_DIVIDER     = "#E5E7EB"
+_TEXT1       = "#1A1A1A"
+_TEXT2       = "#555555"
+_TEXT3       = "#888888"
+_SURFACE2    = "#F5F5F5"
 _HERO_BG     = "#1565C0"
 _HERO_NAME   = "#FFFFFF"
 _HERO_VER    = "#BBDEFB"
 _HERO_SUB    = "#90CAF9"
 _HERO_BTN    = "#0D47A1"
-_PRIVACY_BG  = "#FAFAFA"
+_PRIVACY_BG  = "#FFFFFF"
 _BTN_PRIMARY = "#1565C0"
 
 

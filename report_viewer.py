@@ -87,29 +87,29 @@ def _make_checkbox_pair(
 
 # ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
 
-_M_BG           = "#F2F4F7"
+_M_BG           = "#FFFFFF"
 _M_SURFACE      = "#FFFFFF"
 _M_PRIMARY      = "#1565C0"
 _M_PRIMARY_DARK = "#0D47A1"
-_M_PRIMARY_TINT = "#E8EFF9"
+_M_PRIMARY_TINT = "#EBF2FA"
 _M_SUCCESS      = "#2E7D32"
-_M_SUCCESS_TINT = "#E8F5E9"
+_M_SUCCESS_TINT = "#F0F8F0"
 _M_ERROR        = "#C62828"
-_M_ERROR_TINT   = "#FFEBEE"
+_M_ERROR_TINT   = "#FFF5F5"
 _M_WARNING      = "#E65100"
-_M_WARNING_TINT = "#FFF3E0"
+_M_WARNING_TINT = "#FFF8F0"
 _M_PURPLE       = "#6A1B9A"
-_M_DIVIDER      = "#DDE1E6"
-_M_TEXT1        = "#1B1B1F"
-_M_TEXT2        = "#49454F"
-_M_TEXT3        = "#79747E"
-_M_SOLO_TINT    = "#E1F5FE"
+_M_DIVIDER      = "#E5E7EB"
+_M_TEXT1        = "#1A1A1A"
+_M_TEXT2        = "#555555"
+_M_TEXT3        = "#888888"
+_M_SOLO_TINT    = "#F0F8FF"
 _M_SOLO_BORDER  = "#0288D1"
-_M_BROKEN_TINT  = "#FCE4EC"
+_M_BROKEN_TINT  = "#FFF5F5"
 _M_BROKEN_BDR   = "#AD1457"
 _M_MANUAL      = "#5C6BC0"
-_M_MANUAL_TINT = "#E8EAF6"
-_M_MANUAL_HDR  = "#EDE7F6"
+_M_MANUAL_TINT = "#F0F0FA"
+_M_MANUAL_HDR  = "#F5F0FA"
 _M_MANUAL_DARK = "#4527A0"
 
 
@@ -155,13 +155,13 @@ def _apply_theme(dark: bool = False) -> None:
         _M_MANUAL_DARK  = "#B39DDB"   # Deep Purple 200
     else:
         _M_PURPLE       = "#6A1B9A"
-        _M_SOLO_TINT    = "#E1F5FE"
+        _M_SOLO_TINT    = "#F0F8FF"
         _M_SOLO_BORDER  = "#0288D1"
-        _M_BROKEN_TINT  = "#FCE4EC"
+        _M_BROKEN_TINT  = "#FFF5F5"
         _M_BROKEN_BDR   = "#AD1457"
         _M_MANUAL       = "#5C6BC0"
-        _M_MANUAL_TINT  = "#E8EAF6"
-        _M_MANUAL_HDR   = "#EDE7F6"
+        _M_MANUAL_TINT  = "#F0F0FA"
+        _M_MANUAL_HDR   = "#F5F0FA"
         _M_MANUAL_DARK  = "#4527A0"
     _RV_REVERT_BG    = p["RV_REVERT_BG"]
     _RV_CALIB_BG     = p["RV_CALIB_BG"]
@@ -712,7 +712,7 @@ class ReportViewer(tk.Frame):
         tk.Frame(body, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y)
 
         # Previews column — label and tile state change after apply
-        prev_col_bg = "#EEEEEE" if apply_state == "full" else _M_ERROR_TINT
+        prev_col_bg = "#F5F5F5" if apply_state == "full" else _M_ERROR_TINT
         prev_col = tk.Frame(body, bg=prev_col_bg, padx=10, pady=8)
         prev_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
@@ -736,7 +736,7 @@ class ReportViewer(tk.Frame):
             key = (idx, "prev", img_idx)
             v = self._image_vars[key]  # pre-created by _init_vars
             trashed = rec.path in self._trashed_paths
-            tile_bg = "#E0E0E0" if trashed else prev_col_bg
+            tile_bg = "#F0F0F0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
                                    bg=tile_bg, max_thumb=120, trashed=trashed, group_idx=idx)
 

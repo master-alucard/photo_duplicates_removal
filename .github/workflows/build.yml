@@ -106,19 +106,12 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🐛 Bug Fixes
-            - **Fixed missing groups at end of page** — groups near the bottom of a results page (e.g. groups 293–300) were clipped because the canvas scrollregion was set before tkinter finalized widget geometry. Added `update_idletasks()` before bbox calculation and a 200ms safety re-check.
-            - **Fixed Select None data loss** — "Select None" previously only deselected groups on visited pages; unvisited groups remained checked, causing files to be trashed unexpectedly on apply. Now initialises vars for all groups before toggling.
-            - **Fixed thumbnail race condition** — label could be destroyed between `winfo_exists()` check and the `after()` configure callback. The callback now guards with its own `winfo_exists()` check.
-            - **Fixed FP calibration crash** — out-of-bounds group index in `_fp_calib_groups` could cause `IndexError`. Added bounds checks in all three calibration loops.
-            - **Fixed double-click revert crash** — rapidly clicking a revert button could trigger `ValueError` from `list.remove()`. Added guard check.
-
-            ### ⚡ Performance
-            - **O(n×m) → O(n+m) in unique images page** — per-tile list comprehension for trashed-item lookup replaced with a pre-computed set.
-            - **Resilient group rendering** — one corrupted group no longer prevents remaining groups on the page from rendering (try/except per card).
-
-            ### 🧪 Testing
-            - **58 new automated tests** — comprehensive coverage for pagination, lazy variable init, Select All/None with unvisited pages, group card rendering, scrollregion safety, page navigation, group toggle, trace cleanup, thumbnail batching, placeholder cache, checkbox images, solo section, and widget cleanup.
+            ### 🎨 Clean White Light Theme
+            - **White backgrounds** — replaced all gray backgrounds (`#F2F4F7`, `#ECEEF2`, `#E2E5EA`) with clean white across the entire app: main window, tabs, report viewer, about page, library tab.
+            - **Subtler tints** — originals (soft green), previews (soft red), solo (soft blue), and manual sections use very light pastel tints instead of heavy colored backgrounds.
+            - **Better text contrast** — darker text colors (`#1A1A1A`, `#555555`) on white for clear readability. No more invisible text on gray.
+            - **Minimalistic surfaces** — tab bar, buttons, scrollbars, treeview headers all use lighter grays (`#F5F5F5`, `#EEEEEE`) instead of the old muddy tones.
+            - **Cleaner dividers** — lighter `#E5E7EB` dividers that separate without dominating.
 
             ---
 
