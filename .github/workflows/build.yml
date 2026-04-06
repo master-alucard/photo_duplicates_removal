@@ -106,28 +106,25 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🚀 Performance
-            - **BK-tree duplicate detection** — scanning 100,000+ files is now practical. The comparison phase is O(n log n) instead of O(n²), reducing runtime from hours to minutes on large collections.
+            ### 🌙 Night Mode
+            - **Dark theme** — full Material Design 3 dark palette with live toggle in Settings. No restart required — theme switches instantly.
 
             ### 🖥️ User Experience
-            - **Scan Complete screen** — after every scan a summary card shows: files scanned, duplicate groups, duplicates found, space that can be freed, safe originals count, and groups needing manual review.
-            - **No auto-open** — the detailed report viewer now opens only when you click *View Report*, so you can read the summary first.
-            - **Sleep prevention** — the PC is prevented from sleeping while a scan is running and is released automatically when the scan finishes.
+            - **Material Design 3 styling** — unified colour tokens, clam ttk theme, comprehensive styling across all tabs and dialogs.
+            - **Same Image / Wrong Group buttons** — proper toggle with status badges, button state feedback, border colours, and scroll-position preservation.
+            - **Groups per page** — your preferred page size (default 100) is now saved and restored on next launch.
+            - **Improved pause/resume** — multi-threaded pause fix, Compare Scan pause/resume, sleep/hibernate handling.
 
-            ### 🛠 Developer / Quality
-            - **Developer Mode** toggle in Settings — friendly error messages for normal users; full technical details and stack traces when Developer Mode is on.
-            - **Centralised error handling** — all errors and warnings go through a single module with consistent, readable messages.
-            - **32 automated tests** covering config defaults, UI structure, action buttons, scanner smoke tests, mover, and error handler behaviour.
-
-            ### 📁 Project structure
-            - Installer scripts (`installer.iss`, `install.bat`, `run.bat`) moved to `installer/` folder for a cleaner repository layout.
+            ### ⚡ Performance
+            - **Scan speed slider** — quick-mode quality/speed trade-off (1–10).
+            - **ETA improvements** — blended estimates, phase details, and future phase floor for more accurate remaining time.
 
             ### 🐛 Bug fixes
-            - Fixed app crash on startup (`pack()` returns `None` in tkinter — `.bind()` can no longer be chained on it).
-            - HTML report for very large scans (> 500 groups) no longer embeds thumbnails that would make the file gigabytes in size; an in-app note explains how to use the viewer instead.
-            - Fixed duplicate "Revert Selected / Revert All" buttons appearing twice after moving duplicates.
-            - App icon now correctly shows in the Windows taskbar and on desktop/Start Menu shortcuts.
-            - Renamed **Custom Scan** tab to **Compare Scan** for clarity.
+            - Fixed button text becoming unreadable after disable/enable cycles.
+            - Fixed slider recommended band too bright in dark mode.
+            - Fixed About hero card and report viewer header too bright in dark mode.
+            - Fixed Prev/Next button contrast in both themes.
+            - Synced installer version with app version.
 
             ---
 
