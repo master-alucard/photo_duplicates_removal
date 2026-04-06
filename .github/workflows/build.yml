@@ -106,23 +106,19 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🖥️ Results Page Overhaul
-            - **Optimized group select/deselect** — targeted calibration button updates instead of full page redraws; no more freezing.
-            - **Smoother page loading** — lazy variable initialization, deferred thumbnail batching, placeholder images prevent layout reflow.
-            - **Crisp custom checkboxes** — 4× supersampled rendering with LANCZOS downscaling; green ✓ replaces the old X indicator across the entire app.
-            - **Swapped nav bar layout** — "Groups per page" label and dropdown positions swapped for better UX.
-            - **Scroll fix** — eliminated visual glitches (overlapping ghost cards) during scrolling.
+            ### 🐛 Bug Fixes
+            - **Fixed missing groups at end of page** — groups near the bottom of a results page (e.g. groups 293–300) were clipped because the canvas scrollregion was set before tkinter finalized widget geometry. Added `update_idletasks()` before bbox calculation and a 200ms safety re-check.
+            - **Fixed Select None data loss** — "Select None" previously only deselected groups on visited pages; unvisited groups remained checked, causing files to be trashed unexpectedly on apply. Now initialises vars for all groups before toggling.
+            - **Fixed thumbnail race condition** — label could be destroyed between `winfo_exists()` check and the `after()` configure callback. The callback now guards with its own `winfo_exists()` check.
+            - **Fixed FP calibration crash** — out-of-bounds group index in `_fp_calib_groups` could cause `IndexError`. Added bounds checks in all three calibration loops.
+            - **Fixed double-click revert crash** — rapidly clicking a revert button could trigger `ValueError` from `list.remove()`. Added guard check.
 
-            ### 🔧 Under the Hood
-            - **Compare Scan results persistence** — completed Compare Scan results are now saved/restored across app restarts.
-            - **Trace leak prevention** — `trace_add` callbacks are tracked and cleaned up on page change.
-            - **Lazy BooleanVar creation** — per-group vars created on-demand instead of thousands upfront.
+            ### ⚡ Performance
+            - **O(n×m) → O(n+m) in unique images page** — per-tile list comprehension for trashed-item lookup replaced with a pre-computed set.
+            - **Resilient group rendering** — one corrupted group no longer prevents remaining groups on the page from rendering (try/except per card).
 
-            ### 🐛 Bug fixes
-            - Fixed app freezing when toggling group selection on results page.
-            - Fixed pixelated checkbox rendering in report viewer and settings.
-            - Fixed cards rendering on top of each other during scroll.
-            - Fixed ttk Checkbutton showing X instead of ✓ in all app checkboxes.
+            ### 🧪 Testing
+            - **58 new automated tests** — comprehensive coverage for pagination, lazy variable init, Select All/None with unvisited pages, group card rendering, scrollregion safety, page navigation, group toggle, trace cleanup, thumbnail batching, placeholder cache, checkbox images, solo section, and widget cleanup.
 
             ---
 

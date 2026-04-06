@@ -787,6 +787,7 @@ class ReportViewer(tk.Frame):
         self._solo_visible_paths = []
         col = 0
         row = 0
+        _trashed_originals = {item["original"] for item in self._manual_trashed_items}
         for img_idx, rec in enumerate(self._solo_originals):
             if rec.path in self._manual_used_paths:
                 continue
@@ -794,7 +795,7 @@ class ReportViewer(tk.Frame):
             v = self._solo_vars[img_idx]
             tile = self._build_image_tile(grid_frame, rec, v, col, row, bg=_M_SOLO_TINT)
             self._manual_tile_frames[rec.path] = tile
-            if rec.path not in [item["original"] for item in self._manual_trashed_items]:
+            if rec.path not in _trashed_originals:
                 self._manual_trash_tile_frames[rec.path] = tile
                 self._bind_trash_select(tile, rec.path)
             col += 1
@@ -1010,14 +1011,25 @@ class ReportViewer(tk.Frame):
                         self._photo_refs.append(photo)
                         try:
                             if label.winfo_exists():
-                                label.after(0, lambda p=photo: label.configure(image=p))
+                                def _set_img(p=photo, lbl=label):
+                                    try:
+                                        if lbl.winfo_exists():
+                                            lbl.configure(image=p)
+                                    except Exception:
+                                        pass
+                                label.after(0, _set_img)
                         except Exception:
                             pass
                 except Exception:
                     try:
                         if label.winfo_exists():
-                            label.after(0, lambda: label.configure(
-                                text="[no preview]", fg=_M_TEXT3))
+                            def _set_err(lbl=label):
+                                try:
+                                    if lbl.winfo_exists():
+                                        lbl.configure(text="[no preview]", fg=_M_TEXT3)
+                                except Exception:
+                                    pass
+                            label.after(0, _set_err)
                     except Exception:
                         pass
 
@@ -1110,21 +1122,27 @@ class ReportViewer(tk.Frame):
     # ── selection helpers ─────────────────────────────────────────────────────
 
     def _select_all(self) -> None:
+        # Ensure vars exist for ALL groups (not just visited pages)
+        for idx in range(len(self._groups)):
+            self._ensure_group_vars(idx)
         for v in self._group_vars.values():
             v.set(True)
         for v in self._image_vars.values():
             v.set(True)
         # Update calibration buttons for visible groups only
-        for idx in self._group_calib_containers:
+        for idx in list(self._group_calib_containers):
             self._populate_calib_area(idx)
 
     def _select_none(self) -> None:
+        # Ensure vars exist for ALL groups (not just visited pages)
+        for idx in range(len(self._groups)):
+            self._ensure_group_vars(idx)
         for v in self._group_vars.values():
             v.set(False)
         for v in self._image_vars.values():
             v.set(False)
         # Update calibration buttons for visible groups only
-        for idx in self._group_calib_containers:
+        for idx in list(self._group_calib_containers):
             self._populate_calib_area(idx)
 
     def _on_group_toggle(self, group_idx: int) -> None:
@@ -1608,6 +1626,8 @@ class ReportViewer(tk.Frame):
         n_groups = len(self._fp_calib_groups)
         n_fp = 0
         for idx in self._fp_calib_groups:
+            if idx >= len(self._groups):
+                continue
             grp = self._groups[idx]
             for img_idx in range(len(grp.previews)):
                 key = (idx, "prev", img_idx)
@@ -1671,6 +1691,8 @@ class ReportViewer(tk.Frame):
 
                 # Count total work
                 for idx in self._fp_calib_groups:
+                    if idx >= len(self._groups):
+                        continue
                     grp = self._groups[idx]
                     n_orig = len(grp.originals)
                     n_fp_in_grp = sum(
@@ -1688,6 +1710,8 @@ class ReportViewer(tk.Frame):
                 for idx in self._fp_calib_groups:
                     if interrupted[0]:
                         break
+                    if idx >= len(self._groups):
+                        continue
                     grp = self._groups[idx]
                     for img_idx, rec in enumerate(grp.previews):
                         if interrupted[0]:
@@ -2145,7 +2169,8 @@ class ReportViewer(tk.Frame):
         try:
             original.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(trash_path), str(original))
-            self._manual_trashed_items.remove(item)
+            if item in self._manual_trashed_items:
+                self._manual_trashed_items.remove(item)
             self._trashed_paths.discard(original)
             self._status_lbl.configure(text=f"Reverted: {original.name}")
             self._render_page(self._current_page)
@@ -2316,7 +2341,11 @@ class ReportViewer(tk.Frame):
                 start = self._current_page * self._page_size
                 end   = min(start + self._page_size, len(self._groups))
                 for idx in range(start, end):
-                    self._build_group_card(idx, self._groups[idx])
+                    try:
+                        self._build_group_card(idx, self._groups[idx])
+                    except Exception:
+                        import traceback
+                        traceback.print_exc()
 
             # Manual groups / broken shown on last duplicate-groups page
             last_dup_page = (self._unique_page_index() - 1
@@ -2330,11 +2359,16 @@ class ReportViewer(tk.Frame):
                 if self._broken_files:
                     self._build_broken_section()
 
-        # Finalise: set scroll region, scroll to top, bind mousewheel
+        # Finalise: force geometry calculation so bbox covers all packed widgets,
+        # then set scroll region, scroll to top, bind mousewheel
+        self._inner_frame.update_idletasks()
         self._canvas.configure(scrollregion=self._canvas.bbox("all") or (0, 0, 0, 0))
         self._canvas.yview_moveto(0)
         self._update_page_nav()
         self._bind_mousewheel_recursive(self._inner_frame)
+        # Safety net: re-check scrollregion after a brief delay in case
+        # late geometry events change the frame size (e.g. thumbnail loading)
+        self._canvas.after(200, self._on_frame_configure)
         # Load thumbnails after the layout is stable
         self._flush_pending_thumbs()
 
