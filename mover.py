@@ -101,6 +101,7 @@ def move_groups(
 
     _by_date = settings and getattr(settings, "organize_by_date", False)
     _date_fmt = getattr(settings, "date_folder_format", "%Y-%m") if settings else "%Y-%m"
+    _in_place = settings and getattr(settings, "organize_in_place", False)
 
     def _dest_dir(base: Path, file_path: Path) -> Path:
         if _by_date:
@@ -110,6 +111,8 @@ def move_groups(
                 d.mkdir(parents=True, exist_ok=True)
             return d
         return base
+
+    moved_originals = 0
 
     for group in groups:
         # Ambiguous groups are flagged for manual review — never move their files
@@ -151,6 +154,48 @@ def move_groups(
                 op["status"] = "dry_run"
                 moved_previews += 1
             operations.append(op)
+
+        # Organize originals when organize_by_date is enabled
+        if _by_date:
+            for original in group.originals:
+                if not original.path.exists():
+                    continue
+                if _in_place:
+                    # Organize in original folder — move into date subfolder
+                    # relative to where the file currently lives
+                    src_dir = original.path.parent
+                    sub = _date_subfolder(original.path, _date_fmt)
+                    dest_dir = src_dir / sub
+                else:
+                    # Move originals to output/results folder with date subfolders
+                    results_dir = output_folder / "results"
+                    sub = _date_subfolder(original.path, _date_fmt)
+                    dest_dir = results_dir / sub
+
+                dest = _unique_path(dest_dir / original.path.name)
+                # Skip if already in the correct folder
+                if dest.parent == original.path.parent:
+                    continue
+                op = {
+                    "group_id": group_id,
+                    "type": "original",
+                    "from": str(original.path),
+                    "to": str(dest),
+                }
+                if not dry_run:
+                    try:
+                        dest_dir.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(original.path), str(dest))
+                        original.path = dest
+                        moved_originals += 1
+                        op["status"] = "moved"
+                    except Exception as exc:
+                        op["status"] = f"error: {exc}"
+                        error_count += 1
+                else:
+                    op["status"] = "dry_run"
+                    moved_originals += 1
+                operations.append(op)
 
     if not dry_run:
         _write_ops_log(operations, output_folder)

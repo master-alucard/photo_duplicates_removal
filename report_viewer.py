@@ -87,15 +87,15 @@ def _make_checkbox_pair(
 
 # ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
 
-_M_BG           = "#F2F4F7"
+_M_BG           = "#F4F4F5"
 _M_SURFACE      = "#FFFFFF"
 _M_PRIMARY      = "#1565C0"
 _M_PRIMARY_DARK = "#0D47A1"
 _M_PRIMARY_TINT = "#E8EFF9"
 _M_SUCCESS      = "#2E7D32"
-_M_SUCCESS_TINT = "#E8F5E9"
+_M_SUCCESS_TINT = "#DCEDC8"
 _M_ERROR        = "#C62828"
-_M_ERROR_TINT   = "#FFEBEE"
+_M_ERROR_TINT   = "#FFCDD2"
 _M_WARNING      = "#E65100"
 _M_WARNING_TINT = "#FFF3E0"
 _M_PURPLE       = "#6A1B9A"
@@ -257,6 +257,23 @@ def _show_info(parent: tk.Widget, key: str) -> None:
     _mat_btn(win, "Close", win.destroy, _RV_BTN_PRIMARY).pack(pady=10)
 
 
+def _tkframe(parent, bg, **kw) -> tk.Frame:
+    """Create tk.Frame and apply bg via configure (ttkbootstrap-safe)."""
+    f = tk.Frame(parent, **kw)
+    f.configure(bg=bg)
+    return f
+
+
+def _tklabel(parent, bg, fg=None, **kw) -> tk.Label:
+    """Create tk.Label and apply bg/fg via configure (ttkbootstrap-safe)."""
+    lbl = tk.Label(parent, **kw)
+    cfg = {"bg": bg}
+    if fg:
+        cfg["fg"] = fg
+    lbl.configure(**cfg)
+    return lbl
+
+
 def _mat_btn(
     parent: tk.Widget,
     text: str,
@@ -272,11 +289,13 @@ def _mat_btn(
 
     btn = tk.Button(
         parent, text=text, command=command,
-        bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
-        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        relief=tk.FLAT, bd=0,
         font=("Segoe UI", font_size, "bold"),
         cursor="hand2", **kw,
     )
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken_color(bg),
+                  activeforeground=fg, padx=12, pady=5)
     btn._mat_bg = bg
     btn._mat_fg = fg
 
@@ -321,12 +340,13 @@ def _darken_color(hex_color: str) -> str:
 
 def _info_btn(parent: tk.Widget, key: str, bg: str = _M_SURFACE) -> tk.Button:
     """Small ⓘ info button (Material-style, same bg as parent)."""
-    return tk.Button(
+    btn = tk.Button(
         parent, text=" ⓘ ", command=lambda k=key: _show_info(parent.winfo_toplevel(), k),
-        bg=bg, fg=_M_PRIMARY, activebackground=bg, activeforeground=_M_PRIMARY_DARK,
         relief=tk.FLAT, bd=0, padx=2, pady=2,
         font=("Segoe UI", 9), cursor="hand2",
     )
+    btn.configure(bg=bg, fg=_M_PRIMARY, activebackground=bg, activeforeground=_M_PRIMARY_DARK)
+    return btn
 
 
 # ── main viewer ───────────────────────────────────────────────────────────────
@@ -344,6 +364,7 @@ class ReportViewer(tk.Frame):
         broken_files: Optional[List[Path]] = None,
         settings=None,
         on_close_cb: Optional[Callable] = None,
+        selection_cache: Optional[dict] = None,
     ) -> None:
         super().__init__(parent, bg=_M_BG)
 
@@ -354,6 +375,7 @@ class ReportViewer(tk.Frame):
         self._broken_files    = broken_files or []
         self._settings        = settings
         self._on_close_cb     = on_close_cb
+        self._selection_cache = selection_cache  # restored selection state (or None)
 
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
@@ -462,32 +484,44 @@ class ReportViewer(tk.Frame):
         self._apply_btn = _mat_btn(hdr, "📦  Move Duplicates", self._on_apply, _RV_BTN_SUCCESS)
         self._apply_btn.pack(side=tk.RIGHT, padx=(4, 12), pady=8)
 
+        # ── Header separator line ─────────────────────────────────────────
+        tk.Frame(self, height=1, bg=_M_DIVIDER).pack(fill=tk.X)
+
         # ── Pagination nav bar ────────────────────────────────────────────
         nav = tk.Frame(self, bg=_M_SURFACE,
                        highlightthickness=0)
         nav.pack(fill=tk.X)
         self._nav_bar_frame = nav   # saved for show/hide during inline panels
 
-        # Prev / Next buttons (left side)
+        # First / Prev / Next / Last buttons (left side)
+        self._first_btn = _mat_btn(nav, "◀◀", self._first_page,
+                                   _RV_BTN_PRIMARY, font_size=8, state=tk.DISABLED)
+        self._first_btn.pack(side=tk.LEFT, padx=(10, 2), pady=4)
         self._prev_btn = _mat_btn(nav, "◀  Prev", self._prev_page,
                                   _RV_BTN_PRIMARY, font_size=8, state=tk.DISABLED)
-        self._prev_btn.pack(side=tk.LEFT, padx=(10, 2), pady=4)
+        self._prev_btn.pack(side=tk.LEFT, padx=(0, 2), pady=4)
         self._next_btn = _mat_btn(nav, "Next  ▶", self._next_page,
                                   _RV_BTN_PRIMARY, font_size=8)
-        self._next_btn.pack(side=tk.LEFT, padx=(2, 10), pady=4)
+        self._next_btn.pack(side=tk.LEFT, padx=(2, 0), pady=4)
+        self._last_btn = _mat_btn(nav, "▶▶", self._last_page,
+                                  _RV_BTN_PRIMARY, font_size=8)
+        self._last_btn.pack(side=tk.LEFT, padx=(2, 10), pady=4)
 
         self._page_info_var = tk.StringVar(value="")
         tk.Label(nav, textvariable=self._page_info_var,
                  bg=_M_SURFACE, fg=_M_TEXT2,
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=14)
 
-        # Jump-to-unique button (only shown when there are solo originals)
+        # Jump-to-unique / back-to-groups toggle button
+        self._saved_groups_page: int = 0       # page to restore when leaving unique
+        self._saved_groups_scroll: float = 0.0 # scroll position (yview fraction)
+        self._on_unique_page: bool = False      # toggle state
         if self._solo_originals:
             self._unique_btn = _mat_btn(
                 nav,
                 f"★  Unique  ({len(self._solo_originals)})",
-                lambda: self._render_page(self._unique_page_index()),
-                _RV_BTN_PRIMARY, font_size=8,
+                self._toggle_unique_page,
+                _M_SOLO_BORDER, font_size=9,
             )
             self._unique_btn.pack(side=tk.LEFT, padx=(0, 4), pady=4)
 
@@ -512,6 +546,10 @@ class ReportViewer(tk.Frame):
                  ).pack(side=tk.RIGHT, padx=6, pady=4)
         _mat_btn(nav, "Select All", self._select_all, _RV_SELECT_BG, fg=_RV_SELECT_FG,
                  ).pack(side=tk.RIGHT, padx=2, pady=4)
+
+        # ── Divider between nav bar and scroll area ────────────────────────
+        tk.Frame(self, height=1, bg=_M_DIVIDER).pack(fill=tk.X)
+        tk.Frame(self, height=1, bg=_M_TEXT3).pack(fill=tk.X)
 
         # ── Scrollable canvas ─────────────────────────────────────────────
         container = tk.Frame(self, bg=_M_BG)
@@ -626,7 +664,7 @@ class ReportViewer(tk.Frame):
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── Header ──────────────────────────────────────────────────────
-        head = tk.Frame(card, bg=_M_PRIMARY_TINT, pady=0)
+        head = _tkframe(card, bg=_M_PRIMARY_TINT, pady=0)
         head.pack(fill=tk.X)
 
         g_var = self._group_vars[idx]  # pre-created by _init_vars; preserves state across pages
@@ -636,54 +674,58 @@ class ReportViewer(tk.Frame):
                           indicatoron=False, bd=0, relief=tk.FLAT, selectcolor=_M_PRIMARY_TINT)
         else:
             _cb_kw = dict(selectcolor=_M_SUCCESS)
-        tk.Checkbutton(
-            head, variable=g_var, bg=_M_PRIMARY_TINT,
+        cb = tk.Checkbutton(
+            head, variable=g_var,
             command=lambda i=idx: self._on_group_toggle(i),
-            activebackground=_M_PRIMARY_TINT,
             **_cb_kw,
-        ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
+        )
+        cb.configure(bg=_M_PRIMARY_TINT, activebackground=_M_PRIMARY_TINT)
+        cb.pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
         n_orig = len(group.originals)
         lbl = (
             f"Group #{idx + 1}  ·  {n_orig} original{'s' if n_orig != 1 else ''}"
             f"  ·  {n_prev} preview{'s' if n_prev != 1 else ''}"
         )
-        tk.Label(
-            head, text=lbl,
-            font=("Segoe UI", 9, "bold"), bg=_M_PRIMARY_TINT, fg=_M_PRIMARY,
+        _tklabel(
+            head, bg=_M_PRIMARY_TINT, fg=_M_PRIMARY, text=lbl,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=8, pady=8)
 
         if group.is_series:
-            tk.Label(
-                head, text=" SERIES — all kept ",
-                font=("Segoe UI", 8, "bold"), bg=_M_PURPLE, fg="#FFFFFF",
+            _tklabel(
+                head, bg=_M_PURPLE, fg="#FFFFFF", text=" SERIES — all kept ",
+                font=("Segoe UI", 8, "bold"),
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
         # Applied state badge
         if apply_state == "full":
-            tk.Label(
-                head, text=f" ✓ {n_trashed} trashed ",
-                font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS, fg="#FFFFFF",
+            _tklabel(
+                head, bg=_M_SUCCESS, fg="#FFFFFF",
+                text=f" ✓ {n_trashed} trashed ",
+                font=("Segoe UI", 8, "bold"),
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
         elif apply_state == "partial":
-            tk.Label(
-                head, text=f" ⚠ {n_trashed}/{n_checked} trashed ",
-                font=("Segoe UI", 8, "bold"), bg=_M_WARNING, fg="#FFFFFF",
+            _tklabel(
+                head, bg=_M_WARNING, fg="#FFFFFF",
+                text=f" ⚠ {n_trashed}/{n_checked} trashed ",
+                font=("Segoe UI", 8, "bold"),
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
         # "In calibration" badge — always created, shown/hidden dynamically
-        calib_badge = tk.Label(head, text=" 📋 In calibration ",
-                               font=("Segoe UI", 8, "bold"), bg=_M_WARNING, fg="#FFFFFF",
+        calib_badge = _tklabel(head, bg=_M_WARNING, fg="#FFFFFF",
+                               text=" 📋 In calibration ",
+                               font=("Segoe UI", 8, "bold"),
                                padx=6, pady=2)
         if idx in self._fp_calib_groups:
             calib_badge.pack(side=tk.LEFT, padx=4)
         self._group_calib_badges[idx] = calib_badge
 
         # Calibration toggle container — always created, populated by helper
-        calib_btn_frame = tk.Frame(head, bg=_M_PRIMARY_TINT)
+        calib_btn_frame = _tkframe(head, bg=_M_PRIMARY_TINT)
         calib_btn_frame.pack(side=tk.RIGHT, padx=8, pady=6)
         self._group_calib_containers[idx] = calib_btn_frame
         self._populate_calib_area(idx)
@@ -699,15 +741,19 @@ class ReportViewer(tk.Frame):
         body.rowconfigure(0, weight=1)
 
         # Originals column — label changes after apply
-        orig_col = tk.Frame(body, bg=_M_SUCCESS_TINT, padx=10, pady=8)
+        orig_col = tk.Frame(body, padx=10, pady=8)
+        orig_col.configure(bg=_M_SUCCESS_TINT)
         orig_col.grid(row=0, column=0, sticky="nsew")
         orig_lbl_text = "Originals — kept in place ✓" if apply_state != "none" else "Originals — kept in place"
-        tk.Label(
+        _orig_lbl = tk.Label(
             orig_col, text=orig_lbl_text,
-            font=("Segoe UI", 8, "bold"), bg=_M_SUCCESS_TINT, fg=_M_SUCCESS,
-        ).pack(anchor=tk.W, pady=(0, 6))
+            font=("Segoe UI", 8, "bold"),
+        )
+        _orig_lbl.configure(bg=_M_SUCCESS_TINT, fg=_M_SUCCESS)
+        _orig_lbl.pack(anchor=tk.W, pady=(0, 6))
 
-        orig_grid = tk.Frame(orig_col, bg=_M_SUCCESS_TINT)
+        orig_grid = tk.Frame(orig_col)
+        orig_grid.configure(bg=_M_SUCCESS_TINT)
         orig_grid.pack(fill=tk.X)
         for img_idx, rec in enumerate(group.originals):
             key = (idx, "orig", img_idx)
@@ -719,7 +765,8 @@ class ReportViewer(tk.Frame):
 
         # Previews column — label and tile state change after apply
         prev_col_bg = "#EEEEEE" if apply_state == "full" else _M_ERROR_TINT
-        prev_col = tk.Frame(body, bg=prev_col_bg, padx=10, pady=8)
+        prev_col = tk.Frame(body, padx=10, pady=8)
+        prev_col.configure(bg=prev_col_bg)
         prev_col.grid(row=0, column=2, sticky="nsew")
 
         if apply_state == "full":
@@ -731,12 +778,15 @@ class ReportViewer(tk.Frame):
         else:
             prev_lbl_text = "Duplicates to trash  →  trash/"
             prev_lbl_fg   = _M_ERROR
-        tk.Label(
+        _prev_lbl = tk.Label(
             prev_col, text=prev_lbl_text,
-            font=("Segoe UI", 8, "bold"), bg=prev_col_bg, fg=prev_lbl_fg,
-        ).pack(anchor=tk.W, pady=(0, 6))
+            font=("Segoe UI", 8, "bold"),
+        )
+        _prev_lbl.configure(bg=prev_col_bg, fg=prev_lbl_fg)
+        _prev_lbl.pack(anchor=tk.W, pady=(0, 6))
 
-        prev_grid = tk.Frame(prev_col, bg=prev_col_bg)
+        prev_grid = tk.Frame(prev_col)
+        prev_grid.configure(bg=prev_col_bg)
         prev_grid.pack(fill=tk.X)
         for img_idx, rec in enumerate(group.previews):
             key = (idx, "prev", img_idx)
@@ -753,26 +803,27 @@ class ReportViewer(tk.Frame):
         if not visible:
             return
 
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=4, bg=_M_SOLO_BORDER).pack(side=tk.LEFT, fill=tk.Y)
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        _tkframe(card_wrap, bg=_M_SOLO_BORDER, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        head = tk.Frame(card, bg=_M_SOLO_TINT)
+        head = _tkframe(card, bg=_M_SOLO_TINT)
         head.pack(fill=tk.X)
-        tk.Label(
-            head,
+        _tklabel(
+            head, bg=_M_SOLO_TINT, fg=_M_SOLO_BORDER,
             text=f"Unique images — no duplicates found  ({len(visible)} files)",
-            font=("Segoe UI", 9, "bold"), bg=_M_SOLO_TINT, fg=_M_SOLO_BORDER,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=12, pady=8)
-        tk.Label(
-            head, text="Check images to copy to results/",
-            font=("Segoe UI", 8), bg=_M_SOLO_TINT, fg=_M_TEXT3,
+        _tklabel(
+            head, bg=_M_SOLO_TINT, fg=_M_TEXT3,
+            text="Check images to copy to results/",
+            font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=2)
         # "All"/"None" acts only on the visible (non-manual-grouped) subset
         visible_idxs = [i for i, r in enumerate(self._solo_originals)
@@ -786,7 +837,7 @@ class ReportViewer(tk.Frame):
                  _M_SOLO_TINT, fg=_M_SOLO_BORDER, font_size=8
                  ).pack(side=tk.RIGHT, padx=4, pady=4)
 
-        grid_frame = tk.Frame(card, bg=_M_SOLO_TINT, padx=10, pady=8)
+        grid_frame = _tkframe(card, bg=_M_SOLO_TINT, padx=10, pady=8)
         grid_frame.pack(fill=tk.X)
         # Rebuild tile frame dict and ordered path list for shift-click selection
         self._manual_tile_frames = {}
@@ -813,34 +864,35 @@ class ReportViewer(tk.Frame):
             self._last_solo_click_path = None
 
     def _build_broken_section(self) -> None:
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=4, bg=_M_BROKEN_BDR).pack(side=tk.LEFT, fill=tk.Y)
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        _tkframe(card_wrap, bg=_M_BROKEN_BDR, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        head = tk.Frame(card, bg=_M_BROKEN_TINT)
+        head = _tkframe(card, bg=_M_BROKEN_TINT)
         head.pack(fill=tk.X)
-        tk.Label(
-            head,
+        _tklabel(
+            head, bg=_M_BROKEN_TINT, fg=_M_BROKEN_BDR,
             text=f"Unreadable / broken files  ({len(self._broken_files)} files)",
-            font=("Segoe UI", 9, "bold"), bg=_M_BROKEN_TINT, fg=_M_BROKEN_BDR,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=12, pady=8)
-        tk.Label(
-            head, text="Could not be opened — check for corruption or unsupported format",
-            font=("Segoe UI", 8), bg=_M_BROKEN_TINT, fg=_M_TEXT3,
+        _tklabel(
+            head, bg=_M_BROKEN_TINT, fg=_M_TEXT3,
+            text="Could not be opened — check for corruption or unsupported format",
+            font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=4)
 
-        lst = tk.Frame(card, bg=_M_BROKEN_TINT, padx=12, pady=8)
+        lst = _tkframe(card, bg=_M_BROKEN_TINT, padx=12, pady=8)
         lst.pack(fill=tk.X)
         for p in self._broken_files:
-            tk.Label(
-                lst, text=str(p), font=("Consolas", 8),
-                bg=_M_BROKEN_TINT, fg=_M_TEXT2, anchor=tk.W,
+            _tklabel(
+                lst, bg=_M_BROKEN_TINT, fg=_M_TEXT2,
+                text=str(p), font=("Consolas", 8), anchor=tk.W,
             ).pack(fill=tk.X, pady=1)
 
     # ── image tile ────────────────────────────────────────────────────────────
@@ -857,38 +909,41 @@ class ReportViewer(tk.Frame):
         show_checkbox: bool = True,
         group_idx: int = -1,
     ) -> tk.Frame:
-        tile = tk.Frame(parent, bg=bg, padx=4, pady=4)
+        tile = tk.Frame(parent, padx=4, pady=4)
+        tile.configure(bg=bg)
         tile.grid(row=row, column=col, padx=4, pady=4, sticky=tk.NW)
 
         # Thumbnail with placeholder image (fixed pixel size prevents layout reflow)
         _placeholder = self._get_placeholder(max_thumb, bg)
-        thumb_lbl = tk.Label(tile, bg=bg, image=_placeholder)
+        thumb_lbl = tk.Label(tile, image=_placeholder)
+        thumb_lbl.configure(bg=bg)
         thumb_lbl.pack()
         self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed)
 
         if trashed:
             # ── Trashed tile: show badge, gray out, disable checkbox ─────
-            tk.Label(
-                tile, text="🗑  Trashed",
-                font=("Segoe UI", 8, "bold"), bg=bg, fg="#757575",
+            _tklabel(
+                tile, bg=bg, fg="#757575", text="🗑  Trashed",
+                font=("Segoe UI", 8, "bold"),
             ).pack(pady=(2, 0))
 
             fname = rec.path.name
-            tk.Label(
-                tile, text=fname,
-                font=("Segoe UI", 8), bg=bg, fg="#757575",
+            _tklabel(
+                tile, bg=bg, fg="#757575", text=fname,
+                font=("Segoe UI", 8),
                 wraplength=max_thumb,
             ).pack()
-            tk.Label(
-                tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                font=("Segoe UI", 8), bg=bg, fg="#9E9E9E",
+            _tklabel(
+                tile, bg=bg, fg="#9E9E9E",
+                text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                font=("Segoe UI", 8),
             ).pack()
         else:
             # ── Normal tile ───────────────────────────────────────────────
             fname = rec.path.name
 
             if show_checkbox:
-                cb_frame = tk.Frame(tile, bg=bg)
+                cb_frame = _tkframe(tile, bg=bg)
                 cb_frame.pack(fill=tk.X)
 
                 _cb_kw = {}
@@ -904,24 +959,24 @@ class ReportViewer(tk.Frame):
 
                 cb = tk.Checkbutton(
                     cb_frame, variable=var,
-                    bg=bg, activebackground=bg,
                     command=_on_image_cb,
                     **_cb_kw,
                 )
+                cb.configure(bg=bg, activebackground=bg)
                 cb.pack(side=tk.LEFT)
 
-                tk.Label(
-                    cb_frame, text=fname,
-                    font=("Segoe UI", 8), bg=bg, fg=_M_TEXT1,
+                _tklabel(
+                    cb_frame, bg=bg, fg=_M_TEXT1, text=fname,
+                    font=("Segoe UI", 8),
                     wraplength=max_thumb,
                 ).pack(side=tk.LEFT)
 
                 _info_btn(cb_frame, "different_image", bg=bg).pack(side=tk.LEFT, padx=0)
 
                 # "Different image" badge (shown when unchecked)
-                diff_badge = tk.Label(
-                    tile, text="≠ different image",
-                    font=("Segoe UI", 8, "italic"), bg=bg, fg=_M_WARNING,
+                diff_badge = _tklabel(
+                    tile, bg=bg, fg=_M_WARNING, text="≠ different image",
+                    font=("Segoe UI", 8, "italic"),
                 )
                 def _toggle_badge(*_):
                     try:
@@ -936,19 +991,21 @@ class ReportViewer(tk.Frame):
                 _tid = var.trace_add("write", _toggle_badge)
                 self._active_traces.append((var, _tid))
             else:
-                tk.Label(
-                    tile, text=fname,
-                    font=("Segoe UI", 8, "bold"), bg=bg, fg=_M_TEXT1,
+                _tklabel(
+                    tile, bg=bg, fg=_M_TEXT1, text=fname,
+                    font=("Segoe UI", 8, "bold"),
                     wraplength=max_thumb,
                 ).pack()
 
-            tk.Label(
-                tile, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                font=("Segoe UI", 8), bg=bg, fg=_M_TEXT2,
+            _tklabel(
+                tile, bg=bg, fg=_M_TEXT2,
+                text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                font=("Segoe UI", 8),
             ).pack()
-            tk.Label(
-                tile, text=rec.date_label(),
-                font=("Segoe UI", 8), bg=bg, fg=_M_TEXT3,
+            _tklabel(
+                tile, bg=bg, fg=_M_TEXT3,
+                text=rec.date_label(),
+                font=("Segoe UI", 8),
             ).pack()
 
         return tile
@@ -2257,21 +2314,40 @@ class ReportViewer(tk.Frame):
     def _init_vars(self) -> None:
         """Pre-create BooleanVars for solo images only.
         Group/image vars are created lazily by _ensure_group_vars()."""
+        sc = self._selection_cache or {}
+        solo_cached = sc.get("solo", {})
         for img_idx in range(len(self._solo_originals)):
             if img_idx not in self._solo_vars:
-                self._solo_vars[img_idx] = tk.BooleanVar(value=False)
+                default = solo_cached.get(img_idx, False)
+                self._solo_vars[img_idx] = tk.BooleanVar(value=default)
 
     def _ensure_group_vars(self, idx: int) -> None:
         """Lazily create BooleanVars for a single group (idempotent)."""
         if idx in self._group_vars:
             return  # already initialised
+        sc = self._selection_cache or {}
+        grp_cached = sc.get("groups", {})
+        img_cached = sc.get("images", {})
         grp = self._groups[idx]
-        self._group_vars[idx] = tk.BooleanVar(value=True)
+        # Default to True when no cache present
+        g_default = grp_cached.get(idx, True) if grp_cached else True
+        self._group_vars[idx] = tk.BooleanVar(value=g_default)
         self._group_status[idx] = ""
         for img_idx in range(len(grp.originals)):
-            self._image_vars[(idx, "orig", img_idx)] = tk.BooleanVar(value=True)
+            key = (idx, "orig", img_idx)
+            default = img_cached.get(str(key), True) if img_cached else True
+            self._image_vars[key] = tk.BooleanVar(value=default)
         for img_idx in range(len(grp.previews)):
-            self._image_vars[(idx, "prev", img_idx)] = tk.BooleanVar(value=True)
+            key = (idx, "prev", img_idx)
+            default = img_cached.get(str(key), True) if img_cached else True
+            self._image_vars[key] = tk.BooleanVar(value=default)
+
+    def export_selection_cache(self) -> dict:
+        """Export current checkbox states so they can be restored later."""
+        groups = {idx: var.get() for idx, var in self._group_vars.items()}
+        images = {str(key): var.get() for key, var in self._image_vars.items()}
+        solo = {idx: var.get() for idx, var in self._solo_vars.items()}
+        return {"groups": groups, "images": images, "solo": solo}
 
     def _reinit_manual_vars(self) -> None:
         """Rebuild per-manual-group BooleanVars after the group list changes."""
@@ -2335,6 +2411,11 @@ class ReportViewer(tk.Frame):
 
         self._current_page = max(0, min(page, self._total_pages() - 1))
 
+        # Update nav bar (page info, button states) immediately — before
+        # building content — so the user sees the page number change instantly.
+        self._update_page_nav()
+        self.update_idletasks()
+
         if self._is_unique_page(self._current_page):
             self._build_solo_section()
         else:
@@ -2370,7 +2451,6 @@ class ReportViewer(tk.Frame):
         self._inner_frame.update_idletasks()
         self._canvas.configure(scrollregion=self._canvas.bbox("all") or (0, 0, 0, 0))
         self._canvas.yview_moveto(0)
-        self._update_page_nav()
         self._bind_mousewheel_recursive(self._inner_frame)
         # Safety net: re-check scrollregion after a brief delay in case
         # late geometry events change the frame size (e.g. thumbnail loading)
@@ -2384,24 +2464,39 @@ class ReportViewer(tk.Frame):
         n      = len(self._groups)
         start  = page * self._page_size + 1
 
-        # Enable / disable Prev & Next buttons
-        if hasattr(self, "_prev_btn") and self._prev_btn.winfo_exists():
-            if page > 0:
-                _mat_enable(self._prev_btn)
-            else:
-                _mat_disable(self._prev_btn)
-        if hasattr(self, "_next_btn") and self._next_btn.winfo_exists():
-            if page < total - 1:
-                _mat_enable(self._next_btn)
-            else:
-                _mat_disable(self._next_btn)
+        # Enable / disable First, Prev, Next & Last buttons
+        for btn_name in ("_first_btn", "_prev_btn"):
+            btn = getattr(self, btn_name, None)
+            if btn and btn.winfo_exists():
+                if page > 0:
+                    _mat_enable(btn)
+                else:
+                    _mat_disable(btn)
+        for btn_name in ("_next_btn", "_last_btn"):
+            btn = getattr(self, btn_name, None)
+            if btn and btn.winfo_exists():
+                if page < total - 1:
+                    _mat_enable(btn)
+                else:
+                    _mat_disable(btn)
 
-        # Highlight the unique button when on the unique page
+        # Toggle unique button text & highlight based on state
         if hasattr(self, "_unique_btn") and self._unique_btn.winfo_exists():
-            on_unique = self._is_unique_page(page)
+            on_unique = self._on_unique_page
+            if on_unique:
+                _ubg = _M_SOLO_BORDER
+                _ufg = "#FFFFFF"
+                self._unique_btn.configure(text="◀  Groups")
+            else:
+                _ubg = _M_SURFACE
+                _ufg = _M_SOLO_BORDER
+                self._unique_btn.configure(
+                    text=f"★  Unique  ({len(self._solo_originals)})")
+            self._unique_btn._mat_bg = _ubg
+            self._unique_btn._mat_fg = _ufg
             self._unique_btn.configure(
-                bg=_M_SOLO_BORDER if on_unique else _M_SURFACE,
-                fg="#FFFFFF" if on_unique else _M_SOLO_BORDER,
+                bg=_ubg, fg=_ufg,
+                activebackground=_darken_color(_ubg), activeforeground=_ufg,
             )
 
         if self._is_unique_page(page):
@@ -2414,13 +2509,47 @@ class ReportViewer(tk.Frame):
         else:
             self._page_info_var.set("")
 
+    def _toggle_unique_page(self) -> None:
+        """Toggle between groups view and unique-images page."""
+        if not self._solo_originals:
+            return
+        if self._on_unique_page:
+            # Returning to groups — restore saved page + scroll
+            self._on_unique_page = False
+            self._render_page(self._saved_groups_page)
+            # Restore scroll after layout settles
+            self._canvas.after(50, lambda: self._canvas.yview_moveto(self._saved_groups_scroll))
+        else:
+            # Going to unique — save current page + scroll
+            self._saved_groups_page = self._current_page
+            try:
+                self._saved_groups_scroll = self._canvas.yview()[0]
+            except Exception:
+                self._saved_groups_scroll = 0.0
+            self._on_unique_page = True
+            self._render_page(self._unique_page_index())
+
+    def _first_page(self) -> None:
+        if self._current_page > 0:
+            self._on_unique_page = False
+            self._render_page(0)
+
     def _prev_page(self) -> None:
         if self._current_page > 0:
+            self._on_unique_page = self._is_unique_page(self._current_page - 1)
             self._render_page(self._current_page - 1)
 
     def _next_page(self) -> None:
         if self._current_page < self._total_pages() - 1:
-            self._render_page(self._current_page + 1)
+            nxt = self._current_page + 1
+            self._on_unique_page = self._is_unique_page(nxt)
+            self._render_page(nxt)
+
+    def _last_page(self) -> None:
+        last = self._total_pages() - 1
+        if self._current_page < last:
+            self._on_unique_page = self._is_unique_page(last)
+            self._render_page(last)
 
     def _on_page_size_change(self, *_) -> None:
         try:

@@ -16,6 +16,7 @@ from pathlib import Path
 
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from ttkbootstrap import Style as _TtkbStyle
 
 # ── dependency check ─────────────────────────────────────────────────────────
 try:
@@ -76,7 +77,7 @@ _CUSTOM_PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 _ACCENT         = "#1565C0"
 _ACCENT_DARK    = "#0D47A1"
 _ACCENT_TINT    = "#E8EFF9"
-_BG             = "#F2F4F7"
+_BG             = "#F4F4F5"
 _CARD_BG        = "#FFFFFF"
 _M_SUCCESS      = "#2E7D32"
 _M_ERROR        = "#C62828"
@@ -86,9 +87,9 @@ _M_DIVIDER      = "#DDE1E6"
 _M_TEXT1        = "#1B1B1F"
 _M_TEXT2        = "#49454F"
 _MAT_DISABLED   = "#C4C7C5"
-_M3_SURFACE1    = "#F7F8FA"
-_M3_SURFACE2    = "#ECEEF2"
-_M3_SURFACE3    = "#E2E5EA"
+_M3_SURFACE1    = "#F5F5F5"
+_M3_SURFACE2    = "#EEEEEE"
+_M3_SURFACE3    = "#E0E0E0"
 _M3_ON_PRIMARY  = "#FFFFFF"
 # Extended tokens resolved from theme palette
 _M_HINT         = "#666666"
@@ -105,7 +106,7 @@ _M_DEV_BG       = "#FFF8E1"
 _M_DEV_BORDER   = "#FFD54F"
 _M_DEV_TITLE_FG = "#E65100"
 _M_DEV_BODY_FG  = "#795548"
-_M_DETAIL_BG    = "#f4f4f4"
+_M_DETAIL_BG    = "#F5F5F5"
 _M_PURPLE       = "#7c3aed"
 _M_NOT_INST     = "#e03030"
 _M_DISABLED_FG  = "#838387"
@@ -120,10 +121,13 @@ _SL_REC_BAND    = "#c8e6c9"
 _SL_TRACK       = "#bdbdbd"
 _SL_THUMB       = "#1565C0"
 _SL_THUMB_OL    = "#FFFFFF"
+_IS_DARK        = False
 
 
 def _apply_theme(dark: bool = False) -> None:
     """Overwrite module-level colour constants from the theme palette."""
+    global _IS_DARK
+    _IS_DARK = dark
     global _ACCENT, _ACCENT_DARK, _ACCENT_TINT, _BG, _CARD_BG
     global _M_SUCCESS, _M_ERROR, _M_WARNING, _M_AMBER
     global _M_DIVIDER, _M_TEXT1, _M_TEXT2, _MAT_DISABLED
@@ -313,10 +317,12 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
     """Material Design 3 filled button."""
     btn = tk.Button(
         parent, text=text, command=command,
-        bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
-        relief=tk.FLAT, bd=0, padx=16, pady=6,
+        relief=tk.FLAT, bd=0,
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken_color(bg),
+                  activeforeground=fg, padx=16, pady=6)
     btn._mat_bg = bg
     btn._mat_fg = fg
 
@@ -408,148 +414,51 @@ def _create_ttk_checkbox_images():
 # ── Material Design 3 ttk style configuration ─────────────────────────────────
 
 def _configure_material_style(style: ttk.Style) -> None:
-    """Apply a comprehensive Material Design 3 look to all ttk widgets."""
+    """Layer app-specific style overrides on top of sv_ttk theme."""
     _font      = ("Segoe UI", 9)
     _font_bold = ("Segoe UI", 9, "bold")
-    _font_sm   = ("Segoe UI", 8)
 
-    # ── Global defaults ──────────────────────────────────────────────────
-    style.configure(".", font=_font, background=_BG, foreground=_M_TEXT1,
-                    borderwidth=0, focuscolor=_ACCENT)
-
-    # ── Notebook (top-level tabs) ────────────────────────────────────────
-    style.configure("App.TNotebook", background=_BG, borderwidth=0,
-                    tabmargins=[0, 0, 0, 0])
-    style.configure("App.TNotebook.Tab", font=_font_bold,
-                    padding=[18, 7], background=_M3_SURFACE2,
-                    foreground=_M_TEXT2, borderwidth=0)
-    style.map("App.TNotebook.Tab",
-              background=[("selected", _CARD_BG), ("!selected", _M3_SURFACE2)],
-              foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
+    # ── Notebook (top-level tabs — large) ──────────────────────────────
+    _tab_font = ("Segoe UI", 14, "bold")
+    # Configure both default TNotebook and App.TNotebook so ttkbootstrap
+    # cannot override with smaller defaults
+    for prefix in ("", "App."):
+        style.configure(f"{prefix}TNotebook", background=_BG, borderwidth=0,
+                        tabmargins=[0, 0, 0, 0])
+        style.configure(f"{prefix}TNotebook.Tab", font=_tab_font,
+                        padding=[27, 12], background=_M3_SURFACE2,
+                        foreground=_M_TEXT2, borderwidth=0)
+        style.map(f"{prefix}TNotebook.Tab",
+                  background=[("selected", _CARD_BG), ("!selected", _M3_SURFACE2)],
+                  foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
 
     # ── Frames ──��────────────────────────────────────────────────────────
-    style.configure("TFrame", background=_CARD_BG)
+    # ── Frames ───────────────────────────────────────────────────────────
     style.configure("Card.TFrame", background=_CARD_BG)
-    style.configure("Page.TFrame", background=_BG)     # page-level body
+    style.configure("Page.TFrame", background=_BG)
 
     # ── Labels ───────────────────────────────────────────────────────────
-    style.configure("TLabel", background=_CARD_BG, foreground=_M_TEXT1, font=_font)
-    style.configure("Title.TLabel", font=("Segoe UI", 11, "bold"),
-                    foreground=_M_TEXT1, background=_CARD_BG)
-    style.configure("Caption.TLabel", font=_font_sm,
-                    foreground=_M_TEXT2, background=_CARD_BG)
-    style.configure("Page.TLabel", background=_BG,
-                    foreground=_M_TEXT1, font=_font)    # page-level labels
+    style.configure("Page.TLabel", background=_BG, foreground=_M_TEXT1,
+                    font=_font)
 
-    # ── LabelFrame (clean card container — no border) ──────────────────
+    # ── LabelFrame (card container) ──────────────────────────────────────
     style.configure("TLabelframe", background=_CARD_BG,
-                    borderwidth=0, relief="flat")
+                    borderwidth=1, relief="groove",
+                    lightcolor=_M3_SURFACE3, darkcolor=_M3_SURFACE3)
     style.configure("TLabelframe.Label", font=_font_bold,
                     foreground=_ACCENT, background=_CARD_BG)
 
-    # ── Buttons ──────────────────────────────────────────────────────────
-    style.configure("TButton", font=_font_bold, padding=[12, 5],
-                    background=_M3_SURFACE2, foreground=_M_TEXT1,
-                    borderwidth=0, relief="flat")
-    style.map("TButton",
-              background=[("active", _M3_SURFACE3), ("pressed", _M3_SURFACE3),
-                          ("disabled", _BG)],
-              foreground=[("disabled", _MAT_DISABLED)])
-
-    # ── Checkbuttons (custom image indicator: green ✓ / empty box) ──────
-    _cb_imgs = _create_ttk_checkbox_images()
-    if _cb_imgs:
-        _cb_unchecked, _cb_checked = _cb_imgs
-        try:
-            style.element_create(
-                "custom_cb_indicator", "image", _cb_unchecked,
-                ("selected", _cb_checked),
-                sticky="",
-            )
-        except Exception:
-            pass  # element already exists from a previous call (theme switch)
-        style.layout("TCheckbutton", [
-            ("Checkbutton.padding", {"children": [
-                ("custom_cb_indicator", {"side": "left", "sticky": ""}),
-                ("Checkbutton.label", {"sticky": "nswe"}),
-            ], "sticky": "nswe"}),
-        ])
-    style.configure("TCheckbutton", font=_font, background=_CARD_BG,
-                    foreground=_M_TEXT1)
-    style.map("TCheckbutton",
-              background=[("active", _CARD_BG)],
-              foreground=[("disabled", _MAT_DISABLED)])
-
-    # ── Radiobuttons ─────────────────────────────────────────────────────
-    style.configure("TRadiobutton", font=_font, background=_CARD_BG,
-                    foreground=_M_TEXT1)
-    style.map("TRadiobutton",
-              background=[("active", _CARD_BG)],
-              foreground=[("disabled", _MAT_DISABLED)],
-              indicatorcolor=[("selected", _ACCENT),
-                              ("!selected", _M_DIVIDER)])
-
-    # ── Entry ────────────────────────────────────────────────────────────
-    style.configure("TEntry", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
-                    borderwidth=0, padding=[6, 4],
-                    selectbackground=_ACCENT, selectforeground="white")
-    style.map("TEntry",
-              fieldbackground=[("readonly", _M3_SURFACE1),
-                               ("disabled", _M3_SURFACE1)],
-              foreground=[("disabled", _MAT_DISABLED)],
-              bordercolor=[("focus", _ACCENT), ("!focus", _M3_SURFACE3)])
-
-    # ── Combobox ─────────────────────────────────────────────────────────
-    style.configure("TCombobox", fieldbackground=_CARD_BG, foreground=_M_TEXT1,
-                    padding=[6, 3], arrowsize=14,
-                    selectbackground=_ACCENT, selectforeground="white")
-    style.map("TCombobox",
-              fieldbackground=[("readonly", _CARD_BG),
-                               ("disabled", _M3_SURFACE1)],
-              foreground=[("disabled", _MAT_DISABLED)],
-              bordercolor=[("focus", _ACCENT), ("!focus", _M_DIVIDER)])
-
-    # ── Scale (slider) ───────────────────────────────────────────────────
-    style.configure("TScale", background=_CARD_BG, troughcolor=_M3_SURFACE3,
-                    sliderthickness=18, borderwidth=0)
-    style.map("TScale",
-              background=[("active", _ACCENT)],
-              troughcolor=[("disabled", _M3_SURFACE2)])
-    # Horizontal.TScale
-    style.configure("Horizontal.TScale", background=_CARD_BG,
-                    troughcolor=_M3_SURFACE3, sliderthickness=18)
-
-    # ── Progressbar ──────────────────────────────────────────────────────
-    style.configure("TProgressbar", troughcolor=_M3_SURFACE3,
-                    background=_ACCENT, borderwidth=0, thickness=6)
-    style.configure("Horizontal.TProgressbar",
-                    troughcolor=_M3_SURFACE3,
-                    background=_ACCENT, borderwidth=0, thickness=6)
-
-    # ── Scrollbar ────────────────────────────────────────────────────────
-    style.configure("TScrollbar", background=_M3_SURFACE2,
-                    troughcolor=_BG, borderwidth=0, arrowsize=14)
-    style.map("TScrollbar",
-              background=[("active", _M3_SURFACE3), ("pressed", _M3_SURFACE3)])
-
-    # ── Treeview ─────────────────────────────────────────────────────────
-    style.configure("Treeview", font=_font, background=_CARD_BG,
-                    foreground=_M_TEXT1, fieldbackground=_CARD_BG,
-                    rowheight=26, borderwidth=0)
-    style.configure("Treeview.Heading", font=_font_bold,
-                    background=_M3_SURFACE2, foreground=_M_TEXT1,
-                    borderwidth=0, relief="flat")
+    # ── Treeview (accent selection) ──────────────────────────────────────
+    style.configure("Treeview", rowheight=42)
+    if _IS_DARK:
+        _sel_bg = "#D1D1D6"   # light grey selection in dark mode
+        _sel_fg = "#1B1B1F"   # dark text on light bg
+    else:
+        _sel_bg = "#3A3A3C"   # dark deep grey in light mode
+        _sel_fg = "#FFFFFF"   # white text on dark bg
     style.map("Treeview",
-              background=[("selected", _ACCENT_TINT)],
-              foreground=[("selected", _ACCENT)])
-    style.map("Treeview.Heading",
-              background=[("active", _M3_SURFACE3)])
-
-    # ── Separator ────────────────────────────────────────────────────────
-    style.configure("TSeparator", background=_M_DIVIDER)
-
-    # ── Panedwindow ──────────────────────────────────────────────────────
-    style.configure("TPanedwindow", background=_BG)
+              background=[("selected", _sel_bg)],
+              foreground=[("selected", _sel_fg)])
 
 
 # ── app icon ─────────────────────────────────────────────────────────────────
@@ -625,27 +534,38 @@ def show_info(parent: tk.Widget, key: str) -> None:
 
 def _section(parent: tk.Widget, title: str) -> ttk.LabelFrame:
     """Material card section with title."""
-    f = ttk.LabelFrame(parent, text=title, padding=(12, 8, 12, 10))
-    f.pack(fill=tk.X, pady=(0, 8))
+    f = ttk.LabelFrame(parent, text=title, padding=(16, 10, 16, 14))
+    f.pack(fill=tk.X, pady=(0, 10))
     return f
 
 
-def _info_btn(parent: tk.Widget, key: str) -> ttk.Button:
-    return ttk.Button(
-        parent, text="\u24d8", width=2,
-        command=lambda k=key: show_info(parent.winfo_toplevel(), k)
+def _info_btn(parent: tk.Widget, key: str) -> tk.Button:
+    """Round info button: white bg with accent stroke, bold ⓘ icon."""
+    btn = tk.Button(
+        parent, text="ⓘ", font=("Segoe UI", 10, "bold"),
+        width=2, height=1, bd=0,
+        relief=tk.FLAT, cursor="hand2",
+        command=lambda k=key: show_info(parent.winfo_toplevel(), k),
     )
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(
+        fg=_ACCENT, bg=_CARD_BG,
+        activebackground=_ACCENT_TINT, activeforeground=_ACCENT,
+        highlightthickness=1, highlightbackground=_ACCENT,
+        highlightcolor=_ACCENT, padx=0, pady=0,
+    )
+    return btn
 
 
 def _row(parent: tk.Widget) -> tk.Frame:
     r = ttk.Frame(parent)
-    r.pack(fill=tk.X, pady=2)
+    r.pack(fill=tk.X, pady=4)
     return r
 
 
 def _label(parent: tk.Widget, text: str, width: int = 26) -> ttk.Label:
     lbl = ttk.Label(parent, text=text, width=width, anchor=tk.W)
-    lbl.pack(side=tk.LEFT)
+    lbl.pack(side=tk.LEFT, padx=(0, 6))
     return lbl
 
 
@@ -667,7 +587,7 @@ def _scrollable_frame(parent: tk.Widget):
     sb.pack(side=tk.RIGHT, fill=tk.Y)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    body = ttk.Frame(canvas, padding=(16, 10, 16, 10), style="Page.TFrame")
+    body = ttk.Frame(canvas, padding=(20, 14, 20, 14), style="Page.TFrame")
     bw = canvas.create_window((0, 0), window=body, anchor=tk.NW)
     body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda e: canvas.itemconfig(bw, width=e.width))
@@ -716,15 +636,17 @@ class App:
         self.settings = load_settings(SETTINGS_PATH)
         error_handler.set_settings(self.settings)
 
-        # Apply colour theme before any widget is created
-        _apply_theme(self.settings.dark_mode)
+        # Apply ttkbootstrap theme + colour tokens before any widget is created
+        dark = self.settings.dark_mode
+        self._ttkb_style = _TtkbStyle(theme="darkly" if dark else "litera")
+        _apply_theme(dark)
         import about_tab as _about_mod, library_tab as _lib_mod, report_viewer as _rv_mod
-        _about_mod._apply_theme(self.settings.dark_mode)
-        _lib_mod._apply_theme(self.settings.dark_mode)
-        _rv_mod._apply_theme(self.settings.dark_mode)
+        _about_mod._apply_theme(dark)
+        _lib_mod._apply_theme(dark)
+        _rv_mod._apply_theme(dark)
         try:
             import calibration_window as _cal_mod
-            _cal_mod._apply_theme(self.settings.dark_mode)
+            _cal_mod._apply_theme(dark)
         except Exception:
             pass
 
@@ -748,6 +670,10 @@ class App:
         self._estimate_after_id = None
         self._custom_estimate_after_id = None
 
+        # Selection caches (persisted across viewer open/close within a scan)
+        self._scan_selection_cache: dict | None = None
+        self._custom_selection_cache: dict | None = None
+
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
         self._custom_pause_flag: list[bool] = [False]
@@ -769,12 +695,8 @@ class App:
     # ── UI construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
-        # ── Material Design 3 theme configuration ─────────────────────────
+        # ── App-specific style overrides on top of ttkbootstrap ───────────
         style = ttk.Style()
-        try:
-            style.theme_use("clam")
-        except Exception:
-            pass
         _configure_material_style(style)
 
         # Header — M3 top app bar
@@ -851,6 +773,7 @@ class App:
         self.scan_threads_var.trace_add("write", self._on_setting_change)
         self.dry_var            = tk.BooleanVar(value=s.dry_run)
         self.org_date_var       = tk.BooleanVar(value=s.organize_by_date)
+        self.org_in_place_var   = tk.BooleanVar(value=s.organize_in_place)
         self._details_var       = tk.BooleanVar(value=s.details_visible)
         self._phase_label_var   = tk.StringVar(value="Ready.")
         self._eta_var           = tk.StringVar(value="")
@@ -1075,6 +998,23 @@ class App:
         ttk.Label(r, text="Create date subfolders in results/ and trash/",
                   foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
 
+        # Organize destination radio group (shown when Organize by Date is enabled)
+        self._org_dest_frame = ttk.Frame(act)
+        _od_r1 = ttk.Frame(self._org_dest_frame)
+        _od_r1.pack(fill=tk.X, pady=2)
+        ttk.Label(_od_r1, text="  ", width=2).pack(side=tk.LEFT)
+        ttk.Radiobutton(_od_r1, text="Move originals to Output/results folder",
+                        variable=self.org_in_place_var, value=False,
+                        command=self._on_setting_change).pack(side=tk.LEFT)
+        _od_r2 = ttk.Frame(self._org_dest_frame)
+        _od_r2.pack(fill=tk.X, pady=2)
+        ttk.Label(_od_r2, text="  ", width=2).pack(side=tk.LEFT)
+        ttk.Radiobutton(_od_r2, text="Organize files in original folder",
+                        variable=self.org_in_place_var, value=True,
+                        command=self._on_setting_change).pack(side=tk.LEFT)
+        self._toggle_org_dest()
+        self.org_date_var.trace_add("write", lambda *_: self._toggle_org_dest())
+
         # Date format
         r = _row(act)
         ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
@@ -1111,7 +1051,7 @@ class App:
 
         # Progress panel (fixed, bottom of tab)
         self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
-        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 2))
+        self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
         ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
@@ -1128,6 +1068,9 @@ class App:
             font=("Consolas", 8), bg=_M3_SURFACE1, fg=_M_TEXT2,
             relief=tk.FLAT, highlightthickness=0,
         )
+        # Show details panel if setting is already on
+        if self._details_var.get():
+            self._detail_text.pack(fill=tk.X, pady=(4, 0))
 
         # Button bar (fixed, very bottom of tab)
         self._scan_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
@@ -1251,6 +1194,11 @@ class App:
         log_path = ops_log_path(Path(out)) if out else None
 
         def _on_close():
+            # Save selection state before destroying the viewer
+            for w in self._results_viewer_host.winfo_children():
+                if isinstance(w, ReportViewer):
+                    self._scan_selection_cache = w.export_selection_cache()
+                    break
             self._results_viewer_host.pack_forget()
             for w in self._results_viewer_host.winfo_children():
                 w.destroy()
@@ -1265,6 +1213,7 @@ class App:
             broken_files=broken_files,
             settings=self.settings,
             on_close_cb=_on_close,
+            selection_cache=self._scan_selection_cache,
         )
         viewer.pack(fill=tk.BOTH, expand=True)
 
@@ -1828,13 +1777,28 @@ class App:
         # ── Actions ───────────────────────────────────────────────────────
         act = _section(body, "Actions")
 
-
-
         r = _row(act)
         ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
         _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
         ttk.Label(r, text="Create date subfolders in results/ and trash/",
                   foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        # Organize destination radio group (shown when Organize by Date is enabled)
+        self._custom_org_dest_frame = ttk.Frame(act)
+        _cod_r1 = ttk.Frame(self._custom_org_dest_frame)
+        _cod_r1.pack(fill=tk.X, pady=2)
+        ttk.Label(_cod_r1, text="  ", width=2).pack(side=tk.LEFT)
+        ttk.Radiobutton(_cod_r1, text="Move originals to Output/results folder",
+                        variable=self.org_in_place_var, value=False,
+                        command=self._on_setting_change).pack(side=tk.LEFT)
+        _cod_r2 = ttk.Frame(self._custom_org_dest_frame)
+        _cod_r2.pack(fill=tk.X, pady=2)
+        ttk.Label(_cod_r2, text="  ", width=2).pack(side=tk.LEFT)
+        ttk.Radiobutton(_cod_r2, text="Organize files in original folder",
+                        variable=self.org_in_place_var, value=True,
+                        command=self._on_setting_change).pack(side=tk.LEFT)
+        self._toggle_custom_org_dest()
+        self.org_date_var.trace_add("write", lambda *_: self._toggle_custom_org_dest())
 
         # Date format
         r = _row(act)
@@ -1876,7 +1840,7 @@ class App:
 
         # ── Progress panel (fixed bottom of tab) ──────────────────────────
         self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
-        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=4, pady=(0, 2))
+        self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
         ttk.Label(self._custom_prog_frame, textvariable=self._custom_phase_label,
                   font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
@@ -1894,6 +1858,8 @@ class App:
             font=("Consolas", 8), bg=_M3_SURFACE1, fg=_M_TEXT2,
             relief=tk.FLAT, highlightthickness=0,
         )
+        if self._custom_details_var.get():
+            self._custom_detail_text.pack(fill=tk.X, pady=(4, 0))
 
         # ── Button bar (fixed very bottom) ───────────────────────────────���
         self._custom_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
@@ -2105,6 +2071,7 @@ class App:
         self._custom_groups      = []
         self._custom_broken      = []
         self._custom_report_path = None
+        self._custom_selection_cache = None   # clear selection cache on new scan
         _mat_disable(self._cr_accept_btn)
         _mat_disable(self._cr_browser_btn)
         _mat_disable(self._cr_inapp_btn)
@@ -2216,6 +2183,7 @@ class App:
         self._custom_groups        = []
         self._custom_broken        = []
         self._custom_report_path   = None
+        self._custom_selection_cache = None
         self._lock_settings()
 
         # Swap button frames
@@ -2787,6 +2755,11 @@ class App:
         log_path = ops_log_path(Path(out)) if out else None
 
         def _on_close():
+            # Save selection state before destroying the viewer
+            for w in self._custom_results_viewer_host.winfo_children():
+                if isinstance(w, ReportViewer):
+                    self._custom_selection_cache = w.export_selection_cache()
+                    break
             self._custom_results_viewer_host.pack_forget()
             for w in self._custom_results_viewer_host.winfo_children():
                 w.destroy()
@@ -2801,6 +2774,7 @@ class App:
             broken_files=self._custom_broken,
             settings=self.settings,
             on_close_cb=_on_close,
+            selection_cache=self._custom_selection_cache,
         )
         viewer.pack(fill=tk.BOTH, expand=True)
 
@@ -3058,6 +3032,15 @@ class App:
         def _px(v: float, w: int) -> float:
             return PAD + (v - min_v) / max(float(max_v - min_v), 1e-9) * max(w - 2 * PAD, 1)
 
+        def _blend(c1: str, c2: str, t: float) -> str:
+            """Blend c1→c2 by fraction t (0=c1, 1=c2)."""
+            r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+            r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+            r = int(r1 + (r2 - r1) * t)
+            g = int(g1 + (g2 - g1) * t)
+            b = int(b1 + (b2 - b1) * t)
+            return f"#{r:02x}{g:02x}{b:02x}"
+
         def _draw(*_):
             scale_c.delete("all")
             w = scale_c.winfo_width()
@@ -3067,22 +3050,45 @@ class App:
 
             rl, rh = _eff_rec()
 
-            # 1 — green recommended band (drawn first → visually behind everything)
-            scale_c.create_rectangle(
-                _px(rl, w), 1, _px(rh, w), CANVAS_H - 1,
-                fill=_SL_REC_BAND, outline="",
-            )
-            # 2 — track line
+            # 1 — green recommended band with gradient edges (50% opacity centre,
+            #     fading to 0% over 5% of band width on each side)
+            bx1 = _px(rl, w)
+            bx2 = _px(rh, w)
+            band_w = max(bx2 - bx1, 1)
+            fade = max(int(band_w * 0.05), 1)
+            mid_alpha = 0.30  # centre opacity
+
+            for i in range(int(band_w)):
+                x = bx1 + i
+                if i < fade:
+                    alpha = mid_alpha * (i / fade)
+                elif i > band_w - fade:
+                    alpha = mid_alpha * ((band_w - i) / fade)
+                else:
+                    alpha = mid_alpha
+                col = _blend(_cbg, _SL_REC_BAND, alpha / mid_alpha * 0.7 + 0.3)
+                scale_c.create_line(x, 2, x, CANVAS_H - 2, fill=col)
+
+            # 2 — track line (anti-aliased round caps)
             scale_c.create_line(
                 PAD, cy, w - PAD, cy,
-                fill=_SL_TRACK, width=2, capstyle=tk.ROUND,
+                fill=_SL_TRACK, width=3, capstyle=tk.ROUND, smooth=True,
             )
-            # 3 — thumb knob (drawn last → on top)
+            # 3 — thumb knob: gradient-filled circle with 1px stroke
             tx = _px(var.get(), w)
-            r = 7
+            r = 8
+            # Gradient fill — concentric circles from light centre to accent edge
+            for i in range(r, 0, -1):
+                t = 1.0 - (i / r)  # 0 at edge, 1 at centre
+                col = _blend(_SL_THUMB, "#FFFFFF", t * 0.45)
+                scale_c.create_oval(
+                    tx - i, cy - i, tx + i, cy + i,
+                    fill=col, outline="",
+                )
+            # 1px stroke ring
             scale_c.create_oval(
                 tx - r, cy - r, tx + r, cy + r,
-                fill=_SL_THUMB, outline=_SL_THUMB_OL, width=2,
+                fill="", outline=_SL_THUMB, width=1,
             )
 
         def _on_input(event):
@@ -3136,9 +3142,24 @@ class App:
             var.set(default)
             self._on_setting_change()
 
-        ttk.Button(ctrl, text="\u21ba", width=3, command=_reset).pack(side=tk.LEFT, padx=2)
-        ttk.Button(ctrl, text="\u24d8", width=2,
-                   command=lambda k=key: show_info(self.root, k)).pack(side=tk.LEFT, padx=2)
+        reset_btn = tk.Button(ctrl, text="\u21ba", font=("Segoe UI", 10, "bold"),
+                              width=2, height=1, bd=0, relief=tk.FLAT,
+                              cursor="hand2", command=_reset)
+        reset_btn.configure(fg=_ACCENT, bg=_CARD_BG,
+                            activebackground=_ACCENT_TINT, activeforeground=_ACCENT,
+                            highlightthickness=1, highlightbackground=_ACCENT,
+                            highlightcolor=_ACCENT, padx=0, pady=0)
+        reset_btn.pack(side=tk.LEFT, padx=2)
+
+        info_btn = tk.Button(ctrl, text="\u24d8", font=("Segoe UI", 10, "bold"),
+                             width=2, height=1, bd=0, relief=tk.FLAT,
+                             cursor="hand2",
+                             command=lambda k=key: show_info(self.root, k))
+        info_btn.configure(fg=_ACCENT, bg=_CARD_BG,
+                           activebackground=_ACCENT_TINT, activeforeground=_ACCENT,
+                           highlightthickness=1, highlightbackground=_ACCENT,
+                           highlightcolor=_ACCENT, padx=0, pady=0)
+        info_btn.pack(side=tk.LEFT, padx=2)
 
         _, detail = INFO_TEXTS.get(key, ("", ""))
         if detail:
@@ -3236,7 +3257,8 @@ class App:
         self.settings.dark_mode = dark
         save_settings(self.settings, SETTINGS_PATH)
 
-        # Re-apply colour constants in every module
+        # Switch ttkbootstrap theme + re-apply colour constants in every module
+        self._ttkb_style.theme_use("darkly" if dark else "litera")
         _apply_theme(dark)
         import about_tab as _about_mod, library_tab as _lib_mod
         import report_viewer as _rv_mod
@@ -3265,6 +3287,13 @@ class App:
             child.destroy()
         self.root.configure(bg=_BG)
         self._build_ui()
+
+        # Force re-apply material style overrides after ttkbootstrap theme switch
+        # (multiple deferred re-applies to beat ttkbootstrap's lazy updates)
+        style = ttk.Style()
+        _configure_material_style(style)
+        for delay in (50, 150, 400):
+            self.root.after(delay, lambda: _configure_material_style(ttk.Style()))
 
         # Restore persistent state (resume notices, last results, etc.)
         self._check_resume_state()
@@ -3326,6 +3355,7 @@ class App:
         s.skip_names               = self.skip_names_var.get()
         s.dry_run                  = self.dry_var.get()
         s.organize_by_date         = self.org_date_var.get()
+        s.organize_in_place        = self.org_in_place_var.get()
         s.date_folder_format       = self.date_fmt_var.get() or "%Y-%m-%d"
         s.details_visible          = self._details_var.get()
         s.dry_run                  = self._custom_dry_var.get()  # shared dry-run flag
@@ -3772,6 +3802,7 @@ class App:
         self.report_path     = None
         self.scan_groups     = []
         self.scan_records    = []
+        self._scan_selection_cache = None
         self._broken_files   = []
         self._solo_originals = []
 
@@ -3875,6 +3906,7 @@ class App:
         self._solo_originals = []
         self.report_path     = None
         self._last_scan_info = {}
+        self._scan_selection_cache = None   # clear selection cache on new scan
         _mat_disable(self.accept_btn)
         _mat_disable(self.browser_report_btn)
         _mat_disable(self.inapp_report_btn)
@@ -3943,6 +3975,21 @@ class App:
         else:
             self._detail_text.pack_forget()
         self._save_settings_now()
+
+    def _toggle_org_dest(self) -> None:
+        """Show/hide the organize-destination radio group based on Organize by Date."""
+        if self.org_date_var.get():
+            self._org_dest_frame.pack(fill=tk.X, pady=(0, 4))
+        else:
+            self._org_dest_frame.pack_forget()
+        self._on_setting_change()
+
+    def _toggle_custom_org_dest(self) -> None:
+        if self.org_date_var.get():
+            self._custom_org_dest_frame.pack(fill=tk.X, pady=(0, 4))
+        else:
+            self._custom_org_dest_frame.pack_forget()
+        self._on_setting_change()
 
     # ── worker thread ─────────────────────────────────────────────────────
 
@@ -4309,6 +4356,8 @@ class App:
             })
             self._show_results_tab()
             self._nb.select(self._tab_scan)
+            # Force UI refresh in case we were on another tab
+            self.root.update_idletasks()
 
     def _on_error(self, msg: str, tb: str = "") -> None:
         _set_sleep_prevention(False)

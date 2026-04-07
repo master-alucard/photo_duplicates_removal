@@ -12,7 +12,7 @@ LIGHT = {
     "ACCENT":        "#1565C0",
     "ACCENT_DARK":   "#0D47A1",
     "ACCENT_TINT":   "#E8EFF9",
-    "BG":            "#F2F4F7",
+    "BG":            "#F4F4F5",
     "CARD_BG":       "#FFFFFF",
     "SUCCESS":       "#2E7D32",
     "ERROR":         "#C62828",
@@ -23,9 +23,9 @@ LIGHT = {
     "TEXT2":         "#49454F",
     "TEXT3":         "#79747E",
     "DISABLED":      "#C4C7C5",
-    "SURFACE1":      "#F7F8FA",
-    "SURFACE2":      "#ECEEF2",
-    "SURFACE3":      "#E2E5EA",
+    "SURFACE1":      "#F5F5F5",
+    "SURFACE2":      "#EEEEEE",
+    "SURFACE3":      "#E0E0E0",
     "ON_PRIMARY":    "#FFFFFF",
     # button backgrounds (saturated, always works with white text)
     "BTN_PRIMARY":   "#1565C0",
@@ -35,9 +35,9 @@ LIGHT = {
     "BTN_SECONDARY": "#546E7A",
     # semantic aliases used by sub-modules
     "PRIMARY_TINT":  "#E8EFF9",
-    "SUCCESS_TINT":  "#E8F5E9",
-    "ERROR_TINT":    "#FFEBEE",
-    "WARNING_TINT":  "#FFF3E0",
+    "SUCCESS_TINT":  "#DCEDC8",
+    "ERROR_TINT":    "#FFCDD2",
+    "WARNING_TINT":  "#FFE0B2",
     # caption / hint text
     "HINT":          "#666666",
     "HINT2":         "#555555",
@@ -57,7 +57,7 @@ LIGHT = {
     "DEV_TITLE_FG":  "#E65100",
     "DEV_BODY_FG":   "#795548",
     # misc
-    "DETAIL_BG":     "#f4f4f4",
+    "DETAIL_BG":     "#F5F5F5",
     "PURPLE":        "#7c3aed",
     "NOT_INSTALLED": "#e03030",
     # disabled button text
@@ -73,7 +73,7 @@ LIGHT = {
     "HERO_VERSION_FG": "#BBDEFB",   # version text
     "HERO_SUBTLE_FG":  "#90CAF9",   # copyright / email
     "HERO_BTN_BG":     "#0D47A1",   # hero action buttons
-    "PRIVACY_BG":      "#FAFAFA",   # privacy policy text widget
+    "PRIVACY_BG":      "#F4F4F5",   # privacy policy text widget
     # report viewer
     "RV_REVERT_BG":    "#455A64",   # revert buttons
     "RV_CALIB_BG":     "#5C6BC0",   # calibrate button
@@ -87,7 +87,7 @@ DARK = {
     "ACCENT_DARK":   "#64B5F6",
     "ACCENT_TINT":   "#1A2733",
     "BG":            "#121214",
-    "CARD_BG":       "#1E1E22",
+    "CARD_BG":       "#161618",
     "SUCCESS":       "#66BB6A",
     "ERROR":         "#EF5350",
     "WARNING":       "#FFA726",
@@ -97,9 +97,9 @@ DARK = {
     "TEXT2":         "#CAC4D0",
     "TEXT3":         "#938F99",
     "DISABLED":      "#49454F",
-    "SURFACE1":      "#1A1A1E",
-    "SURFACE2":      "#252528",
-    "SURFACE3":      "#2E2E34",
+    "SURFACE1":      "#161618",
+    "SURFACE2":      "#1C1C20",
+    "SURFACE3":      "#222226",
     "ON_PRIMARY":    "#FFFFFF",
     # button backgrounds (saturated, always works with white text)
     "BTN_PRIMARY":   "#1976D2",
@@ -131,7 +131,7 @@ DARK = {
     "DEV_TITLE_FG":  "#FFA726",
     "DEV_BODY_FG":   "#BCAAA4",
     # misc
-    "DETAIL_BG":     "#252528",
+    "DETAIL_BG":     "#1C1C20",
     "PURPLE":        "#B388FF",
     "NOT_INSTALLED": "#EF5350",
     # disabled button text
@@ -140,18 +140,18 @@ DARK = {
     "SLIDER_REC_BAND": "#1B3A1B",   # dark green recommended zone
     "SLIDER_TRACK":    "#49454F",   # track line
     "SLIDER_THUMB":    "#90CAF9",   # thumb knob fill (light blue)
-    "SLIDER_THUMB_OL": "#1E1E22",   # thumb outline (card surface)
+    "SLIDER_THUMB_OL": "#161618",   # thumb outline (card surface)
     # about hero card
     "HERO_BG":         "#1A1A2E",   # dark navy card
     "HERO_NAME_FG":    "#E6E1E5",   # app name
     "HERO_VERSION_FG": "#90CAF9",   # version text
     "HERO_SUBTLE_FG":  "#7BAAD4",   # copyright / email
     "HERO_BTN_BG":     "#1976D2",   # hero action buttons
-    "PRIVACY_BG":      "#1A1A1E",   # privacy policy text widget
+    "PRIVACY_BG":      "#161618",   # privacy policy text widget
     # report viewer
     "RV_REVERT_BG":    "#607D8B",   # revert buttons
     "RV_CALIB_BG":     "#7986CB",   # calibrate button
-    "RV_SELECT_BG":    "#2E2E34",   # select all/none bg
+    "RV_SELECT_BG":    "#222226",   # select all/none bg
     "RV_SELECT_FG":    "#90CAF9",   # select all/none fg
     "RV_HEADER_STATS": "#7BAAD4",   # header stats text
 }

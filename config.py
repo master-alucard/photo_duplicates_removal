@@ -42,6 +42,7 @@ class Settings:
     ambiguous_detection: bool = False
     ambiguous_threshold_factor: float = 1.5
     organize_by_date: bool = False
+    organize_in_place: bool = False         # True=organize in original folder, False=move to output
     date_folder_format: str = "%Y-%m-%d"
     disable_series_detection: bool = False  # skip series promotion in _classify_group
     calib_folder: str = ""                  # last-used calibration folder

@@ -32,7 +32,7 @@ RELEASES_API  = "https://api.github.com/repos/master-alucard/photo_duplicates_re
 
 # ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
-_BG          = "#F2F4F7"
+_BG          = "#F4F4F5"
 _SURFACE     = "#FFFFFF"
 _PRIMARY     = "#1565C0"
 _PRIMARY_TINT= "#E8EFF9"
@@ -51,7 +51,7 @@ _HERO_NAME   = "#FFFFFF"
 _HERO_VER    = "#BBDEFB"
 _HERO_SUB    = "#90CAF9"
 _HERO_BTN    = "#0D47A1"
-_PRIVACY_BG  = "#FAFAFA"
+_PRIVACY_BG  = "#F4F4F5"
 _BTN_PRIMARY = "#1565C0"
 
 
@@ -154,9 +154,11 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw):
         except Exception:
             return c
     btn = tk.Button(parent, text=text, command=command,
-                    bg=bg, fg=fg, activebackground=_darken(bg), activeforeground=fg,
-                    relief=tk.FLAT, bd=0, padx=12, pady=5,
+                    relief=tk.FLAT, bd=0,
                     font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw)
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken(bg),
+                  activeforeground=fg, padx=12, pady=5)
     btn.bind("<Enter>", lambda _: btn.configure(bg=_darken(bg)))
     btn.bind("<Leave>", lambda _: btn.configure(bg=bg))
     return btn

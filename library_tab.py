@@ -30,7 +30,7 @@ from library import (
 
 # ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
-_BG          = "#F2F4F7"
+_BG          = "#F4F4F5"
 _SURFACE     = "#FFFFFF"
 _ACCENT      = "#1565C0"
 _ACCENT_DARK = "#0D47A1"
@@ -46,13 +46,15 @@ _TEXT1       = "#1B1B1F"
 _TEXT2       = "#49454F"
 _TEXT3       = "#79747E"
 _DISABLED    = "#C4C7C5"
+_SEL_BG      = "#3A3A3C"   # treeview selection background (dark deep grey)
+_SEL_FG      = "#FFFFFF"   # treeview selection foreground (white text)
 
 
 def _apply_theme(dark: bool = False) -> None:
     """Overwrite module colours from the theme palette."""
     global _BG, _SURFACE, _ACCENT, _ACCENT_DARK, _ACCENT_TINT
     global _SUCCESS, _SUCCESS_BG, _ERROR, _ERROR_BG, _WARNING, _WARNING_BG
-    global _DIVIDER, _TEXT1, _TEXT2, _TEXT3, _DISABLED
+    global _DIVIDER, _TEXT1, _TEXT2, _TEXT3, _DISABLED, _SEL_BG, _SEL_FG
     import theme as _t
     p = _t.get_palette(dark)
     _BG          = p["BG"]
@@ -71,6 +73,9 @@ def _apply_theme(dark: bool = False) -> None:
     _TEXT2       = p["TEXT2"]
     _TEXT3       = p["TEXT3"]
     _DISABLED    = p["DISABLED"]
+    # Selection: dark deep grey in light mode, light grey + dark text in dark mode
+    _SEL_BG      = "#3A3A3C" if not dark else "#D1D1D6"
+    _SEL_FG      = "#FFFFFF" if not dark else "#1B1B1F"
 
 _DUMMY_PREFIX = "DUMMY:"   # prefix for placeholder treeview items used in LibFolderPickerDialog
 
@@ -102,6 +107,15 @@ def _fmt_date(iso: str) -> str:
         return iso or "—"
 
 
+def _is_subpath(child: Path, parent: Path) -> bool:
+    """Return True if *child* is a sub-path of *parent*."""
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
 def _darken(hex_color: str) -> str:
     try:
         r, g, b = int(hex_color[1:3], 16), int(hex_color[3:5], 16), int(hex_color[5:7], 16)
@@ -114,10 +128,12 @@ def _darken(hex_color: str) -> str:
 def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.Button:
     btn = tk.Button(
         parent, text=text, command=command,
-        bg=bg, fg=fg, activebackground=_darken(bg), activeforeground=fg,
-        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        relief=tk.FLAT, bd=0,
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken(bg),
+                  activeforeground=fg, padx=12, pady=5)
     btn._mat_bg = bg
     btn._mat_fg = fg
 
@@ -350,6 +366,9 @@ class _LibraryTabController:
         self._statuses: dict[str, DriveStatus] = {}
         self._busy   = False
         self._selected: Optional[str] = None
+        self._update_queue: list[Path] = []  # batch update queue
+        self._pending_status_done = False  # cross-thread signal
+        self._pending_update_result: Optional[tuple] = None  # (entry, error)
 
         # Widget refs populated in build()
         self._tree:        ttk.Treeview
@@ -357,8 +376,10 @@ class _LibraryTabController:
         self._btn_update:  tk.Button
         self._btn_delete:  tk.Button
         self._btn_remap:   tk.Button
-        self._btn_refresh: tk.Button
-        self._prog:        ttk.Progressbar
+        self._btn_refresh:    tk.Button
+        self._btn_update_all: tk.Button
+        self._queue_lbl:      tk.Label
+        self._prog:           ttk.Progressbar
         self._status_lbl:  tk.Label
         self._summary_lbl: tk.Label
 
@@ -422,6 +443,15 @@ class _LibraryTabController:
             tb_inner, "⟳  Refresh Status", self._on_refresh_status, "#455A64")
         self._btn_refresh.pack(side=tk.LEFT)
 
+        self._btn_update_all = _mat_btn(
+            tb_inner, "📋  Update All", self._on_update_all, "#1B5E20")
+        self._btn_update_all.pack(side=tk.LEFT, padx=(6, 0))
+
+        # Queue label (shows scheduled count)
+        self._queue_lbl = tk.Label(tb_inner, text="",
+                                   font=("Segoe UI", 9, "bold"), bg=_SURFACE, fg=_ACCENT)
+        self._queue_lbl.pack(side=tk.LEFT, padx=(8, 0))
+
         # Summary label (right-aligned)
         self._summary_lbl = tk.Label(tb_inner, text="",
                                      font=("Segoe UI", 9), bg=_SURFACE, fg=_TEXT2)
@@ -435,8 +465,15 @@ class _LibraryTabController:
         tree_card.pack(fill=tk.BOTH, expand=True)
 
         cols = ("status", "type", "files", "updated")
+        style = ttk.Style()
+        style.configure("Lib.Treeview", rowheight=42, font=("Segoe UI", 10))
+        style.configure("Lib.Treeview.Heading", font=("Segoe UI", 9, "bold"))
+        # Darker selection for better contrast
+        style.map("Lib.Treeview",
+                  background=[("selected", _SEL_BG)],
+                  foreground=[("selected", _SEL_FG)])
         self._tree = ttk.Treeview(tree_card, columns=cols, show="tree headings",
-                                  selectmode="browse")
+                                  selectmode="browse", style="Lib.Treeview")
 
         self._tree.heading("#0",      text="Folder",        anchor=tk.W)
         self._tree.heading("status",  text="Drive Status",  anchor=tk.W)
@@ -484,6 +521,9 @@ class _LibraryTabController:
         if self._lib.folders:
             self._on_refresh_status()
 
+        # ── Poller for cross-thread signals ──────────────────────────────
+        self._poll_bg_signals()
+
         # ── Auto-refresh when the Library tab becomes visible ─────────────
         # This guarantees fresh data even when the scan finished while the
         # user was on a different tab, or when reload() had a silent error.
@@ -505,6 +545,20 @@ class _LibraryTabController:
             pass
 
     # ── Public refresh ────────────────────────────────────────────────────
+
+    def _poll_bg_signals(self) -> None:
+        """Poll for cross-thread signals (workaround for tkinter threading)."""
+        try:
+            if self._pending_status_done:
+                self._pending_status_done = False
+                self._after_status_check()
+            if self._pending_update_result is not None:
+                entry, error = self._pending_update_result
+                self._pending_update_result = None
+                self._after_update(entry, error)
+            self._frame.after(150, self._poll_bg_signals)
+        except Exception:
+            pass  # widget destroyed
 
     def reload(self) -> None:
         """Reload library from disk and refresh the table.
@@ -624,6 +678,7 @@ class _LibraryTabController:
             _mat_disable(self._btn_delete)
             _mat_disable(self._btn_remap)
             _mat_disable(self._btn_refresh)
+            _mat_disable(self._btn_update_all)
         else:
             _mat_enable(self._btn_add)
             if has_sel:
@@ -637,6 +692,17 @@ class _LibraryTabController:
             else:
                 _mat_disable(self._btn_remap)
             _mat_enable(self._btn_refresh)
+            if len(self._lib.folders) > 0:
+                _mat_enable(self._btn_update_all)
+            else:
+                _mat_disable(self._btn_update_all)
+
+        # Update queue label
+        qlen = len(self._update_queue)
+        if qlen > 0:
+            self._queue_lbl.configure(text=f"Queue: {qlen} folder{'s' if qlen != 1 else ''}")
+        else:
+            self._queue_lbl.configure(text="")
 
     def _set_busy(self, busy: bool) -> None:
         self._busy = busy
@@ -662,10 +728,73 @@ class _LibraryTabController:
         folder = Path(folder_str).resolve()
         self._run_update(folder)
 
+    def _estimate_update(self, folder: Path) -> tuple[int, int, str]:
+        """Count images and estimate update time for *folder*.
+
+        Returns (total_images, new_images, time_str).
+        """
+        from scanner import IMAGE_EXTENSIONS
+        recursive = getattr(self._app.settings, "recursive", True)
+        try:
+            if recursive:
+                all_files = [p for p in folder.rglob("*")
+                             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+            else:
+                all_files = [p for p in folder.iterdir()
+                             if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+        except (PermissionError, OSError):
+            all_files = []
+
+        total = len(all_files)
+        cache = self._lib.load_cache(str(folder))
+
+        new_count = 0
+        for fp in all_files:
+            key = str(fp)
+            existing = cache.get(key)
+            if existing is None:
+                new_count += 1
+            else:
+                try:
+                    stat = fp.stat()
+                    if existing.mtime != stat.st_mtime or existing.size != stat.st_size:
+                        new_count += 1
+                except OSError:
+                    pass
+
+        # ~0.08s per new file, ~0.002s per cached file
+        est_sec = new_count * 0.08 + (total - new_count) * 0.002
+        if est_sec < 5:
+            time_str = "a few seconds"
+        elif est_sec < 60:
+            time_str = f"~{int(est_sec)} seconds"
+        elif est_sec < 3600:
+            mins = int(est_sec / 60)
+            time_str = f"~{mins} minute{'s' if mins != 1 else ''}"
+        else:
+            hrs = est_sec / 3600
+            time_str = f"~{hrs:.1f} hours"
+
+        return total, new_count, time_str
+
     def _on_update(self) -> None:
         if not self._selected:
             return
         folder = Path(self._selected).resolve()
+        total, new_count, time_str = self._estimate_update(folder)
+
+        cached = total - new_count
+        msg = (
+            f"Update hashes for:\n"
+            f"  {folder.name}\n\n"
+            f"  {total:,} images found\n"
+            f"  {cached:,} already cached (will be skipped)\n"
+            f"  {new_count:,} new / changed (will be hashed)\n\n"
+            f"Estimated time: {time_str}\n\n"
+            f"Proceed?"
+        )
+        if not messagebox.askyesno("Update Folder", msg, parent=self._frame):
+            return
         self._run_update(folder)
 
     def _on_delete(self) -> None:
@@ -725,6 +854,93 @@ class _LibraryTabController:
         threading.Thread(target=self._bg_check_all_statuses,
                          daemon=True).start()
 
+    # ── Batch update scheduling ──────────────────────────────────────────
+
+    @staticmethod
+    def _dedupe_folders(folders: list[Path]) -> list[Path]:
+        """Remove folders that are sub-paths of other folders in the list.
+
+        If folder A contains folder B, only A is kept because updating A
+        already hashes all images inside B.
+        """
+        resolved = sorted({f.resolve() for f in folders}, key=lambda p: str(p))
+        result: list[Path] = []
+        for folder in resolved:
+            # Check if this folder is a sub-path of any already-accepted folder
+            is_child = False
+            for kept in result:
+                try:
+                    folder.relative_to(kept)
+                    is_child = True
+                    break
+                except ValueError:
+                    pass
+            if not is_child:
+                # Also remove any previously accepted folders that are children
+                result = [k for k in result
+                          if not _is_subpath(k, folder)]
+                result.append(folder)
+        return result
+
+    def _on_update_all(self) -> None:
+        """Schedule a batch update for all tracked library folders.
+
+        Detects overlapping folders and deduplicates so each image is
+        hashed at most once.
+        """
+        if not self._lib.folders:
+            return
+
+        all_folders = [Path(e.path).resolve() for e in self._lib.folders]
+        deduped = self._dedupe_folders(all_folders)
+        skipped = len(all_folders) - len(deduped)
+
+        # Build estimate summary
+        total_images = 0
+        total_new = 0
+        total_sec = 0.0
+        lines: list[str] = []
+        for folder in deduped:
+            total, new_count, time_str = self._estimate_update(folder)
+            total_images += total
+            total_new += new_count
+            total_sec += new_count * 0.08 + (total - new_count) * 0.002
+            lines.append(f"  • {folder.name}  —  {total:,} images ({new_count:,} new)")
+
+        if total_sec < 5:
+            total_time = "a few seconds"
+        elif total_sec < 60:
+            total_time = f"~{int(total_sec)} seconds"
+        elif total_sec < 3600:
+            mins = int(total_sec / 60)
+            total_time = f"~{mins} minute{'s' if mins != 1 else ''}"
+        else:
+            hrs = total_sec / 3600
+            total_time = f"~{hrs:.1f} hours"
+
+        msg = f"Schedule batch update for {len(deduped)} folder{'s' if len(deduped) != 1 else ''}:\n\n"
+        msg += "\n".join(lines)
+        if skipped:
+            msg += f"\n\n  ⚠ {skipped} overlapping folder{'s' if skipped != 1 else ''} removed (already covered by parent folders)"
+        msg += f"\n\nTotal: {total_images:,} images ({total_new:,} to hash)\n"
+        msg += f"Estimated time: {total_time}\n\nProceed?"
+
+        if not messagebox.askyesno("Batch Update", msg, parent=self._frame):
+            return
+
+        self._update_queue = list(deduped)
+        self._update_btn_states()
+        self._process_queue()
+
+    def _process_queue(self) -> None:
+        """Pop the next folder from the queue and start updating it."""
+        if not self._update_queue:
+            self._update_btn_states()
+            return
+        folder = self._update_queue.pop(0)
+        self._update_btn_states()
+        self._run_update(folder)
+
     # ── Background: drive status check ───────────────────────────────────
 
     def _bg_check_all_statuses(self) -> None:
@@ -735,7 +951,12 @@ class _LibraryTabController:
                 self._statuses[entry.path] = st
             except Exception:
                 self._statuses[entry.path] = DriveStatus(state="unknown")
-        self._frame.after(0, self._after_status_check)
+        try:
+            self._frame.after(0, self._after_status_check)
+        except RuntimeError:
+            # "main thread is not in main loop" — tk is shutting down or busy;
+            # schedule via after_idle from a polling fallback
+            self._pending_status_done = True
 
     def _after_status_check(self) -> None:
         for entry in self._lib.folders:
@@ -762,7 +983,10 @@ class _LibraryTabController:
                                          value=int(done / total * 100))
                 label = f"{name}  ({done}/{total})"
                 self._status_lbl.configure(text=label)
-            self._frame.after(0, _ui)
+            try:
+                self._frame.after(0, _ui)
+            except RuntimeError:
+                pass
 
         def _bg() -> None:
             entry = None
@@ -783,7 +1007,10 @@ class _LibraryTabController:
                     self._statuses[str(folder.resolve())] = DriveStatus(state="ok")
             except Exception as exc:
                 error = exc
-            self._frame.after(0, lambda: self._after_update(entry, error))
+            try:
+                self._frame.after(0, lambda: self._after_update(entry, error))
+            except RuntimeError:
+                self._pending_update_result = (entry, error)
 
         threading.Thread(target=_bg, daemon=True).start()
 
@@ -800,14 +1027,25 @@ class _LibraryTabController:
                 f"Failed to update folder:\n\n{error}",
                 parent=self._frame,
             )
+            # Continue queue even on error
+            if self._update_queue:
+                self._frame.after(200, self._process_queue)
             return
 
         if entry is None:
             self._status_lbl.configure(text="Nothing to update.", fg=_TEXT2)
+            if self._update_queue:
+                self._frame.after(200, self._process_queue)
             return
 
         self._reload_table()
-        self._status_lbl.configure(
-            text=f"Done — {entry.file_count:,} files cached for {Path(entry.path).name}",
-            fg=_SUCCESS,
-        )
+
+        remaining = len(self._update_queue)
+        done_msg = f"Done — {entry.file_count:,} files cached for {Path(entry.path).name}"
+        if remaining:
+            done_msg += f"  |  {remaining} folder{'s' if remaining != 1 else ''} remaining in queue"
+        self._status_lbl.configure(text=done_msg, fg=_SUCCESS)
+
+        # Process next folder in queue
+        if self._update_queue:
+            self._frame.after(500, self._process_queue)

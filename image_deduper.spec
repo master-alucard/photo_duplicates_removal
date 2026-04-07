@@ -7,14 +7,18 @@
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
 
 # ── rawpy: collect the LibRaw DLL that ships inside the rawpy wheel ───────────
-# collect_dynamic_libs finds libraw.dll (and any other .dll/.so rawpy needs)
-# collect_data_files picks up any non-Python data files in the rawpy package
 try:
     rawpy_binaries = collect_dynamic_libs('rawpy')
     rawpy_datas    = collect_data_files('rawpy')
 except Exception:
     rawpy_binaries = []
     rawpy_datas    = []
+
+# ── ttkbootstrap: collect theme data ─────────────────────────────────────────
+try:
+    ttkb_datas = collect_data_files('ttkbootstrap')
+except Exception:
+    ttkb_datas = []
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
@@ -23,6 +27,7 @@ a = Analysis(
     binaries=rawpy_binaries,
     datas=[
         *rawpy_datas,
+        *ttkb_datas,
         ('assets/app.ico', 'assets'),   # app icon used by the About tab / installer
     ],
     hiddenimports=[
@@ -39,6 +44,8 @@ a = Analysis(
         # rawpy Python extension + C backend
         'rawpy',
         'rawpy._rawpy',
+        # ttkbootstrap theme engine
+        'ttkbootstrap',
         # scipy / numpy sub-modules sometimes missed by the auto-analyser
         'scipy.special._ufuncs_cxx',
         'scipy.linalg.cython_blas',

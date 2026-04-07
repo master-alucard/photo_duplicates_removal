@@ -106,14 +106,34 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🎨 UI Polish & Fixes
-            - **Card-interior backgrounds** — settings, scan forms, and all card sections now show white interiors (light mode) / dark interiors (dark mode) instead of gray.
-            - **Duplicate column alignment** — originals and duplicates columns in the report viewer are now perfectly aligned across all group cards using a uniform 50/50 grid layout.
-            - **Checkbox label spacing** — added visible gap between checkbox indicators and their label text for better readability.
-            - **Scroll artifacts fixed** — eliminated duplicate scroll event processing in the report viewer.
-            - **Startup flash eliminated** — the window is now hidden during construction and shown only when fully built, preventing blinking artifacts on secondary monitors.
-            - **Theme switching crash fix** — `element_create` wrapped in try/except to prevent crash when toggling light/dark mode.
-            - **Restored original colour palette** — reverted to the original Material Design 3 colour tokens.
+            ### 🎨 UI Overhaul
+            - **ttkbootstrap styling** — beautiful Material Design 3 UI with ttkbootstrap theme engine.
+            - **Tab sizing** — 1.5x tab height with bold 14pt titles.
+            - **Dark mode** — seamless dark theme with no visible card blocks; blended backgrounds.
+            - **Theme switching** — fully updates all UI elements with deferred style re-application.
+            - **Slider green band** — 30% opacity for recommended range indicator.
+            - **Round info/reset buttons** — accent-stroke circular buttons in settings.
+            - **LabelFrame borders** — visible groove borders in both light and dark modes.
+            - **Treeview rows** — 1.5x row height (42px) for history and library; dark deep grey selection (light mode) / light grey + dark text selection (dark mode).
+            - **Background colour** — slightly off-white (#F4F4F5) instead of pure white.
+
+            ### 📋 Results Viewer
+            - **Coloured columns** — light green originals, light red duplicates (ttkbootstrap-safe via configure).
+            - **First/Last page buttons** — new ◀◀ and ▶▶ buttons for quick pagination.
+            - **Unique toggle** — ★ Unique button saves page + scroll position, navigates to unique images, changes to ◀ Groups; pressing again restores saved position.
+            - **Selection persistence** — checkbox states are remembered when closing and reopening the in-app report viewer within the same scan; cleared on new scan.
+            - **Instant page info** — page number and group info update immediately on page change, before content loads.
+            - **Results divider** — double-line separator between nav bar and scroll area.
+
+            ### 📚 Library
+            - **Update confirmation** — dialog with time estimate before updating folders.
+            - **Batch scheduling** — Update All with folder overlap detection.
+            - **Threading fix** — buttons no longer get permanently disabled (cross-thread polling).
+
+            ### ⚙️ Settings & Features
+            - **Organize-by-date** — radio group for organizing in place vs moving to output folder.
+            - **Phase details** — panel initially visible when enabled in settings.
+            - **Progress padding** — improved padding for scan progress panel.
 
             ---
 

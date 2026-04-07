@@ -64,10 +64,12 @@ def _mat_btn(parent, text: str, command, bg: str, fg: str = "#FFFFFF",
     """Flat Material-style button."""
     btn = tk.Button(
         parent, text=text, command=command,
-        bg=bg, fg=fg, activebackground=_darken_color(bg), activeforeground=fg,
-        relief=tk.FLAT, bd=0, padx=12, pady=5,
+        relief=tk.FLAT, bd=0,
         font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw,
     )
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken_color(bg),
+                  activeforeground=fg, padx=12, pady=5)
     btn._mat_bg = bg
     btn._mat_fg = fg
 
