@@ -75,40 +75,40 @@ _CUSTOM_PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 # ── Material Design 3 colour tokens (light defaults, overwritten by _apply_theme) ──
 _ACCENT         = "#1565C0"
 _ACCENT_DARK    = "#0D47A1"
-_ACCENT_TINT    = "#EBF2FA"
-_BG             = "#FFFFFF"
+_ACCENT_TINT    = "#E8EFF9"
+_BG             = "#F2F4F7"
 _CARD_BG        = "#FFFFFF"
 _M_SUCCESS      = "#2E7D32"
 _M_ERROR        = "#C62828"
 _M_WARNING      = "#E65100"
 _M_AMBER        = "#F57F17"
-_M_DIVIDER      = "#E5E7EB"
-_M_TEXT1        = "#1A1A1A"
-_M_TEXT2        = "#555555"
+_M_DIVIDER      = "#DDE1E6"
+_M_TEXT1        = "#1B1B1F"
+_M_TEXT2        = "#49454F"
 _MAT_DISABLED   = "#C4C7C5"
-_M3_SURFACE1    = "#FAFAFA"
-_M3_SURFACE2    = "#F5F5F5"
-_M3_SURFACE3    = "#EEEEEE"
+_M3_SURFACE1    = "#F7F8FA"
+_M3_SURFACE2    = "#ECEEF2"
+_M3_SURFACE3    = "#E2E5EA"
 _M3_ON_PRIMARY  = "#FFFFFF"
 # Extended tokens resolved from theme palette
 _M_HINT         = "#666666"
 _M_HINT2        = "#555555"
 _M_HINT3        = "#888888"
 _M_HINT4        = "#999999"
-_M_HINT5        = "#AAAAAA"
+_M_HINT5        = "#9E9E9E"
 _M_HEADER_BG    = "#1565C0"
 _M_HEADER_SUB   = "#B3D4F0"
-_M_INFO_BG      = "#F0F8F0"
+_M_INFO_BG      = "#E8F5E9"
 _M_INFO_FG      = "#1B5E20"
 _M_INFO_BORDER  = "#2E7D32"
-_M_DEV_BG       = "#FFFCF0"
+_M_DEV_BG       = "#FFF8E1"
 _M_DEV_BORDER   = "#FFD54F"
 _M_DEV_TITLE_FG = "#E65100"
 _M_DEV_BODY_FG  = "#795548"
-_M_DETAIL_BG    = "#FAFAFA"
+_M_DETAIL_BG    = "#f4f4f4"
 _M_PURPLE       = "#7c3aed"
 _M_NOT_INST     = "#e03030"
-_M_DISABLED_FG  = "#AAAAAA"
+_M_DISABLED_FG  = "#838387"
 # Button backgrounds — always saturated for white text
 _BTN_PRIMARY    = "#1565C0"
 _BTN_SUCCESS    = "#2E7D32"
@@ -116,8 +116,8 @@ _BTN_ERROR      = "#C62828"
 _BTN_WARNING    = "#E65100"
 _BTN_SECONDARY  = "#546E7A"
 # Slider canvas colours
-_SL_REC_BAND    = "#DEF0DE"
-_SL_TRACK       = "#D0D0D0"
+_SL_REC_BAND    = "#c8e6c9"
+_SL_TRACK       = "#bdbdbd"
 _SL_THUMB       = "#1565C0"
 _SL_THUMB_OL    = "#FFFFFF"
 
@@ -350,14 +350,17 @@ _ttk_cb_refs: list = []
 
 
 def _create_ttk_checkbox_images():
-    """Create 16×16 crisp checkbox images for ttk.Checkbutton indicator.
+    """Create checkbox images for ttk.Checkbutton indicator.
 
     Returns (unchecked_PhotoImage, checked_PhotoImage) or None on failure.
     Images are rendered at 4× resolution and downscaled with LANCZOS.
+    The images include 6 px of transparent right-padding so that the
+    label text has visible spacing from the indicator.
     """
     try:
         from PIL import ImageDraw
         size = 16
+        pad_right = 6         # extra transparent space → label gap
         S = size * 4          # supersample at 4×
         r = int(S * 0.16)     # corner radius
 
@@ -368,7 +371,10 @@ def _create_ttk_checkbox_images():
             [3, 3, S - 4, S - 4], radius=r,
             outline="#B0B0B0", width=max(3, S // 12), fill="#FFFFFF",
         )
-        unchecked = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+        box = img.resize((size, size), Image.LANCZOS)
+        wide = Image.new("RGBA", (size + pad_right, size), (0, 0, 0, 0))
+        wide.paste(box, (0, 0))
+        unchecked = ImageTk.PhotoImage(wide)
 
         # Checked — green fill, white ✓
         img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
@@ -387,7 +393,10 @@ def _create_ttk_checkbox_images():
         hr = lw // 2
         for px, py in (pts[0], pts[-1]):
             d.ellipse([px - hr, py - hr, px + hr, py + hr], fill="white")
-        checked = ImageTk.PhotoImage(img.resize((size, size), Image.LANCZOS))
+        box = img.resize((size, size), Image.LANCZOS)
+        wide = Image.new("RGBA", (size + pad_right, size), (0, 0, 0, 0))
+        wide.paste(box, (0, 0))
+        checked = ImageTk.PhotoImage(wide)
 
         # Keep references alive
         _ttk_cb_refs.extend([unchecked, checked])
@@ -419,15 +428,18 @@ def _configure_material_style(style: ttk.Style) -> None:
               foreground=[("selected", _ACCENT), ("!selected", _M_TEXT2)])
 
     # ── Frames ──��────────────────────────────────────────────────────────
-    style.configure("TFrame", background=_BG)
+    style.configure("TFrame", background=_CARD_BG)
     style.configure("Card.TFrame", background=_CARD_BG)
+    style.configure("Page.TFrame", background=_BG)     # page-level body
 
     # ── Labels ───────────────────────────────────────────────────────────
-    style.configure("TLabel", background=_BG, foreground=_M_TEXT1, font=_font)
+    style.configure("TLabel", background=_CARD_BG, foreground=_M_TEXT1, font=_font)
     style.configure("Title.TLabel", font=("Segoe UI", 11, "bold"),
-                    foreground=_M_TEXT1, background=_BG)
+                    foreground=_M_TEXT1, background=_CARD_BG)
     style.configure("Caption.TLabel", font=_font_sm,
-                    foreground=_M_TEXT2, background=_BG)
+                    foreground=_M_TEXT2, background=_CARD_BG)
+    style.configure("Page.TLabel", background=_BG,
+                    foreground=_M_TEXT1, font=_font)    # page-level labels
 
     # ── LabelFrame (clean card container — no border) ──────────────────
     style.configure("TLabelframe", background=_CARD_BG,
@@ -448,11 +460,14 @@ def _configure_material_style(style: ttk.Style) -> None:
     _cb_imgs = _create_ttk_checkbox_images()
     if _cb_imgs:
         _cb_unchecked, _cb_checked = _cb_imgs
-        style.element_create(
-            "custom_cb_indicator", "image", _cb_unchecked,
-            ("selected", _cb_checked),
-            sticky="",
-        )
+        try:
+            style.element_create(
+                "custom_cb_indicator", "image", _cb_unchecked,
+                ("selected", _cb_checked),
+                sticky="",
+            )
+        except Exception:
+            pass  # element already exists from a previous call (theme switch)
         style.layout("TCheckbutton", [
             ("Checkbutton.padding", {"children": [
                 ("custom_cb_indicator", {"side": "left", "sticky": ""}),
@@ -652,7 +667,7 @@ def _scrollable_frame(parent: tk.Widget):
     sb.pack(side=tk.RIGHT, fill=tk.Y)
     canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-    body = ttk.Frame(canvas, padding=(16, 10, 16, 10))
+    body = ttk.Frame(canvas, padding=(16, 10, 16, 10), style="Page.TFrame")
     bw = canvas.create_window((0, 0), window=body, anchor=tk.NW)
     body.bind("<Configure>", lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
     canvas.bind("<Configure>", lambda e: canvas.itemconfig(bw, width=e.width))
@@ -775,12 +790,12 @@ class App:
         self._nb = ttk.Notebook(self.root, style="App.TNotebook")
         self._nb.pack(fill=tk.BOTH, expand=True)
 
-        self._tab_scan     = ttk.Frame(self._nb)
-        self._tab_custom   = ttk.Frame(self._nb)
-        self._tab_history  = ttk.Frame(self._nb)
-        self._tab_library  = ttk.Frame(self._nb)
-        self._tab_settings = ttk.Frame(self._nb)
-        self._tab_about    = ttk.Frame(self._nb)
+        self._tab_scan     = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_custom   = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_history  = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_library  = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_settings = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_about    = ttk.Frame(self._nb, style="Page.TFrame")
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
         self._nb.add(self._tab_custom,   text="  Compare Scan  ")
@@ -1077,17 +1092,19 @@ class App:
         self._refresh_date_order_choices(init_sep, init_order_idx)
 
         # Estimate
-        self._estimate_frame = ttk.Frame(body)
+        self._estimate_frame = ttk.Frame(body, style="Page.TFrame")
         self._estimate_frame.pack(fill=tk.X, pady=(2, 4))
         ttk.Label(self._estimate_frame, textvariable=self._estimate_var,
-                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic"),
+                  style="Page.TLabel").pack(anchor=tk.W)
 
         # Resume notice
-        self._resume_frame = ttk.Frame(body)
+        self._resume_frame = ttk.Frame(body, style="Page.TFrame")
         self._resume_frame.pack(fill=tk.X, pady=(2, 2))
         self._resume_lbl = ttk.Label(
             self._resume_frame, textvariable=self._resume_var,
-            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"))
+            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"),
+            style="Page.TLabel")
         self._resume_lbl.pack(side=tk.LEFT)
         self._resume_btn  = ttk.Button(self._resume_frame, text="Resume",  command=self._resume_scan)
         self._discard_btn = ttk.Button(self._resume_frame, text="Discard", command=self._discard_resume)
@@ -1836,18 +1853,20 @@ class App:
         self._refresh_date_order_choices(init_sep2, init_order_idx2)
 
         # Estimate
-        self._custom_estimate_frame = ttk.Frame(body)
+        self._custom_estimate_frame = ttk.Frame(body, style="Page.TFrame")
         self._custom_estimate_frame.pack(fill=tk.X, pady=(2, 4))
         ttk.Label(self._custom_estimate_frame, textvariable=self._custom_estimate_var,
-                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic")).pack(anchor=tk.W)
+                  foreground=_M_HINT2, font=("Segoe UI", 8, "italic"),
+                  style="Page.TLabel").pack(anchor=tk.W)
 
         # Resume notice (Compare Scan)
-        self._custom_resume_frame = ttk.Frame(body)
+        self._custom_resume_frame = ttk.Frame(body, style="Page.TFrame")
         self._custom_resume_frame.pack(fill=tk.X, pady=(2, 2))
         self._custom_resume_var = tk.StringVar()
         self._custom_resume_lbl = ttk.Label(
             self._custom_resume_frame, textvariable=self._custom_resume_var,
-            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"))
+            foreground=_M_PURPLE, font=("Segoe UI", 8, "bold"),
+            style="Page.TLabel")
         self._custom_resume_btn = ttk.Button(
             self._custom_resume_frame, text="Resume",
             command=self._resume_custom_scan)
@@ -3018,7 +3037,7 @@ class App:
         try:
             _cbg = parent.cget("bg")
         except Exception:
-            _cbg = _BG
+            _cbg = _CARD_BG   # card interior default
 
         scale_c = tk.Canvas(ctrl, height=CANVAS_H, highlightthickness=0,
                             bg=_cbg, cursor="hand2")
@@ -4504,8 +4523,11 @@ def main() -> None:
         si.signal_and_exit()   # focus the first window, then exit immediately
 
     root = tk.Tk()
+    root.withdraw()                          # hide during UI construction
     app  = App(root)
     si.start_listener(root, app.bring_to_front)
+    root.update_idletasks()                  # finalise geometry before showing
+    root.deiconify()                         # show fully-built window
     root.mainloop()
     si.cleanup()
 

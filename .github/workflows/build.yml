@@ -106,12 +106,14 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🎨 Clean White Light Theme
-            - **White backgrounds** — replaced all gray backgrounds (`#F2F4F7`, `#ECEEF2`, `#E2E5EA`) with clean white across the entire app: main window, tabs, report viewer, about page, library tab.
-            - **Subtler tints** — originals (soft green), previews (soft red), solo (soft blue), and manual sections use very light pastel tints instead of heavy colored backgrounds.
-            - **Better text contrast** — darker text colors (`#1A1A1A`, `#555555`) on white for clear readability. No more invisible text on gray.
-            - **Minimalistic surfaces** — tab bar, buttons, scrollbars, treeview headers all use lighter grays (`#F5F5F5`, `#EEEEEE`) instead of the old muddy tones.
-            - **Cleaner dividers** — lighter `#E5E7EB` dividers that separate without dominating.
+            ### 🎨 UI Polish & Fixes
+            - **Card-interior backgrounds** — settings, scan forms, and all card sections now show white interiors (light mode) / dark interiors (dark mode) instead of gray.
+            - **Duplicate column alignment** — originals and duplicates columns in the report viewer are now perfectly aligned across all group cards using a uniform 50/50 grid layout.
+            - **Checkbox label spacing** — added visible gap between checkbox indicators and their label text for better readability.
+            - **Scroll artifacts fixed** — eliminated duplicate scroll event processing in the report viewer.
+            - **Startup flash eliminated** — the window is now hidden during construction and shown only when fully built, preventing blinking artifacts on secondary monitors.
+            - **Theme switching crash fix** — `element_create` wrapped in try/except to prevent crash when toggling light/dark mode.
+            - **Restored original colour palette** — reverted to the original Material Design 3 colour tokens.
 
             ---
 

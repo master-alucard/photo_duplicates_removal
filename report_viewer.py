@@ -87,29 +87,29 @@ def _make_checkbox_pair(
 
 # ── Material Design colour palette (light defaults, overwritten by _apply_theme) ──
 
-_M_BG           = "#FFFFFF"
+_M_BG           = "#F2F4F7"
 _M_SURFACE      = "#FFFFFF"
 _M_PRIMARY      = "#1565C0"
 _M_PRIMARY_DARK = "#0D47A1"
-_M_PRIMARY_TINT = "#EBF2FA"
+_M_PRIMARY_TINT = "#E8EFF9"
 _M_SUCCESS      = "#2E7D32"
-_M_SUCCESS_TINT = "#F0F8F0"
+_M_SUCCESS_TINT = "#E8F5E9"
 _M_ERROR        = "#C62828"
-_M_ERROR_TINT   = "#FFF5F5"
+_M_ERROR_TINT   = "#FFEBEE"
 _M_WARNING      = "#E65100"
-_M_WARNING_TINT = "#FFF8F0"
+_M_WARNING_TINT = "#FFF3E0"
 _M_PURPLE       = "#6A1B9A"
-_M_DIVIDER      = "#E5E7EB"
-_M_TEXT1        = "#1A1A1A"
-_M_TEXT2        = "#555555"
-_M_TEXT3        = "#888888"
-_M_SOLO_TINT    = "#F0F8FF"
+_M_DIVIDER      = "#DDE1E6"
+_M_TEXT1        = "#1B1B1F"
+_M_TEXT2        = "#49454F"
+_M_TEXT3        = "#79747E"
+_M_SOLO_TINT    = "#E1F5FE"
 _M_SOLO_BORDER  = "#0288D1"
-_M_BROKEN_TINT  = "#FFF5F5"
+_M_BROKEN_TINT  = "#FCE4EC"
 _M_BROKEN_BDR   = "#AD1457"
 _M_MANUAL      = "#5C6BC0"
-_M_MANUAL_TINT = "#F0F0FA"
-_M_MANUAL_HDR  = "#F5F0FA"
+_M_MANUAL_TINT = "#E8EAF6"
+_M_MANUAL_HDR  = "#EDE7F6"
 _M_MANUAL_DARK = "#4527A0"
 
 
@@ -155,13 +155,13 @@ def _apply_theme(dark: bool = False) -> None:
         _M_MANUAL_DARK  = "#B39DDB"   # Deep Purple 200
     else:
         _M_PURPLE       = "#6A1B9A"
-        _M_SOLO_TINT    = "#F0F8FF"
+        _M_SOLO_TINT    = "#E1F5FE"
         _M_SOLO_BORDER  = "#0288D1"
-        _M_BROKEN_TINT  = "#FFF5F5"
+        _M_BROKEN_TINT  = "#FCE4EC"
         _M_BROKEN_BDR   = "#AD1457"
         _M_MANUAL       = "#5C6BC0"
-        _M_MANUAL_TINT  = "#F0F0FA"
-        _M_MANUAL_HDR   = "#F5F0FA"
+        _M_MANUAL_TINT  = "#E8EAF6"
+        _M_MANUAL_HDR   = "#EDE7F6"
         _M_MANUAL_DARK  = "#4527A0"
     _RV_REVERT_BG    = p["RV_REVERT_BG"]
     _RV_CALIB_BG     = p["RV_CALIB_BG"]
@@ -692,9 +692,15 @@ class ReportViewer(tk.Frame):
         body = tk.Frame(card, bg=_M_SURFACE)
         body.pack(fill=tk.X)
 
+        # Use grid with uniform columns so the divider is always at 50%
+        body.columnconfigure(0, weight=1, uniform="half")
+        body.columnconfigure(1, weight=0)
+        body.columnconfigure(2, weight=1, uniform="half")
+        body.rowconfigure(0, weight=1)
+
         # Originals column — label changes after apply
         orig_col = tk.Frame(body, bg=_M_SUCCESS_TINT, padx=10, pady=8)
-        orig_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        orig_col.grid(row=0, column=0, sticky="nsew")
         orig_lbl_text = "Originals — kept in place ✓" if apply_state != "none" else "Originals — kept in place"
         tk.Label(
             orig_col, text=orig_lbl_text,
@@ -709,12 +715,12 @@ class ReportViewer(tk.Frame):
             tile = self._build_image_tile(orig_grid, rec, v, img_idx % 3, img_idx // 3,
                                           bg=_M_SUCCESS_TINT, show_checkbox=False, group_idx=idx)
 
-        tk.Frame(body, width=1, bg=_M_DIVIDER).pack(side=tk.LEFT, fill=tk.Y)
+        tk.Frame(body, width=1, bg=_M_DIVIDER).grid(row=0, column=1, sticky="ns")
 
         # Previews column — label and tile state change after apply
-        prev_col_bg = "#F5F5F5" if apply_state == "full" else _M_ERROR_TINT
+        prev_col_bg = "#EEEEEE" if apply_state == "full" else _M_ERROR_TINT
         prev_col = tk.Frame(body, bg=prev_col_bg, padx=10, pady=8)
-        prev_col.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        prev_col.grid(row=0, column=2, sticky="nsew")
 
         if apply_state == "full":
             prev_lbl_text = f"Duplicates trashed ✓  →  trash/"
@@ -736,7 +742,7 @@ class ReportViewer(tk.Frame):
             key = (idx, "prev", img_idx)
             v = self._image_vars[key]  # pre-created by _init_vars
             trashed = rec.path in self._trashed_paths
-            tile_bg = "#F0F0F0" if trashed else prev_col_bg
+            tile_bg = "#E0E0E0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
                                    bg=tile_bg, max_thumb=120, trashed=trashed, group_idx=idx)
 
@@ -2452,10 +2458,11 @@ class ReportViewer(tk.Frame):
             except Exception:
                 pass
 
-    def _on_mousewheel(self, event: tk.Event) -> None:
+    def _on_mousewheel(self, event: tk.Event) -> str:
         # yscrollincrement=1 → each unit = 1 pixel; scroll ~100 px per notch
         px = int(-1 * (event.delta / 120) * 100)
         self._canvas.yview_scroll(px, "units")
+        return "break"   # stop event propagation → prevents duplicate scrolls
 
     def _on_frame_configure(self, _event=None) -> None:
         # Update scrollregion only when the frame actually changed size
