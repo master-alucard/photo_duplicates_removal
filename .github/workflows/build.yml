@@ -106,6 +106,17 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
+            ### 🐛 Bug Fixes
+            - **Missing groups on large result sets** — fixed groups rendering as blank white areas when pages contained many groups; root causes: premature `update_idletasks()` zeroing the scroll region, single geometry pass insufficient for thousands of widgets, canvas window width not pre-set before build
+            - **Scroll region now uses `after_idle`** — scrollregion is calculated only after all pending geometry events drain, with double `update_idletasks()` pass for large pages, plus 300ms and 1000ms safety-net recalculations
+            - **ttkbootstrap bg override fully resolved** — all remaining `tk.Frame`/`tk.Label`/`tk.Checkbutton` throughout group cards, manual sections, header, nav bar, dividers, and canvas frame now use `.configure(bg=)` after creation
+            - **Error placeholder for failed groups** — if a group card throws an exception it now shows a visible red warning instead of an invisible white gap
+            - **Canvas width pre-set** — inner frame gets correct canvas width before content builds so cards lay out at the right size from the start
+
+            ### ⚙️ Performance
+            - **Default page size lowered to 20** — was 100; each group card creates ~80 widgets, 100 groups = ~8,100 widgets which exceeds tkinter's reliable limit (~3,000–4,000)
+            - **Page size options: 5 / 10 / 20 / 50** — removed 100 from the dropdown to prevent users hitting the rendering limit
+
             ### 🎨 UI Overhaul
             - **ttkbootstrap styling** — beautiful Material Design 3 UI with ttkbootstrap theme engine.
             - **Tab sizing** — 1.5x tab height with bold 14pt titles.

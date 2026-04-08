@@ -437,7 +437,7 @@ class ReportViewer(tk.Frame):
         self._create_checkbox_images()
 
         # ── Header bar ────────────────────────────────────────────────────
-        hdr = tk.Frame(self, bg=_RV_HEADER_BG)
+        hdr = _tkframe(self, bg=_RV_HEADER_BG)
         hdr.pack(fill=tk.X)
         self._header_frame = hdr  # saved for revert-frame packing
 
@@ -446,9 +446,9 @@ class ReportViewer(tk.Frame):
                      _RV_HEADER_BG, fg=_RV_HEADER_STATS, font_size=9,
                      ).pack(side=tk.LEFT, padx=(12, 0), pady=8)
 
-        tk.Label(
-            hdr, text="Review Scan Results",
-            font=("Segoe UI", 14, "bold"), bg=_RV_HEADER_BG, fg="#FFFFFF",
+        _tklabel(
+            hdr, bg=_RV_HEADER_BG, fg="#FFFFFF", text="Review Scan Results",
+            font=("Segoe UI", 14, "bold"),
         ).pack(side=tk.LEFT, padx=18, pady=12)
 
         n_groups   = len(self._groups)
@@ -461,18 +461,19 @@ class ReportViewer(tk.Frame):
             parts.append(f"{len(self._solo_originals)} unique")
         if self._broken_files:
             parts.append(f"{len(self._broken_files)} broken")
-        tk.Label(
-            hdr, text="  ·  ".join(parts),
-            font=("Segoe UI", 9), bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
+        _tklabel(
+            hdr, bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
+            text="  ·  ".join(parts),
+            font=("Segoe UI", 9),
         ).pack(side=tk.LEFT, padx=4)
 
         # Right side of header: status, revert, apply
-        self._status_lbl = tk.Label(hdr, text="", bg=_RV_HEADER_BG,
-                                    fg=_RV_HEADER_STATS, font=("Segoe UI", 9))
+        self._status_lbl = _tklabel(hdr, bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
+                                    text="", font=("Segoe UI", 9))
         self._status_lbl.pack(side=tk.RIGHT, padx=12)
 
         # Revert buttons — always created, revealed only after first successful apply
-        self._revert_frame = tk.Frame(hdr, bg=_RV_HEADER_BG)
+        self._revert_frame = _tkframe(hdr, bg=_RV_HEADER_BG)
         self._revert_selected_btn = _mat_btn(
             self._revert_frame, "↩  Revert Selected", self._on_revert_selected, _RV_REVERT_BG)
         self._revert_selected_btn.pack(side=tk.LEFT, padx=4)
@@ -485,11 +486,10 @@ class ReportViewer(tk.Frame):
         self._apply_btn.pack(side=tk.RIGHT, padx=(4, 12), pady=8)
 
         # ── Header separator line ─────────────────────────────────────────
-        tk.Frame(self, height=1, bg=_M_DIVIDER).pack(fill=tk.X)
+        _tkframe(self, bg=_M_DIVIDER, height=1).pack(fill=tk.X)
 
         # ── Pagination nav bar ────────────────────────────────────────────
-        nav = tk.Frame(self, bg=_M_SURFACE,
-                       highlightthickness=0)
+        nav = _tkframe(self, bg=_M_SURFACE, highlightthickness=0)
         nav.pack(fill=tk.X)
         self._nav_bar_frame = nav   # saved for show/hide during inline panels
 
@@ -508,8 +508,7 @@ class ReportViewer(tk.Frame):
         self._last_btn.pack(side=tk.LEFT, padx=(2, 10), pady=4)
 
         self._page_info_var = tk.StringVar(value="")
-        tk.Label(nav, textvariable=self._page_info_var,
-                 bg=_M_SURFACE, fg=_M_TEXT2,
+        _tklabel(nav, bg=_M_SURFACE, fg=_M_TEXT2, textvariable=self._page_info_var,
                  font=("Segoe UI", 9)).pack(side=tk.LEFT, padx=14)
 
         # Jump-to-unique / back-to-groups toggle button
@@ -533,11 +532,10 @@ class ReportViewer(tk.Frame):
         # Per-page size selector (right side — dropdown at far right, label to its left)
         self._page_size_var = tk.StringVar(value=str(self._page_size))
         ps_cb = ttk.Combobox(nav, textvariable=self._page_size_var,
-                             values=["10", "20", "50", "100"],
+                             values=["5", "10", "20", "50"],
                              width=5, state="readonly")
         ps_cb.pack(side=tk.RIGHT, padx=(0, 12))
-        tk.Label(nav, text="Groups per page:",
-                 bg=_M_SURFACE, fg=_M_TEXT2,
+        _tklabel(nav, bg=_M_SURFACE, fg=_M_TEXT2, text="Groups per page:",
                  font=("Segoe UI", 8)).pack(side=tk.RIGHT, padx=(0, 4))
         self._page_size_var.trace_add("write", self._on_page_size_change)
 
@@ -548,11 +546,11 @@ class ReportViewer(tk.Frame):
                  ).pack(side=tk.RIGHT, padx=2, pady=4)
 
         # ── Divider between nav bar and scroll area ────────────────────────
-        tk.Frame(self, height=1, bg=_M_DIVIDER).pack(fill=tk.X)
-        tk.Frame(self, height=1, bg=_M_TEXT3).pack(fill=tk.X)
+        _tkframe(self, bg=_M_DIVIDER, height=1).pack(fill=tk.X)
+        _tkframe(self, bg=_M_TEXT3, height=1).pack(fill=tk.X)
 
         # ── Scrollable canvas ─────────────────────────────────────────────
-        container = tk.Frame(self, bg=_M_BG)
+        container = _tkframe(self, bg=_M_BG)
         container.pack(fill=tk.BOTH, expand=True)
         self._canvas_container = container   # saved for show/hide during inline panels
 
@@ -565,7 +563,7 @@ class ReportViewer(tk.Frame):
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self._canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        self._inner_frame = tk.Frame(self._canvas, bg=_M_BG)
+        self._inner_frame = _tkframe(self._canvas, bg=_M_BG)
         self._canvas_window = self._canvas.create_window(
             (0, 0), window=self._inner_frame, anchor=tk.NW)
 
@@ -622,7 +620,7 @@ class ReportViewer(tk.Frame):
 
     def _build_group_card(self, idx: int, group: DuplicateGroup) -> None:
         self._ensure_group_vars(idx)
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
         self._group_frames[idx] = outer
 
@@ -652,15 +650,14 @@ class ReportViewer(tk.Frame):
         else:
             border_color = _M_PRIMARY
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE,
-                             highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        left_border = tk.Frame(card_wrap, width=4, bg=border_color)
+        left_border = _tkframe(card_wrap, bg=border_color, width=4)
         left_border.pack(side=tk.LEFT, fill=tk.Y)
         self._group_border_frames[idx] = left_border
 
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # ── Header ──────────────────────────────────────────────────────
@@ -731,7 +728,7 @@ class ReportViewer(tk.Frame):
         self._populate_calib_area(idx)
 
         # ── Body: originals | separator | previews ───────────────────────
-        body = tk.Frame(card, bg=_M_SURFACE)
+        body = _tkframe(card, bg=_M_SURFACE)
         body.pack(fill=tk.X)
 
         # Use grid with uniform columns so the divider is always at 50%
@@ -761,7 +758,7 @@ class ReportViewer(tk.Frame):
             tile = self._build_image_tile(orig_grid, rec, v, img_idx % 3, img_idx // 3,
                                           bg=_M_SUCCESS_TINT, show_checkbox=False, group_idx=idx)
 
-        tk.Frame(body, width=1, bg=_M_DIVIDER).grid(row=0, column=1, sticky="ns")
+        _tkframe(body, bg=_M_DIVIDER, width=1).grid(row=0, column=1, sticky="ns")
 
         # Previews column — label and tile state change after apply
         prev_col_bg = "#EEEEEE" if apply_state == "full" else _M_ERROR_TINT
@@ -1874,18 +1871,18 @@ class ReportViewer(tk.Frame):
     def _build_manual_group_card(self, mg_idx: int) -> None:
         """Render a proper group card for a manually-created calibration group."""
         paths = self._manual_calib_groups[mg_idx]
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=4, bg=_M_MANUAL).pack(side=tk.LEFT, fill=tk.Y)
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        _tkframe(card_wrap, bg=_M_MANUAL, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
         # Header
-        head = tk.Frame(card, bg=_M_MANUAL_TINT, pady=0)
+        head = _tkframe(card, bg=_M_MANUAL_TINT, pady=0)
         head.pack(fill=tk.X)
 
         g_var = self._manual_group_vars.get(mg_idx)
@@ -1899,27 +1896,28 @@ class ReportViewer(tk.Frame):
                            indicatoron=False, bd=0, relief=tk.FLAT, selectcolor=_M_MANUAL_TINT)
         else:
             _mcb_kw = dict(selectcolor=_M_SUCCESS)
-        tk.Checkbutton(
-            head, variable=g_var, bg=_M_MANUAL_TINT,
-            activebackground=_M_MANUAL_TINT,
+        cb = tk.Checkbutton(
+            head, variable=g_var,
             **_mcb_kw,
-        ).pack(side=tk.LEFT, padx=(10, 0), pady=8)
+        )
+        cb.configure(bg=_M_MANUAL_TINT, activebackground=_M_MANUAL_TINT)
+        cb.pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
-        tk.Label(
-            head,
+        _tklabel(
+            head, bg=_M_MANUAL_TINT, fg=_M_MANUAL,
             text=f"Manual Group #{mg_idx + 1}  ·  {len(paths)} image{'s' if len(paths) != 1 else ''}",
-            font=("Segoe UI", 9, "bold"), bg=_M_MANUAL_TINT, fg=_M_MANUAL,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=8, pady=8)
 
-        tk.Label(
-            head, text=" MANUAL ",
-            font=("Segoe UI", 8, "bold"), bg=_M_MANUAL, fg="#FFFFFF",
+        _tklabel(
+            head, bg=_M_MANUAL, fg="#FFFFFF", text=" MANUAL ",
+            font=("Segoe UI", 8, "bold"),
             padx=6, pady=2,
         ).pack(side=tk.LEFT, padx=4)
 
-        tk.Label(
-            head, text="↗ calibration only",
-            font=("Segoe UI", 8), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
+        _tklabel(
+            head, bg=_M_MANUAL_TINT, fg=_M_TEXT2, text="↗ calibration only",
+            font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=4)
 
         _mat_btn(
@@ -1929,7 +1927,7 @@ class ReportViewer(tk.Frame):
         ).pack(side=tk.RIGHT, padx=8, pady=6)
 
         # Image tiles
-        img_frame = tk.Frame(card, bg=_M_MANUAL_TINT, padx=10, pady=8)
+        img_frame = _tkframe(card, bg=_M_MANUAL_TINT, padx=10, pady=8)
         img_frame.pack(fill=tk.X)
 
         COLS = 4
@@ -1940,16 +1938,16 @@ class ReportViewer(tk.Frame):
                 tile = self._build_image_tile(img_frame, rec, dummy_var, i % COLS, i // COLS,
                                               bg=_M_MANUAL_TINT)
             else:
-                tile = tk.Frame(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
+                tile = _tkframe(img_frame, bg=_M_MANUAL_TINT, padx=4, pady=4)
                 tile.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
-                lbl = tk.Label(tile, bg=_M_MANUAL_TINT,
-                              image=self._get_placeholder(_THUMB_SIZE, _M_MANUAL_TINT))
+                lbl = _tklabel(tile, bg=_M_MANUAL_TINT,
+                               image=self._get_placeholder(_THUMB_SIZE, _M_MANUAL_TINT))
                 lbl.pack()
                 self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
-                tk.Label(
-                    tile,
+                _tklabel(
+                    tile, bg=_M_MANUAL_TINT, fg=_M_TEXT2,
                     text=(path.name[:15] + "…" if len(path.name) > 16 else path.name),
-                    font=("Segoe UI", 8), bg=_M_MANUAL_TINT, fg=_M_TEXT2,
+                    font=("Segoe UI", 8),
                 ).pack()
             # Per-image remove button → sends image to Unsorted
             _mat_btn(tile, "↩ Unsorted",
@@ -2030,51 +2028,53 @@ class ReportViewer(tk.Frame):
         if not self._unsorted_paths:
             return
 
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=4, bg=_M_WARNING).pack(side=tk.LEFT, fill=tk.Y)
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        _tkframe(card_wrap, bg=_M_WARNING, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        head = tk.Frame(card, bg=_M_WARNING_TINT, pady=0)
+        head = _tkframe(card, bg=_M_WARNING_TINT, pady=0)
         head.pack(fill=tk.X)
-        tk.Label(
-            head,
+        _tklabel(
+            head, bg=_M_WARNING_TINT, fg=_M_WARNING,
             text=f"Unsorted  ({len(self._unsorted_paths)} image{'s' if len(self._unsorted_paths) != 1 else ''})",
-            font=("Segoe UI", 9, "bold"), bg=_M_WARNING_TINT, fg=_M_WARNING,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=12, pady=8)
-        tk.Label(
-            head, text="Images removed from manual groups — return to Unique images to re-group",
-            font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT2,
+        _tklabel(
+            head, bg=_M_WARNING_TINT, fg=_M_TEXT2,
+            text="Images removed from manual groups — return to Unique images to re-group",
+            font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=4)
 
-        grid_frame = tk.Frame(card, bg=_M_WARNING_TINT, padx=10, pady=8)
+        grid_frame = _tkframe(card, bg=_M_WARNING_TINT, padx=10, pady=8)
         grid_frame.pack(fill=tk.X)
 
         COLS = 5
         for i, path in enumerate(self._unsorted_paths):
             rec = self._path_to_record(path)
-            cell = tk.Frame(grid_frame, bg=_M_WARNING_TINT, padx=4, pady=4)
+            cell = _tkframe(grid_frame, bg=_M_WARNING_TINT, padx=4, pady=4)
             cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
 
-            lbl = tk.Label(cell, bg=_M_WARNING_TINT,
-                          image=self._get_placeholder(_THUMB_SIZE, _M_WARNING_TINT))
+            lbl = _tklabel(cell, bg=_M_WARNING_TINT,
+                           image=self._get_placeholder(_THUMB_SIZE, _M_WARNING_TINT))
             lbl.pack()
             self._load_thumbnail_async(path, lbl, _THUMB_SIZE)
 
             if rec is not None:
-                tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                         font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT2).pack()
+                _tklabel(cell, bg=_M_WARNING_TINT, fg=_M_TEXT2,
+                         text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                         font=("Segoe UI", 8)).pack()
 
             fname = path.name
-            tk.Label(
-                cell,
+            _tklabel(
+                cell, bg=_M_WARNING_TINT, fg=_M_TEXT1,
                 text=(fname[:14] + "…" if len(fname) > 15 else fname),
-                font=("Segoe UI", 8), bg=_M_WARNING_TINT, fg=_M_TEXT1,
+                font=("Segoe UI", 8),
             ).pack()
 
             _mat_btn(cell, "↩ Return to Unique",
@@ -2250,29 +2250,30 @@ class ReportViewer(tk.Frame):
         if not self._manual_trashed_items:
             return
 
-        outer = tk.Frame(self._inner_frame, bg=_M_BG, pady=5, padx=12)
+        outer = _tkframe(self._inner_frame, bg=_M_BG, pady=5, padx=12)
         outer.pack(fill=tk.X)
 
-        card_wrap = tk.Frame(outer, bg=_M_SURFACE, highlightthickness=0)
+        card_wrap = _tkframe(outer, bg=_M_SURFACE, highlightthickness=0)
         card_wrap.pack(fill=tk.X)
 
-        tk.Frame(card_wrap, width=4, bg=_M_ERROR).pack(side=tk.LEFT, fill=tk.Y)
-        card = tk.Frame(card_wrap, bg=_M_SURFACE)
+        _tkframe(card_wrap, bg=_M_ERROR, width=4).pack(side=tk.LEFT, fill=tk.Y)
+        card = _tkframe(card_wrap, bg=_M_SURFACE)
         card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
-        head = tk.Frame(card, bg=_M_ERROR_TINT, pady=0)
+        head = _tkframe(card, bg=_M_ERROR_TINT, pady=0)
         head.pack(fill=tk.X)
-        tk.Label(
-            head,
+        _tklabel(
+            head, bg=_M_ERROR_TINT, fg=_M_ERROR,
             text=f"Duplicates  ({len(self._manual_trashed_items)} manually trashed)",
-            font=("Segoe UI", 9, "bold"), bg=_M_ERROR_TINT, fg=_M_ERROR,
+            font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=12, pady=8)
-        tk.Label(
-            head, text="Images you manually moved to trash — click Revert to restore",
-            font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT3,
+        _tklabel(
+            head, bg=_M_ERROR_TINT, fg=_M_TEXT3,
+            text="Images you manually moved to trash — click Revert to restore",
+            font=("Segoe UI", 8),
         ).pack(side=tk.LEFT, padx=4)
 
-        grid_frame = tk.Frame(card, bg=_M_ERROR_TINT, padx=10, pady=8)
+        grid_frame = _tkframe(card, bg=_M_ERROR_TINT, padx=10, pady=8)
         grid_frame.pack(fill=tk.X)
 
         COLS = 5
@@ -2281,29 +2282,30 @@ class ReportViewer(tk.Frame):
             trash_path: Path = item["trash"]
             rec: Optional[ImageRecord] = item["rec"]
 
-            cell = tk.Frame(grid_frame, bg=_M_ERROR_TINT, padx=4, pady=4)
+            cell = _tkframe(grid_frame, bg=_M_ERROR_TINT, padx=4, pady=4)
             cell.grid(row=i // COLS, column=i % COLS, padx=4, pady=4, sticky=tk.NW)
 
-            thumb_lbl = tk.Label(cell, bg=_M_ERROR_TINT,
-                                image=self._get_placeholder(_THUMB_SIZE, _M_ERROR_TINT))
+            thumb_lbl = _tklabel(cell, bg=_M_ERROR_TINT,
+                                 image=self._get_placeholder(_THUMB_SIZE, _M_ERROR_TINT))
             thumb_lbl.pack()
             self._load_thumbnail_async(trash_path if trash_path.exists() else path,
                                        thumb_lbl, _THUMB_SIZE, grayscale=True)
 
-            tk.Label(cell, text="🗑  Trashed",
-                     font=("Segoe UI", 8, "bold"), bg=_M_ERROR_TINT, fg="#757575",
+            _tklabel(cell, bg=_M_ERROR_TINT, fg="#757575", text="🗑  Trashed",
+                     font=("Segoe UI", 8, "bold"),
                      ).pack(pady=(2, 0))
 
             fname = path.name
-            tk.Label(
-                cell,
+            _tklabel(
+                cell, bg=_M_ERROR_TINT, fg=_M_TEXT2,
                 text=(fname[:15] + "…" if len(fname) > 16 else fname),
-                font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT2,
+                font=("Segoe UI", 8),
                 wraplength=_THUMB_SIZE,
             ).pack()
             if rec is not None:
-                tk.Label(cell, text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                         font=("Segoe UI", 8), bg=_M_ERROR_TINT, fg=_M_TEXT3).pack()
+                _tklabel(cell, bg=_M_ERROR_TINT, fg=_M_TEXT3,
+                         text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                         font=("Segoe UI", 8)).pack()
 
             _mat_btn(cell, "↩ Revert",
                      lambda it=item: self._on_revert_manual_item(it),
@@ -2411,10 +2413,17 @@ class ReportViewer(tk.Frame):
 
         self._current_page = max(0, min(page, self._total_pages() - 1))
 
-        # Update nav bar (page info, button states) immediately — before
-        # building content — so the user sees the page number change instantly.
+        # Update nav bar immediately so the user sees page info change at once.
+        # NOTE: do NOT call update_idletasks() here — that would flush geometry
+        # on the empty inner_frame and reset the scrollregion to zero before
+        # content is built, which makes groups at the bottom of large pages vanish.
         self._update_page_nav()
-        self.update_idletasks()
+
+        # Force canvas window to the correct width before building content so
+        # group cards lay out at the right width from the start.
+        canvas_w = self._canvas.winfo_width()
+        if canvas_w > 1:
+            self._canvas.itemconfig(self._canvas_window, width=canvas_w)
 
         if self._is_unique_page(self._current_page):
             self._build_solo_section()
@@ -2430,9 +2439,20 @@ class ReportViewer(tk.Frame):
                 for idx in range(start, end):
                     try:
                         self._build_group_card(idx, self._groups[idx])
-                    except Exception:
+                    except Exception as exc:
                         import traceback
-                        traceback.print_exc()
+                        tb_str = traceback.format_exc()
+                        print(tb_str)
+                        # Show error placeholder so the group isn't invisible
+                        try:
+                            err_frame = _tkframe(self._inner_frame, bg="#FFEBEE",
+                                                 pady=8, padx=12)
+                            err_frame.pack(fill=tk.X, padx=12, pady=4)
+                            _tklabel(err_frame, bg="#FFEBEE", fg="#C62828",
+                                     text=f"⚠ Group #{idx + 1} failed to render: {exc}",
+                                     font=("Segoe UI", 9)).pack(anchor=tk.W)
+                        except Exception:
+                            pass
 
             # Manual groups / broken shown on last duplicate-groups page
             last_dup_page = (self._unique_page_index() - 1
@@ -2446,15 +2466,29 @@ class ReportViewer(tk.Frame):
                 if self._broken_files:
                     self._build_broken_section()
 
-        # Finalise: force geometry calculation so bbox covers all packed widgets,
-        # then set scroll region, scroll to top, bind mousewheel
-        self._inner_frame.update_idletasks()
-        self._canvas.configure(scrollregion=self._canvas.bbox("all") or (0, 0, 0, 0))
-        self._canvas.yview_moveto(0)
+        # Finalise: bind mousewheel, then schedule scrollregion via after_idle so
+        # it runs only after ALL pending geometry events have been processed.
+        # With large pages (100+ groups / thousands of widgets) a single
+        # update_idletasks() call is not enough — geometry needs multiple
+        # propagation passes before bbox("all") returns the correct full height.
         self._bind_mousewheel_recursive(self._inner_frame)
-        # Safety net: re-check scrollregion after a brief delay in case
-        # late geometry events change the frame size (e.g. thumbnail loading)
-        self._canvas.after(200, self._on_frame_configure)
+
+        def _finalize_scroll():
+            # Two update_idletasks() passes ensure geometry is fully propagated
+            # even for very large pages before we read bbox.
+            self._inner_frame.update_idletasks()
+            self._inner_frame.update_idletasks()
+            bbox = self._canvas.bbox("all")
+            if bbox:
+                self._canvas.configure(scrollregion=bbox)
+            self._canvas.yview_moveto(0)
+
+        # after_idle runs after all current events are processed (including
+        # any <Configure> events triggered while packing group cards above).
+        self._canvas.after_idle(_finalize_scroll)
+        # Additional safety nets for very slow machines or huge pages
+        self._canvas.after(300, self._on_frame_configure)
+        self._canvas.after(1000, self._on_frame_configure)
         # Load thumbnails after the layout is stable
         self._flush_pending_thumbs()
 
