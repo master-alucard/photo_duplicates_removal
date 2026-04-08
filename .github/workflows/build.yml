@@ -107,6 +107,10 @@ jobs:
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
             ### 🐛 Bug Fixes
+            - **Scan crash on recovered/corrupt files** — `OSError: [Errno 22] Invalid argument` when generating date labels for files with invalid `mtime` values (e.g. recovered images from film scanners); now shows "Unknown date" instead of crashing
+            - **Copy to Clipboard on error dialogs** — error dialogs now have a 📋 Copy to Clipboard button so users can easily share error details; button text changes to ✓ Copied! for 2 seconds after copying
+
+            ### 🐛 Bug Fixes (from v1.1.5)
             - **Missing groups on large result sets** — fixed groups rendering as blank white areas when pages contained many groups; root causes: premature `update_idletasks()` zeroing the scroll region, single geometry pass insufficient for thousands of widgets, canvas window width not pre-set before build
             - **Scroll region now uses `after_idle`** — scrollregion is calculated only after all pending geometry events drain, with double `update_idletasks()` pass for large pages, plus 300ms and 1000ms safety-net recalculations
             - **ttkbootstrap bg override fully resolved** — all remaining `tk.Frame`/`tk.Label`/`tk.Checkbutton` throughout group cards, manual sections, header, nav bar, dividers, and canvas frame now use `.configure(bg=)` after creation

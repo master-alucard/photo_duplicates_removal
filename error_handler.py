@@ -43,13 +43,13 @@ def show_error(
     exc: Optional[BaseException] = None,
 ) -> None:
     """
-    Show an error dialog.
+    Show an error dialog with a Copy to Clipboard button.
 
     In normal mode  → shows only user_msg (clear, non-technical).
     In developer mode → appends full detail / exception traceback.
     """
     msg = _build_msg(user_msg, detail, exc)
-    messagebox.showerror(title, msg, parent=parent)
+    _show_custom_error(parent, title, msg)
 
 
 def show_warning(
@@ -72,6 +72,76 @@ def show_info(
     """Show an informational dialog, optionally with developer detail."""
     msg = _build_msg(user_msg, detail)
     messagebox.showinfo(title, msg, parent=parent)
+
+
+def _show_custom_error(
+    parent: Optional[tk.Widget],
+    title: str,
+    msg: str,
+) -> None:
+    """Custom error dialog with OK and Copy to Clipboard buttons."""
+    root = parent.winfo_toplevel() if parent else None
+
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.resizable(False, False)
+    win.grab_set()
+
+    # ── Icon + message ────────────────────────────────────────────────────
+    body = tk.Frame(win, padx=20, pady=16)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    icon_lbl = tk.Label(body, text="✕", font=("Segoe UI", 18, "bold"),
+                        fg="#FFFFFF", bg="#C62828", width=2, height=1,
+                        relief=tk.FLAT)
+    icon_lbl.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 14))
+
+    msg_lbl = tk.Label(body, text=msg, justify=tk.LEFT,
+                       wraplength=420, font=("Segoe UI", 9),
+                       anchor=tk.W)
+    msg_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    # ── Button bar ────────────────────────────────────────────────────────
+    btn_bar = tk.Frame(win, pady=10, padx=20)
+    btn_bar.pack(fill=tk.X)
+
+    copied_var = tk.StringVar(value="📋  Copy to Clipboard")
+
+    def _copy():
+        try:
+            win.clipboard_clear()
+            win.clipboard_append(msg)
+            win.update()
+            copied_var.set("✓  Copied!")
+            win.after(2000, lambda: copied_var.set("📋  Copy to Clipboard"))
+        except Exception:
+            pass
+
+    copy_btn = tk.Button(btn_bar, textvariable=copied_var, command=_copy,
+                         font=("Segoe UI", 9), relief=tk.FLAT, bd=0,
+                         padx=10, pady=4, cursor="hand2")
+    copy_btn.configure(bg="#E8EFF9", fg="#1565C0",
+                       activebackground="#D0DCF0", activeforeground="#1565C0")
+    copy_btn.pack(side=tk.LEFT)
+
+    ok_btn = tk.Button(btn_bar, text="OK", command=win.destroy,
+                       font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0,
+                       padx=20, pady=4, cursor="hand2")
+    ok_btn.configure(bg="#C62828", fg="#FFFFFF",
+                     activebackground="#B71C1C", activeforeground="#FFFFFF")
+    ok_btn.pack(side=tk.RIGHT)
+
+    win.bind("<Return>", lambda _: win.destroy())
+    win.bind("<Escape>", lambda _: win.destroy())
+
+    # Centre over parent
+    win.update_idletasks()
+    if root:
+        px = root.winfo_x() + root.winfo_width() // 2 - win.winfo_width() // 2
+        py = root.winfo_y() + root.winfo_height() // 2 - win.winfo_height() // 2
+        win.geometry(f"+{px}+{py}")
+
+    win.wait_window()
 
 
 def format_scan_error(exc: BaseException, tb: str) -> tuple[str, str]:

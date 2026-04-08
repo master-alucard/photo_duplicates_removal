@@ -141,7 +141,10 @@ class ImageRecord:
 
     def date_label(self) -> str:
         import datetime
-        return datetime.datetime.fromtimestamp(self.mtime).strftime("%Y-%m-%d %H:%M")
+        try:
+            return datetime.datetime.fromtimestamp(self.mtime).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, ValueError):
+            return "Unknown date"
 
 
 @dataclass
