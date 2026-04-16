@@ -931,9 +931,10 @@ def _classify_group(
     Same-dimension handling distinguishes three cases:
       - Exact duplicates (pHash ≤ _EXACT_DUP_PHASH within the bucket): same image
         saved/exported twice.  Keep the best copy; trash the rest as duplicates.
-      - Cross-format pairs (RAW vs JPEG of the same shot): pHash 3-8 bits apart
-        due to different colour rendering.  keep_all_formats=True → keep both as
-        originals; keep_all_formats=False → keep RAW, trash JPEG.
+      - Cross-format pairs (RAW vs JPEG of the same shot): ALL RAW files in the
+        bucket are kept as originals (series); ALL non-RAW (JPEG/PNG) files are
+        marked as duplicates (previews).  keep_all_formats is intentionally
+        ignored — for RAW+JPEG the RAW is the authoritative master regardless.
       - Genuine series / burst (pHash > _EXACT_DUP_PHASH, same format): different
         shots at the same resolution.  Keep all; none are previews.
 
@@ -966,7 +967,15 @@ def _classify_group(
                 max(tol, _CROSS_FORMAT_DIM_TOL)
                 if a_is_raw != b_is_raw else tol
             )
-            return w_ratio <= effective_tol and h_ratio <= effective_tol
+            if w_ratio <= effective_tol and h_ratio <= effective_tol:
+                return True
+            # Also check swapped (portrait RAW vs landscape JPEG or vice versa):
+            # rawpy may decode a CR2 in portrait orientation (height > width) while
+            # the matching camera JPEG is stored as landscape (width > height).
+            # e.g. CR2 4020×6024 vs JPEG 6000×4000 — same sensor, axes transposed.
+            w_ratio_rot = abs(a.width - b.height) / max(a.width, b.height)
+            h_ratio_rot = abs(a.height - b.width) / max(a.height, b.width)
+            return w_ratio_rot <= effective_tol and h_ratio_rot <= effective_tol
 
         # Build dimension buckets (union-find for transitivity)
         dim_parent = list(range(len(members_sorted)))
@@ -1019,33 +1028,25 @@ def _classify_group(
             all_cross_format = (True in raw_flags and False in raw_flags)
 
             if all_cross_format:
-                # Cross-format pair: same shot captured as both RAW and JPEG.
-                # The elevated pHash distance (3-8 bits) is due to different
-                # colour rendering, NOT different image content.
-                if settings.keep_all_formats:
-                    # Keep the best representative of each format; trash same-
-                    # format extras.  members_sorted is already sorted best-first
-                    # so the first RAW and first non-RAW in the bucket are keepers.
-                    # We do NOT add these to series_indices — _split_by_format()
-                    # will keep the best-of-format using _same_size_as_best().
-                    raw_in_bucket = [
-                        bi for bi in bucket_indices
-                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS
-                    ]
-                    nonraw_in_bucket = [
-                        bi for bi in bucket_indices
-                        if members_sorted[bi].path.suffix.lower() not in RAW_EXTENSIONS
-                    ]
-                    # Keep only the first (best-sorted) of each format; trash extras.
-                    for dup_idx in raw_in_bucket[1:]:
-                        exact_dup_indices.add(dup_idx)
-                    for dup_idx in nonraw_in_bucket[1:]:
-                        exact_dup_indices.add(dup_idx)
-                else:
-                    # Keep only the single best copy (RAW preferred via _sort_key);
-                    # treat all other-format copies as duplicates to trash.
-                    for dup_idx in bucket_indices[1:]:
-                        exact_dup_indices.add(dup_idx)
+                # Cross-format bucket: same shot captured as both RAW and JPEG.
+                #
+                # Strategy (applies regardless of keep_all_formats):
+                #   • Every RAW file in the bucket → series_indices (always kept).
+                #     Multiple RAWs = burst shots; all survive as separate originals.
+                #   • Every non-RAW (JPEG/PNG) file → exact_dup_indices (preview).
+                #
+                # Why keep_all_formats is intentionally ignored here:
+                #   keep_all_formats is designed for same-content files in two
+                #   non-RAW formats (e.g. a JPEG + a PNG export of the same image).
+                #   For a RAW+JPEG pair the RAW is unambiguously the master file;
+                #   hiding the group when keep_all_formats=True means the user
+                #   never sees the pairing and cannot act on it at all.
+                for bi in bucket_indices:
+                    if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS:
+                        series_indices.add(bi)      # RAW: always keep as original
+                    else:
+                        exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
+                is_series = True
             elif max_pdist <= _EXACT_DUP_PHASH:
                 # True exact duplicates: same format, same content.
                 # Keep the best (bucket_indices[0]); trash the rest.
