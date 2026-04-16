@@ -1710,7 +1710,9 @@ class App:
             f = ttk.Frame(parent)
             f.pack(fill=tk.X, pady=3)
             ttk.Label(f, text=label, width=22, anchor=tk.W).pack(side=tk.LEFT)
-            ttk.Entry(f, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            ent = ttk.Entry(f, textvariable=var)
+            ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+            self._bind_paste_normalize(ent, var)
             ttk.Button(f, text="Browse…",
                        command=lambda v=var: self._browse_custom(v)).pack(side=tk.RIGHT)
             var.trace_add("write", self._on_custom_folder_change)
@@ -2918,8 +2920,9 @@ class App:
         # ── Browse row ────────────────────────────────────────────────────
         browse_row = ttk.Frame(container)
         ttk.Label(browse_row, width=label_width).pack(side=tk.LEFT)
-        ttk.Entry(browse_row, textvariable=path_var).pack(
-            side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        browse_ent = ttk.Entry(browse_row, textvariable=path_var)
+        browse_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self._bind_paste_normalize(browse_ent, path_var)
         if browse_cmd is None:
             browse_cmd = lambda v=path_var: self._browse(v, setting_key)  # noqa: E731
         ttk.Button(browse_row, text="Browse…",
@@ -2985,7 +2988,9 @@ class App:
         frame.pack(fill=tk.X, pady=3)
         ttk.Label(frame, text=label, width=16, anchor=tk.W).pack(side=tk.LEFT)
         var = tk.StringVar(value=getattr(self.settings, setting_key, ""))
-        ttk.Entry(frame, textvariable=var).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        ent = ttk.Entry(frame, textvariable=var)
+        ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self._bind_paste_normalize(ent, var)
         ttk.Button(frame, text="Browse…",
                    command=lambda v=var, k=setting_key: self._browse(v, k)).pack(side=tk.RIGHT)
         var.trace_add("write", self._on_folder_change)
@@ -3166,6 +3171,34 @@ class App:
             ttk.Label(outer, text=_first_sentence(detail), foreground=_M_HINT,
                       font=("Segoe UI", 8), wraplength=560,
                       justify=tk.LEFT).pack(anchor=tk.W, pady=(1, 0))
+
+    # ── path helpers ─────────────────────────────────────────────────────
+
+    @staticmethod
+    def _normalize_folder_path(raw: str) -> str:
+        """Normalize a pasted/typed folder path.
+
+        • Strips leading/trailing whitespace and quotes.
+        • Strips ``file:///`` / ``file://`` URL prefixes added by browsers
+          and some file managers when dragging a folder onto a text field.
+        • Converts every ``/`` and ``\\`` to the OS-native separator so that
+          paths copied from Windows Explorer (backslash) or macOS/Linux
+          (forward slash) both work regardless of the platform.
+        """
+        p = raw.strip().strip('"').strip("'")
+        for prefix in ("file:///", "file://"):
+            if p.lower().startswith(prefix):
+                p = p[len(prefix):]
+                break
+        # Normalize to the OS separator (handles mixed / and \ in one shot)
+        return p.replace("/", os.sep).replace("\\", os.sep)
+
+    def _bind_paste_normalize(self, entry: "ttk.Entry", var: tk.StringVar) -> None:
+        """Bind <<Paste>> on *entry* so pasted paths are normalized immediately."""
+        def _on_paste(_event=None):
+            # Schedule the normalize for after tkinter has written the paste
+            entry.after(1, lambda: var.set(self._normalize_folder_path(var.get())))
+        entry.bind("<<Paste>>", _on_paste, add=True)
 
     def _browse(self, var: tk.StringVar, key: str) -> None:
         folder = filedialog.askdirectory(parent=self.root)

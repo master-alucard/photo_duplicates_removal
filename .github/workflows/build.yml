@@ -115,7 +115,11 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🐛 RAW Duplicate Detection Fixes
+            ### 🔧 Library & Path Improvements
+            - **Re-link broken library paths** — when a tracked folder is missing or has moved without being auto-detected, the "📌 Re-link Path…" button in the Library tab opens a folder browser so you can point the entry to its new location. The library index and cached hashes are moved automatically; no re-hashing required.
+            - **Paste path normalization** — pasting a folder path into any scan-mode field (Scan, Custom, Library mode, Calibration) now automatically normalizes backslashes and forward slashes to the OS separator and strips surrounding quotes and `file:///` prefixes, preventing "path not found" errors caused by mixed separators.
+
+            ### 🐛 RAW Duplicate Detection Fixes (from v1.1.8)
             - **All CR2+JPEG pairs now visible regardless of "Keep all formats" setting** — two bugs in `_classify_group` caused most RAW+JPEG groups to be silently hidden: (1) `keep_all_formats=True` classified both RAW and JPEG as originals → no preview → group not returned; (2) rawpy decodes some CR2s in portrait orientation (`4020×6024`) while the matching camera JPEG is landscape (`6000×4000`) — the dimension bucket check saw ratio 0.33 >> 0.02 tolerance and never formed a cross-format bucket. Fixed: cross-format buckets always mark RAW as original and JPEG as preview regardless of keep_all_formats; `_same_dim` now also checks transposed width/height.
             - **Histogram guard disabled for cross-format pairs** — `rawpy` decodes RAW files ~2× brighter than the camera's own JPEG engine; histogram intersection collapsed to 0.00–0.24 for true same-shot pairs (well below the former 0.25 floor), causing every RAW+JPEG duplicate to be silently missed even when "RAW files" was enabled. The histogram guard is now disabled for cross-format pairs; pHash similarity is already sufficient to distinguish real duplicates from different images.
             - **Cross-format threshold factor raised 5.0 → 6.0** — calibration on 35 Canon M100 CR2+JPEG pairs revealed two borderline pairs at pHash distance 12 (just above the old effective threshold of 10). New effective threshold = 2 × 6 = **12 bits**, covering all confirmed same-shot pairs with an 8-bit safety gap to the nearest false positive.

@@ -436,7 +436,7 @@ class _LibraryTabController:
         tk.Frame(tb_inner, width=1, bg=_DIVIDER).pack(side=tk.LEFT, fill=tk.Y, padx=6)
 
         self._btn_remap = _mat_btn(
-            tb_inner, "⇄  Remap Drive", self._on_remap, _WARNING)
+            tb_inner, "📌  Re-link Path…", self._on_remap, _WARNING)
         self._btn_remap.pack(side=tk.LEFT, padx=(0, 6))
 
         self._btn_refresh = _mat_btn(
@@ -670,7 +670,7 @@ class _LibraryTabController:
         can_remap = False
         if has_sel:
             st = self._statuses.get(self._selected)
-            can_remap = st is not None and st.state == "moved" and st.new_path is not None
+            can_remap = st is not None and st.state in ("moved", "missing")
 
         if self._busy:
             _mat_disable(self._btn_add)
@@ -818,34 +818,52 @@ class _LibraryTabController:
         if not self._selected:
             return
         st = self._statuses.get(self._selected)
-        if st is None or st.state != "moved" or not st.new_path:
-            messagebox.showinfo(
-                "Remap Drive",
-                "No automatic remap is available for this folder.\n\n"
-                "The drive may be missing or not connected.",
+        if st is None or st.state not in ("moved", "missing"):
+            return
+
+        old_path = self._selected
+
+        # ── Case 1: drive was auto-detected at a new letter/mount point ──────
+        if st.state == "moved" and st.new_path:
+            new_path_str = st.new_path
+            if not messagebox.askyesno(
+                "Re-link Path",
+                f"The folder has been detected at a new location.\n\n"
+                f"Old path:  {old_path}\n"
+                f"New path:  {new_path_str}\n\n"
+                "Update the library to use the new path?",
+                parent=self._frame,
+            ):
+                return
+        else:
+            # ── Case 2: path is missing / moved but not auto-detected ─────────
+            # Open a folder browser so the user can point to the new location.
+            chosen = filedialog.askdirectory(
+                title="Select the new location for this folder",
+                initialdir=os.path.dirname(old_path) if os.path.dirname(old_path) else "/",
                 parent=self._frame,
             )
-            return
-        old_path = self._selected
-        new_path = st.new_path
+            if not chosen:
+                return
+            new_path_str = str(Path(chosen).resolve())
+            if not messagebox.askyesno(
+                "Re-link Path",
+                f"Re-link this library entry to a new folder?\n\n"
+                f"Old path:  {old_path}\n"
+                f"New path:  {new_path_str}\n\n"
+                "The library index and cached hashes will be moved to the new location.\n"
+                "Are you sure?",
+                parent=self._frame,
+            ):
+                return
 
-        if not messagebox.askyesno(
-            "Remap Drive",
-            f"The drive for this folder has been detected at a new location.\n\n"
-            f"Old path:  {old_path}\n"
-            f"New path:  {new_path}\n\n"
-            "Update the library to use the new path?",
-            parent=self._frame,
-        ):
-            return
-
-        self._lib.update_path(old_path, new_path)   # already calls save() internally
+        self._lib.update_path(old_path, new_path_str)  # already calls save() internally
         # Move the status over to the new path key
         self._statuses.pop(old_path, None)
-        self._statuses[new_path] = DriveStatus(state="ok")
+        self._statuses[new_path_str] = DriveStatus(state="ok")
         self._reload_table()
         self._status_lbl.configure(
-            text=f"Drive remapped → {new_path}", fg=_SUCCESS)
+            text=f"Re-linked → {new_path_str}", fg=_SUCCESS)
 
     def _on_refresh_status(self) -> None:
         """Re-check drive status for all tracked folders in the background."""

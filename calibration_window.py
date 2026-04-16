@@ -6,6 +6,7 @@ CalibrationWindow – standalone tk.Toplevel that wraps the panel.
 """
 from __future__ import annotations
 
+import os
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -243,8 +244,21 @@ class CalibrationPanel(tk.Frame):
 
         row = ttk.Frame(f)
         row.pack(fill="x", padx=16, pady=2)
-        ttk.Entry(row, textvariable=self._calib_folder, width=52).pack(
-            side="left", fill="x", expand=True)
+        _calib_ent = ttk.Entry(row, textvariable=self._calib_folder, width=52)
+        _calib_ent.pack(side="left", fill="x", expand=True)
+
+        def _on_calib_paste(_event=None, _e=_calib_ent, _v=self._calib_folder):
+            def _fix():
+                raw = _v.get().strip().strip('"').strip("'")
+                for _pfx in ("file:///", "file://"):
+                    if raw.lower().startswith(_pfx):
+                        raw = raw[len(_pfx):]
+                        break
+                _v.set(raw.replace("/", os.sep).replace("\\", os.sep))
+            _e.after(1, _fix)
+
+        _calib_ent.bind("<<Paste>>", _on_calib_paste, add=True)
+
         ttk.Button(row, text="Browse…", command=self._browse).pack(
             side="left", padx=(6, 0))
 
