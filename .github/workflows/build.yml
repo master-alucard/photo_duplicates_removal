@@ -107,11 +107,15 @@ jobs:
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
             ### 🐛 RAW Duplicate Detection Fixes
+            - **All CR2+JPEG pairs now visible regardless of "Keep all formats" setting** — two bugs in `_classify_group` caused most RAW+JPEG groups to be silently hidden: (1) `keep_all_formats=True` classified both RAW and JPEG as originals → no preview → group not returned; (2) rawpy decodes some CR2s in portrait orientation (`4020×6024`) while the matching camera JPEG is landscape (`6000×4000`) — the dimension bucket check saw ratio 0.33 >> 0.02 tolerance and never formed a cross-format bucket. Fixed: cross-format buckets always mark RAW as original and JPEG as preview regardless of keep_all_formats; `_same_dim` now also checks transposed width/height.
             - **Histogram guard disabled for cross-format pairs** — `rawpy` decodes RAW files ~2× brighter than the camera's own JPEG engine; histogram intersection collapsed to 0.00–0.24 for true same-shot pairs (well below the former 0.25 floor), causing every RAW+JPEG duplicate to be silently missed even when "RAW files" was enabled. The histogram guard is now disabled for cross-format pairs; pHash similarity is already sufficient to distinguish real duplicates from different images.
             - **Cross-format threshold factor raised 5.0 → 6.0** — calibration on 35 Canon M100 CR2+JPEG pairs revealed two borderline pairs at pHash distance 12 (just above the old effective threshold of 10). New effective threshold = 2 × 6 = **12 bits**, covering all confirmed same-shot pairs with an 8-bit safety gap to the nearest false positive.
             - **Calibration tool accepts RAW files in group folders** — `load_ground_truth()` previously filtered calibration group/negative/single folders using only JPEG/PNG extensions, silently dropping all `.cr2`/`.nef`/`.arw` etc. files and producing "No valid groups" even with correctly structured RAW+JPEG calibration data. Now accepts the full set of supported RAW extensions.
 
-            > **How to detect RAW+JPEG duplicates:** enable **RAW files (rawpy)** in Settings, and set **"Keep original format only"** (disable Keep all formats). The app will then show your camera JPEGs as duplicates of their matching RAW files.
+            > **How to detect RAW+JPEG duplicates:** enable **RAW files (rawpy)** in Settings. RAW+JPEG pairs from the same shot are now shown regardless of the "Keep all formats" setting — no additional settings change required.
+
+            ### 🎨 Start Menu / Taskbar Icon Fix
+            - **Correct app icon in Windows Start menu and taskbar** — installer now copies `app.ico` directly to the install folder and shortcuts reference it explicitly, preventing Windows from falling back to a generic icon when extracting from the EXE.
 
             ### 🐛 Bug Fixes (from v1.1.6)
             - **Scan crash on recovered/corrupt files** — `OSError: [Errno 22] Invalid argument` when generating date labels for files with invalid `mtime` values (e.g. recovered images from film scanners); now shows "Unknown date" instead of crashing
