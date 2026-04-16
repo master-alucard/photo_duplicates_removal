@@ -48,13 +48,19 @@ _BKTREE_THRESHOLD = 200
 # 2 % is a safe upper bound that still distinguishes full-res from downscaled.
 _CROSS_FORMAT_DIM_TOL = 0.02
 
-# Relaxed histogram-intersection floor for cross-format pairs (RAW vs JPEG).
-# Same-shot RAW vs camera JPEG typically achieves hist_sim ≥ 0.40 despite
-# different colour rendering / tone curves.  Genuinely different images
-# (different subjects, scenes) fall well below 0.25.  Without this floor,
-# the lenient cross-format pHash threshold (10 bits) can group unrelated
-# images that happen to share similar spatial-frequency structure.
-_CROSS_FORMAT_HIST_FLOOR = 0.25
+# Cross-format histogram floor — DISABLED (set to 0.0).
+#
+# Rationale: rawpy's default postprocess(use_camera_wb=True, output_bps=8)
+# maps sensor data linearly to 8-bit without the camera's tone curve / S-curve,
+# producing images ~2× brighter (brightness ≈ 196/255) compared to the
+# camera-generated JPEG (brightness ≈ 92/255).  This brightness difference
+# collapses histogram intersection to 0.000–0.243 for true same-shot RAW+JPEG
+# pairs — all below the former floor of 0.25 — causing every cross-format
+# duplicate to be missed.
+#
+# The pHash + cross_format_threshold_factor guards already handle false-positive
+# discrimination (different scenes always have pHash distance > 10 bits).
+_CROSS_FORMAT_HIST_FLOOR = 0.0
 
 
 # ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────

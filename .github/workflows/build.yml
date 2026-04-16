@@ -106,7 +106,14 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🐛 Bug Fixes
+            ### 🐛 RAW Duplicate Detection Fixes
+            - **Histogram guard disabled for cross-format pairs** — `rawpy` decodes RAW files ~2× brighter than the camera's own JPEG engine; histogram intersection collapsed to 0.00–0.24 for true same-shot pairs (well below the former 0.25 floor), causing every RAW+JPEG duplicate to be silently missed even when "RAW files" was enabled. The histogram guard is now disabled for cross-format pairs; pHash similarity is already sufficient to distinguish real duplicates from different images.
+            - **Cross-format threshold factor raised 5.0 → 6.0** — calibration on 35 Canon M100 CR2+JPEG pairs revealed two borderline pairs at pHash distance 12 (just above the old effective threshold of 10). New effective threshold = 2 × 6 = **12 bits**, covering all confirmed same-shot pairs with an 8-bit safety gap to the nearest false positive.
+            - **Calibration tool accepts RAW files in group folders** — `load_ground_truth()` previously filtered calibration group/negative/single folders using only JPEG/PNG extensions, silently dropping all `.cr2`/`.nef`/`.arw` etc. files and producing "No valid groups" even with correctly structured RAW+JPEG calibration data. Now accepts the full set of supported RAW extensions.
+
+            > **How to detect RAW+JPEG duplicates:** enable **RAW files (rawpy)** in Settings, and set **"Keep original format only"** (disable Keep all formats). The app will then show your camera JPEGs as duplicates of their matching RAW files.
+
+            ### 🐛 Bug Fixes (from v1.1.6)
             - **Scan crash on recovered/corrupt files** — `OSError: [Errno 22] Invalid argument` when generating date labels for files with invalid `mtime` values (e.g. recovered images from film scanners); now shows "Unknown date" instead of crashing
             - **Copy to Clipboard on error dialogs** — error dialogs now have a 📋 Copy to Clipboard button so users can easily share error details; button text changes to ✓ Copied! for 2 seconds after copying
 
