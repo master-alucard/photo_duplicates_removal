@@ -74,6 +74,15 @@ jobs:
             Set-Content installer\installer.iss
           Write-Host "installer.iss patched to version $ver"
 
+      # ── 9b. Patch the in-app version string in about_tab.py ──────────────────
+      - name: Patch version in about_tab.py
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          (Get-Content about_tab.py) `
+            -replace 'APP_VERSION\s*=\s*"[^"]+"', "APP_VERSION   = `"$ver`"" |
+            Set-Content about_tab.py
+          Write-Host "about_tab.py patched to version $ver"
+
       # ── 10. Build the installer ───────────────────────────────────────────────
       - name: Build installer with Inno Setup
         run: |
