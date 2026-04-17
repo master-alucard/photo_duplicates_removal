@@ -505,56 +505,117 @@ def update_folder(
     Unchanged files (matching mtime **and** size) are served from cache.
     Deleted files are silently dropped from the cache.
     New or modified files are hashed fresh.
+
+    Parallelism: uses the same drive-aware thread count as the main scan
+    (``scanner._resolve_thread_count``) — HDDs are limited to
+    ``settings.hdd_thread_cap`` concurrent readers by default so library
+    updates don't seek-thrash a spinning disk.  Stop is honoured both at the
+    submit loop and inside each worker (via early-exit flag checks).
     """
-    from scanner import IMAGE_EXTENSIONS, _hash_image
+    from scanner import (
+        IMAGE_EXTENSIONS, RAW_EXTENSIONS, _hash_image, _hash_raw,
+        _resolve_thread_count,
+    )
 
     folder   = Path(folder_path).resolve()
     path_str = str(folder)
     cache    = library.load_cache(path_str)
 
-    # Collect candidate image files
+    # Collect candidate image files (JPEG/PNG/… always; RAW only if enabled)
+    want_raw = getattr(settings, "use_rawpy", False)
+    exts_wanted = IMAGE_EXTENSIONS | (RAW_EXTENSIONS if want_raw else set())
+
     try:
         if getattr(settings, "recursive", True):
             all_files = [p for p in folder.rglob("*")
-                         if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+                         if p.is_file() and p.suffix.lower() in exts_wanted]
         else:
             all_files = [p for p in folder.iterdir()
-                         if p.is_file() and p.suffix.lower() in IMAGE_EXTENSIONS]
+                         if p.is_file() and p.suffix.lower() in exts_wanted]
     except (PermissionError, OSError):
         all_files = []
 
     all_files.sort()
     new_cache: dict[str, FileRecord] = {}
 
+    # ── figure out which files need hashing (cache hits are handled inline) ──
+    to_hash: list[tuple[int, Path, float]] = []   # (original idx, path, st_mtime)
     for i, file_path in enumerate(all_files):
         if stop_flag and stop_flag[0]:
             break
-
-        if progress_cb:
-            progress_cb(file_path.name, i, len(all_files))
-
         file_key = str(file_path)
         try:
             stat     = file_path.stat()
-            st_mtime = stat.st_mtime   # actual write time — used for staleness
+            st_mtime = stat.st_mtime
             size     = stat.st_size
         except OSError:
             continue
 
-        # Cache hit — file is unchanged
         existing = cache.get(file_key)
         if existing is not None and existing.mtime == st_mtime and existing.size == size:
             new_cache[file_key] = existing
             continue
+        to_hash.append((i, file_path, st_mtime))
 
-        # Hash (or re-hash) the file; pass st_mtime so the record stores the
-        # real modification time, not the scanner's min(st_mtime, st_ctime).
+    # ── parallel hashing of changed/new files ───────────────────────────────
+    n_threads = _resolve_thread_count(settings, folder)
+    total_to_hash = len(to_hash)
+
+    def _hash_one_lib(job):
+        idx, fp, st_mtime_ = job
+        if stop_flag and stop_flag[0]:
+            return idx, fp, st_mtime_, None
         try:
-            img_rec = _hash_image(file_path, settings)
-            if img_rec is not None:
-                new_cache[file_key] = FileRecord.from_image_record(img_rec, st_mtime=st_mtime)
+            ext = fp.suffix.lower()
+            if ext in RAW_EXTENSIONS and want_raw:
+                img_rec = _hash_raw(fp, settings)
+            else:
+                img_rec = _hash_image(fp, settings)
+            return idx, fp, st_mtime_, img_rec
         except Exception:
-            pass   # skip unreadable files silently
+            return idx, fp, st_mtime_, None
+
+    if n_threads > 1 and total_to_hash > 0:
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        completed = 0
+        pool = ThreadPoolExecutor(max_workers=n_threads)
+        try:
+            futures = [pool.submit(_hash_one_lib, job) for job in to_hash]
+            interrupted = False
+            for fut in as_completed(futures):
+                if stop_flag and stop_flag[0]:
+                    interrupted = True
+                    break
+                try:
+                    idx, fp, st_mtime_, img_rec = fut.result()
+                except Exception:
+                    completed += 1
+                    continue
+                completed += 1
+                if progress_cb:
+                    progress_cb(fp.name, completed, total_to_hash)
+                if img_rec is not None:
+                    new_cache[str(fp)] = FileRecord.from_image_record(img_rec, st_mtime=st_mtime_)
+            if interrupted:
+                pool.shutdown(wait=False, cancel_futures=True)
+        finally:
+            pool.shutdown(wait=True)
+    else:
+        for ji, (_, fp, st_mtime_) in enumerate(to_hash):
+            if stop_flag and stop_flag[0]:
+                break
+            if progress_cb:
+                progress_cb(fp.name, ji, total_to_hash)
+            try:
+                ext = fp.suffix.lower()
+                if ext in RAW_EXTENSIONS and want_raw:
+                    img_rec = _hash_raw(fp, settings)
+                else:
+                    img_rec = _hash_image(fp, settings)
+                if img_rec is not None:
+                    new_cache[str(fp)] = FileRecord.from_image_record(img_rec, st_mtime=st_mtime_)
+            except Exception:
+                pass
 
     library.save_cache(path_str, new_cache)
 

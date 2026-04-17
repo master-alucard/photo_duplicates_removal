@@ -60,7 +60,10 @@ class Settings:
     report_page_size: int = 20                     # Groups per page in report viewer
     dark_mode: bool = False                      # Night theme (dark background)
     scan_speed: int = 5                          # 1=quality → 10=speed (quick-mode quality slider)
-    scan_threads: int = 0                        # parallel hashing threads (0 = os.cpu_count())
+    scan_threads: int = 0                        # parallel hashing threads (0 = auto, drive-aware)
+    io_parallelism: str = "auto"                 # "auto" | "ssd" | "hdd" — controls per-drive read concurrency
+    hdd_thread_cap: int = 2                      # max parallel readers when drive is HDD (prevents seek-thrash & overheating)
+    raw_use_embedded_thumb: bool = False         # Opt-in: use rawpy.extract_thumb() (~6× faster, but invalidates v1.1.9 and earlier RAW cache — phash differs from postprocess by ~30 bits)
     # Calibrated on Canon EOS M100 CR2 vs camera JPEG (35 matched pairs, keep_all_formats=False):
     # max intra-group cross-format pHash = 12  (tone-mapped pairs with distinct processing)
     # min inter-group cross-format pHash = 20  → 8-bit safety gap

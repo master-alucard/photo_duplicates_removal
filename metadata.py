@@ -64,6 +64,21 @@ def count_metadata_fields(path: Path) -> int:
         return 0
 
 
+def count_metadata_fields_from_img(img) -> int:
+    """Same as :func:`count_metadata_fields` but works on an already-open PIL
+    Image, avoiding a second file open during hashing."""
+    try:
+        exif_data = img._getexif()  # type: ignore[attr-defined]
+        if not exif_data:
+            return 0
+        return sum(
+            1 for v in exif_data.values()
+            if v is not None and v != "" and v != b""
+        )
+    except Exception:
+        return 0
+
+
 def extract_date_from_exif(path: Path) -> Optional[datetime]:
     """Return DateTimeOriginal or DateTime from EXIF, or None if not found."""
     try:

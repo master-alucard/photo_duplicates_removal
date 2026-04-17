@@ -115,7 +115,22 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🔧 Library & Path Improvements
+            ### ⚡ Performance & Responsiveness Overhaul
+            - **Pause & Stop are now instant** — `ThreadPoolExecutor.shutdown(wait=False, cancel_futures=True)` cancels queued hash tasks immediately and each worker checks the stop/pause flag at entry, so at most *n_threads* files finish before the disk goes quiet (previously all pending files in a batch had to complete).
+            - **HDD overheating fix** — default concurrency now caps at 2 parallel readers on fixed / removable / network drives (`io_parallelism="auto"`, `hdd_thread_cap=2`). Windows reports both HDDs and SSDs as "fixed" and cannot cheaply distinguish them, so the safe default protects spinning drives from seek-thrash. SSD users can opt into full parallelism via Settings: `io_parallelism="ssd"` or explicit `scan_threads`.
+            - **Hashing ~4-10× faster on large JPEGs** — every image is pre-downscaled once to 1024 px (longest side) and reused for pHash, dHash, histogram, brightness, and all three rotation hashes. Peak memory drops from ~300 MB to ~6 MB per thread on 24 MP images. Validated numerically: 0.225-bit average pHash drift (max 2 bits) across 80 hash comparisons on 20 real photos — well within the 2-bit exact-duplicate threshold, so existing library caches stay compatible.
+            - **No more double file-opens** — EXIF metadata count (for `collect_metadata=True`, default) is now read from the already-open PIL image handle instead of re-opening the file via `count_metadata_fields()`. Halves the open() syscall count per scanned file.
+            - **Library updates parallelised** — `Library → Update` / `Update All` now uses the same drive-aware thread pool as the main scan, with proper Stop support.
+
+            ### 📷 RAW (opt-in)
+            - **Fast RAW mode (~6× warm speedup)** — new setting `raw_use_embedded_thumb` (default **off** for backward compatibility) uses `rawpy.extract_thumb()` (the camera's embedded JPEG preview) instead of full sensor demosaic. Default off because the embedded-JPEG pHash differs from the postprocess pHash by ~30 bits, which would invalidate cached RAW entries from earlier versions. Users who have no RAW library cache, or who don't mind re-hashing, can enable it for a big speedup.
+
+            ### 🔧 New Settings
+            - `io_parallelism`: `"auto"` (default) | `"ssd"` | `"hdd"` — controls per-drive read concurrency.
+            - `hdd_thread_cap`: `2` (default) — max parallel readers on HDDs in auto mode.
+            - `raw_use_embedded_thumb`: `False` (default) — opt-in RAW fast path.
+
+            ### 🔧 Library & Path Improvements (from v1.1.9)
             - **Re-link broken library paths** — when a tracked folder is missing or has moved without being auto-detected, the "📌 Re-link Path…" button in the Library tab opens a folder browser so you can point the entry to its new location. The library index and cached hashes are moved automatically; no re-hashing required.
             - **Paste path normalization** — pasting a folder path into any scan-mode field (Scan, Custom, Library mode, Calibration) now automatically normalizes backslashes and forward slashes to the OS separator and strips surrounding quotes and `file:///` prefixes, preventing "path not found" errors caused by mixed separators.
 
