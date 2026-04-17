@@ -64,6 +64,14 @@ class Settings:
     io_parallelism: str = "auto"                 # "auto" | "ssd" | "hdd" — controls per-drive read concurrency
     hdd_thread_cap: int = 2                      # max parallel readers when drive is HDD (prevents seek-thrash & overheating)
     raw_use_embedded_thumb: bool = False         # Opt-in: use rawpy.extract_thumb() (~6× faster, but invalidates v1.1.9 and earlier RAW cache — phash differs from postprocess by ~30 bits)
+    # ── Runaway-group safety net ─────────────────────────────────────────────
+    # Single-linkage union-find can chain unrelated images together via 1-bit
+    # pHash intermediates, which is common when a collection contains many
+    # near-uniform images (blank screenshots, dark photos, document scans).
+    # If a raw union-find bucket exceeds ``max_group_size``, scanner splits it
+    # by requiring every member to pass the full ``_can_be_similar`` guard
+    # against the bucket's medoid (chain-breaker).  Set to 0 to disable.
+    max_group_size: int = 50
     # Calibrated on Canon EOS M100 CR2 vs camera JPEG (35 matched pairs, keep_all_formats=False):
     # max intra-group cross-format pHash = 12  (tone-mapped pairs with distinct processing)
     # min inter-group cross-format pHash = 20  → 8-bit safety gap

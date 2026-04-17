@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.1.10"
+APP_VERSION   = "1.1.11"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
@@ -363,12 +363,25 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
     check_btn = _mat_btn(upd_inner, "Check Now", _do_check, _BTN_PRIMARY, font_size=9)
     check_btn.pack(anchor=tk.W)
 
-    # Run auto-check in background if enabled
+    # Run auto-check in background if enabled.  The `inner.after()` call
+    # can fail in two cases:
+    #   1. The widget was destroyed while we were sleeping (tests, app
+    #      closed during the 2-second delay).
+    #   2. We are running under a pytest session where no Tk mainloop is
+    #      actually serving — ``after()`` tries to register a Tcl command
+    #      and raises ``RuntimeError: main thread is not in main loop``.
+    # Swallow both so the app / test session stays clean.
+    def _auto_check_bg() -> None:
+        import time as _time
+        _time.sleep(2)
+        try:
+            if inner.winfo_exists():
+                inner.after(0, _do_check)
+        except Exception:
+            pass
+
     if app.auto_update_var.get():
-        threading.Thread(target=lambda: (
-            __import__("time").sleep(2),   # small delay so UI is fully loaded first
-            inner.after(0, _do_check),
-        ), daemon=True).start()
+        threading.Thread(target=_auto_check_bg, daemon=True).start()
 
     # ── 3. Privacy Policy card ────────────────────────────────────────────
     priv_inner = _section(inner, "Privacy Policy")

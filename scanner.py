@@ -821,6 +821,83 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
 
 # ── grouping ──────────────────────────────────────────────────────────────────
 
+def _split_oversized_bucket(
+    indices: list[int],
+    records: list[ImageRecord],
+    settings: Settings,
+    cap: int,
+) -> list[list[int]]:
+    """Break a runaway union-find bucket into tight sub-groups by requiring
+    every member to pair-match the bucket's medoid.
+
+    Union-find is *single-linkage* — A joins B's component if *any* existing
+    member is pHash-similar enough.  With many near-uniform images (blank
+    screenshots, near-black photos, document scans) this chains unrelated
+    photos into one mega-group via 1-bit pHash intermediates.  The chain
+    breaker: pick the medoid (index with minimum total pHash distance to
+    sampled peers) and demand every member pass the full ``_can_be_similar``
+    guard against that medoid directly.  Rejected members are re-split
+    recursively so a bucket that actually contains several distinct
+    duplicate clusters still surfaces all of them.
+
+    Called only for buckets whose size exceeds ``settings.max_group_size``.
+    Small buckets keep their original transitive closure, which is the
+    correct semantics for genuine dup groups.
+
+    ``cap <= 0`` is treated as "feature disabled" — the bucket is returned
+    unchanged regardless of its size.
+    """
+    if cap <= 0 or len(indices) <= cap:
+        return [list(indices)]
+
+    # Sample if huge — O(k) medoid computation for k=200 is plenty.
+    if len(indices) <= 200:
+        sample = list(indices)
+    else:
+        # Deterministic stride sample so the split is reproducible
+        # across re-runs (pytest, cache replays, etc.).
+        step = max(1, len(indices) // 200)
+        sample = [indices[i] for i in range(0, len(indices), step)][:200]
+
+    def _total_dist(idx: int) -> int:
+        h_i = records[idx].phash
+        total = 0
+        for j in sample:
+            if j == idx:
+                continue
+            total += h_i - records[j].phash   # Hamming distance via ImageHash.__sub__
+        return total
+
+    medoid = min(sample, key=_total_dist)
+
+    # Split: members that pass the FULL similarity guard against medoid stay;
+    # others are rejected for recursive re-splitting.
+    kept: list[int]     = [medoid]
+    rejected: list[int] = []
+    med_rec = records[medoid]
+    for idx in indices:
+        if idx == medoid:
+            continue
+        if _can_be_similar(med_rec, records[idx], settings):
+            kept.append(idx)
+        else:
+            rejected.append(idx)
+
+    sub_groups: list[list[int]] = []
+    # Only surface the kept bucket if it still has >= 2 members.
+    if len(kept) >= 2:
+        sub_groups.append(kept)
+
+    # Recurse on rejected so genuine sub-clusters inside the oversized bucket
+    # are also recovered.  Guard against pathological cases where nothing
+    # matches the medoid — then each rejected item becomes its own singleton
+    # and we simply drop them (no group).
+    if rejected and len(rejected) < len(indices):
+        sub_groups.extend(_split_oversized_bucket(rejected, records, settings, cap))
+
+    return sub_groups
+
+
 def _sort_key(r: ImageRecord, settings: Settings):
     """Return sort key so the *best* image sorts first (ascending).
 
@@ -1004,16 +1081,32 @@ def find_groups(
     group_counter = 0
     grouped_indices: set[int] = set()
 
+    # Runaway-group safety net: when ``max_group_size`` is set, any bucket
+    # that grew beyond that cap via union-find chaining is split by the
+    # medoid rule.  Prevents a single mega-group of hundreds of unrelated
+    # near-uniform images (blank docs, dark photos) from appearing in the
+    # results.  Disabled when ``max_group_size`` <= 0.
+    _cap = max(0, int(getattr(settings, "max_group_size", 0)))
+
     for indices in buckets.values():
         if len(indices) < 2:
             continue
 
-        group_counter += 1
-        members = [records[i] for i in indices]
-        result_group = _classify_group(members, settings, f"g{group_counter:04d}")
-        if result_group is not None:
-            groups.append(result_group)
-            grouped_indices.update(indices)
+        # Split oversized buckets; otherwise pass the bucket through as-is.
+        if _cap > 0 and len(indices) > _cap:
+            sub_buckets = _split_oversized_bucket(indices, records, settings, _cap)
+        else:
+            sub_buckets = [indices]
+
+        for sub in sub_buckets:
+            if len(sub) < 2:
+                continue
+            group_counter += 1
+            members = [records[i] for i in sub]
+            result_group = _classify_group(members, settings, f"g{group_counter:04d}")
+            if result_group is not None:
+                groups.append(result_group)
+                grouped_indices.update(sub)
 
     # ── Ambiguous detection ───────────────────────────────────────────────
     # Find image pairs whose pHash distance is within (threshold, threshold*factor].

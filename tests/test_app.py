@@ -327,12 +327,15 @@ class TestSliderRecommended(unittest.TestCase):
         self.assertIn('2, 12, 2, "threshold"', src,
                       "Settings tab threshold: rec_lo=2, rec_hi=12, default=2")
 
-    def test_threshold_slider_rec_lo_is_2_in_custom_tab(self):
-        """Custom Scan tab threshold slider must have rec_lo=2."""
+    def test_compare_tab_uses_calibration_threshold(self):
+        """Compare Scan tab does not own a threshold slider — it reads the
+        calibrated threshold from settings, so changes in the Settings tab
+        propagate automatically.  Verify the tab references the calibrated
+        threshold, not a duplicated slider."""
         import inspect, main
         src = inspect.getsource(main.App._build_custom_scan_tab)
-        self.assertIn('2, 12, 2, "threshold"', src,
-                      "Custom tab threshold: rec_lo=2, rec_hi=12, default=2")
+        self.assertIn("calibrated_threshold", src,
+                      "Compare tab should use the shared calibrated_threshold")
 
 
 # ═════════════════════════════════════════════════════════════════════════════

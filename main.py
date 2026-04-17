@@ -692,6 +692,9 @@ class App:
         self._schedule_estimate_update()
         self._heartbeat_tick()
 
+        # Clean shutdown when the user clicks the window's X button.
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
+
     # ── UI construction ───────────────────────────────────────────────────
 
     def _build_ui(self) -> None:
@@ -4547,6 +4550,93 @@ class App:
             self.root.after(0, lambda: self._phase_label_var.set(msg))
 
         threading.Thread(target=_do, daemon=True).start()
+
+    # ── clean shutdown ────────────────────────────────────────────────────
+
+    def _on_window_close(self) -> None:
+        """Handle the window's X button.
+
+        Tkinter's default behaviour only destroys the root — it does not
+        signal scanner/library workers to stop, and a ``ThreadPoolExecutor``
+        keeps non-daemon worker threads alive until their current file
+        finishes hashing.  On a slow HDD that can mean the app icon lingers
+        in the taskbar and the drive keeps spinning for seconds after the
+        user clicked close.
+
+        This handler:
+
+          1. Flips every scan stop-flag so in-flight workers short-circuit
+             at the next checkpoint (file boundary) and the ``finally``
+             block inside ``collect_images`` / ``update_folder`` drains the
+             pool cleanly.
+          2. Cancels every scheduled Tk ``after`` callback so nothing tries
+             to touch a destroyed widget.
+          3. Flushes pending settings to disk (the debounced 500-ms writer
+             may be mid-delay).
+          4. Destroys the root so the user sees the window vanish.
+          5. Calls ``os._exit(0)`` to guarantee the process ends — daemon
+             threads stop on interpreter exit, but ``ThreadPoolExecutor``
+             uses non-daemon workers by default, so a bare ``destroy()``
+             can leave the process alive for the duration of one more
+             hash per active worker.
+        """
+        import os as _os
+
+        # 1. Signal stop to every known background task.
+        for flag_attr in ("_stop_flag", "_custom_stop_flag"):
+            flag = getattr(self, flag_attr, None)
+            if flag is not None:
+                try:
+                    flag[0] = True
+                except Exception:
+                    pass
+        for pause_attr in ("_pause_flag", "_custom_pause_flag"):
+            flag = getattr(self, pause_attr, None)
+            if flag is not None:
+                try:
+                    flag[0] = False
+                except Exception:
+                    pass
+        # Library tab keeps its own per-scan stop flags.
+        lib_ctrl = getattr(self, "_library_ctrl", None)
+        if lib_ctrl is not None:
+            try:
+                lib_ctrl.request_stop()
+            except Exception:
+                pass
+
+        # 2. Cancel any pending Tk timers.
+        for attr in ("_save_after_id", "_estimate_after_id",
+                     "_heartbeat_after_id", "_custom_estimate_after_id"):
+            aid = getattr(self, attr, None)
+            if aid is not None:
+                try:
+                    self.root.after_cancel(aid)
+                except Exception:
+                    pass
+                setattr(self, attr, None)
+
+        # 3. Flush pending settings write (debounced at 500 ms in _schedule_save).
+        try:
+            if getattr(self, "_save_after_id", None) is None and \
+               hasattr(self, "_save_settings_now"):
+                # Nothing queued → no flush needed.
+                pass
+            elif hasattr(self, "_save_settings_now"):
+                self._save_settings_now()
+        except Exception:
+            pass
+
+        # 4. Destroy the window so the user sees immediate feedback.
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+        # 5. Hard-exit so ThreadPoolExecutor's non-daemon workers can't keep
+        # the process alive.  Stop flags set in step 1 gave them a clean
+        # checkpoint; any still mid-hash are terminated by the OS.
+        _os._exit(0)
 
     # ── rawpy installer ───────────────────────────────────────────────────
 

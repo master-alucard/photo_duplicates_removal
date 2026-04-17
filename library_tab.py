@@ -369,6 +369,9 @@ class _LibraryTabController:
         self._update_queue: list[Path] = []  # batch update queue
         self._pending_status_done = False  # cross-thread signal
         self._pending_update_result: Optional[tuple] = None  # (entry, error)
+        # Stop flags of any in-flight update_folder() scans, so the main
+        # App window-close handler can signal them from a different thread.
+        self._active_stop_flags: list[list[bool]] = []
 
         # Widget refs populated in build()
         self._tree:        ttk.Treeview
@@ -992,6 +995,7 @@ class _LibraryTabController:
         self._status_lbl.configure(text=f"Hashing {folder.name}…", fg=_TEXT2)
 
         stop_flag: list[bool] = [False]
+        self._active_stop_flags.append(stop_flag)
 
         def _progress(name: str, done: int, total: int) -> None:
             def _ui():
@@ -1025,12 +1029,30 @@ class _LibraryTabController:
                     self._statuses[str(folder.resolve())] = DriveStatus(state="ok")
             except Exception as exc:
                 error = exc
+            finally:
+                # Drop the stop-flag reference so it can be garbage-collected.
+                try:
+                    self._active_stop_flags.remove(stop_flag)
+                except ValueError:
+                    pass
             try:
                 self._frame.after(0, lambda: self._after_update(entry, error))
             except RuntimeError:
                 self._pending_update_result = (entry, error)
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    def request_stop(self) -> None:
+        """Signal any in-flight library update_folder() scans to stop.
+
+        Called from the main App window-close handler so HDD reads end
+        promptly instead of continuing until the interpreter dies.
+        """
+        for flag in self._active_stop_flags:
+            try:
+                flag[0] = True
+            except Exception:
+                pass
 
     def _after_update(self, entry: Optional[FolderEntry],
                        error: Optional[Exception]) -> None:

@@ -115,7 +115,20 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### ⚡ Performance & Responsiveness Overhaul
+            ### 🛡️ Clean Shutdown & No More Ghost Windows
+            - **Window X button now ends *all* background work** — closing the main window signals every scan / library-update worker to stop, cancels pending Tk timers, destroys the UI, then hard-exits the process. Previously `ThreadPoolExecutor`'s non-daemon workers could keep the process (and the HDD) running for seconds after the window disappeared; now the app is truly gone when you close it.
+            - **No more taskbar lingering after close** — daemon-thread assumptions hid a race where a scan in flight would survive window destroy. The new `_on_window_close` handler (plus a `request_stop()` hook on the Library tab) stops this cleanly across all tabs.
+
+            ### 🔬 False-Positive Mega-Group Fix
+            - **"Runaway" groups on large collections** — union-find clustering is single-linkage, so if many near-uniform images are scanned (blank screenshots, near-black photos, document scans with uniform backgrounds), 1-bit pHash chains could merge hundreds of unrelated images into one huge duplicate group. Fixed with a post-grouping **medoid split**: whenever a raw union-find bucket exceeds `max_group_size` (default 50), the scanner picks the bucket's medoid and demands every member pass the full `_can_be_similar` guard directly against it. Chains that don't satisfy this direct match are demoted out, and the rejected members are re-split recursively so genuine sub-clusters are still surfaced. Configurable via new setting `max_group_size` (default 50, set to 0 to disable).
+            - **New end-to-end calibration test** — `tests/test_calibration_e2e.py` spins up a synthetic calibration folder (2 positive groups, 1 negative pair, 2 singletons), runs `run_calibration`, and asserts ground-truth parsing, folder validation, result-list shape, score > 0 detection, and Stop-flag responsiveness.
+
+            ### 🧪 Test Infrastructure
+            - **Tests no longer flash windows on screen** — new `tests/conftest.py` creates a single session-wide withdrawn Tk root and redirects any further `tk.Tk()` / `Toplevel()` calls through it. ttkbootstrap's image cache stays valid across test modules (previously caused `TclError: image "pyimageNN" doesn't exist` in `test_report_viewer`), and `deiconify` / `grab_set` become silent no-ops during the test session.
+            - **All 213 tests pass** — up from 203 passed + 3 failed + 11 errors. Three new test files: `test_group_split.py` (5 tests for the medoid-split safety net), `test_calibration_e2e.py` (5 end-to-end calibration tests), plus reusable fixtures in `conftest.py`.
+            - **Outdated slider test fixed** — `test_threshold_slider_rec_lo_is_2_in_custom_tab` was asserting on the old Custom-Scan tab layout; the Compare tab now reads the shared `calibrated_threshold` directly, so the test was rewritten to assert that.
+
+            ### ⚡ Performance & Responsiveness Overhaul (from v1.1.10)
             - **Pause & Stop are now instant** — `ThreadPoolExecutor.shutdown(wait=False, cancel_futures=True)` cancels queued hash tasks immediately and each worker checks the stop/pause flag at entry, so at most *n_threads* files finish before the disk goes quiet (previously all pending files in a batch had to complete).
             - **HDD overheating fix** — default concurrency now caps at 2 parallel readers on fixed / removable / network drives (`io_parallelism="auto"`, `hdd_thread_cap=2`). Windows reports both HDDs and SSDs as "fixed" and cannot cheaply distinguish them, so the safe default protects spinning drives from seek-thrash. SSD users can opt into full parallelism via Settings: `io_parallelism="ssd"` or explicit `scan_threads`.
             - **Hashing ~4-10× faster on large JPEGs** — every image is pre-downscaled once to 1024 px (longest side) and reused for pHash, dHash, histogram, brightness, and all three rotation hashes. Peak memory drops from ~300 MB to ~6 MB per thread on 24 MP images. Validated numerically: 0.225-bit average pHash drift (max 2 bits) across 80 hash comparisons on 20 real photos — well within the 2-bit exact-duplicate threshold, so existing library caches stay compatible.
