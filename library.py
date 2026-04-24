@@ -459,8 +459,13 @@ class Library:
         new_cache_dir = self._cache_path(new_key).parent
 
         if old_cache_dir.exists() and old_cache_dir != new_cache_dir:
-            new_cache_dir.parent.mkdir(parents=True, exist_ok=True)
-            shutil.move(str(old_cache_dir), str(new_cache_dir))
+            try:
+                new_cache_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_cache_dir), str(new_cache_dir))
+            except Exception:
+                # Restore the old entry so the library isn't left without it
+                self._index[old_key] = entry
+                raise
 
         entry.path      = new_key
         self._index[new_key] = entry

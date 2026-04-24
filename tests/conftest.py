@@ -57,11 +57,20 @@ def _silent_tk_windows():
     global _MASTER_ROOT
 
     # ── 1. Build the master root up front so all widgets share it ─────────
+    # Use Tcl to withdraw the window *before* Tk maps it to the screen,
+    # then set alpha=0 + overrideredirect so it stays invisible even if
+    # Windows sends WM_SHOWWINDOW during later event processing.
     _MASTER_ROOT = tk.Tk()
     try:
-        _MASTER_ROOT.withdraw()
+        # Withdraw via raw Tcl before any Python-level event processing fires.
+        _MASTER_ROOT.tk.call("wm", "withdraw", ".")
+        _MASTER_ROOT.tk.call("wm", "attributes", ".", "-alpha", "0.0")
+        _MASTER_ROOT.tk.call("wm", "overrideredirect", ".", "1")
     except Exception:
-        pass
+        try:
+            _MASTER_ROOT.withdraw()
+        except Exception:
+            pass
 
     # Publish into any already-imported test modules (pytest may have
     # collected them before this fixture ran).
@@ -107,6 +116,18 @@ def _silent_tk_windows():
     _orig_deiconify = tk.Wm.deiconify
     tk.Wm.deiconify = lambda self: None   # type: ignore[method-assign]
 
+    # ── 4b. wm_state → block any transition to 'normal' ──────────────────
+    # deiconify patches the Python method, but Tk can also change state via
+    # wm_state('normal') directly.  Block that path too.
+    _orig_wm_state = tk.Wm.wm_state
+
+    def _locked_wm_state(self, newstate=None):
+        if newstate is not None and newstate not in ("withdrawn", "iconic"):
+            return None   # silently ignore attempts to show the window
+        return _orig_wm_state(self, newstate)
+
+    tk.Wm.wm_state = _locked_wm_state   # type: ignore[method-assign]
+
     # ── 5. grab_set → don't fail on unviewable windows ────────────────────
     _orig_grab_set = tk.Misc.grab_set
 
@@ -118,13 +139,33 @@ def _silent_tk_windows():
 
     tk.Misc.grab_set = _silent_grab_set   # type: ignore[method-assign]
 
+    # ── 6. update_idletasks → re-withdraw master root afterwards ─────────
+    # On Windows, processing pending events can cause the OS to send
+    # WM_SHOWWINDOW, making the withdrawn root briefly visible on screen.
+    # Re-withdrawing after each flush keeps it hidden.
+    _orig_update_idletasks = tk.Misc.update_idletasks
+
+    def _safe_update_idletasks(self):
+        result = _orig_update_idletasks(self)
+        if _MASTER_ROOT is not None:
+            try:
+                if _MASTER_ROOT.wm_state() != "withdrawn":
+                    _MASTER_ROOT.withdraw()
+            except Exception:
+                pass
+        return result
+
+    tk.Misc.update_idletasks = _safe_update_idletasks   # type: ignore[method-assign]
+
     yield _MASTER_ROOT
 
     # ── restore ───────────────────────────────────────────────────────────
-    tk.Tk.__init__       = _orig_tk_init
-    tk.Toplevel.__init__ = _orig_top_init
-    tk.Wm.deiconify      = _orig_deiconify
-    tk.Misc.grab_set     = _orig_grab_set
+    tk.Tk.__init__            = _orig_tk_init
+    tk.Toplevel.__init__      = _orig_top_init
+    tk.Wm.deiconify           = _orig_deiconify
+    tk.Wm.wm_state            = _orig_wm_state
+    tk.Misc.grab_set          = _orig_grab_set
+    tk.Misc.update_idletasks  = _orig_update_idletasks
 
 
 def pytest_collection_modifyitems(config, items):

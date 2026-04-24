@@ -4086,6 +4086,7 @@ class App:
                     library_cache=_lib_cache,
                     trust_library=True,      # trust injected records
                 )
+                self._broken_files = failed
             else:
                 cb("Discovering images…", 0, 1, "Discovery")
                 failed: list = []
@@ -4179,6 +4180,7 @@ class App:
                 if not partial_state.records:
                     partial_state.records = [serialize_record(r) for r in records]
                 save_state(partial_state, state_path(out))
+                self._paused_state = partial_state
                 self.root.after(0, lambda: self._on_done("Scan paused.", success=False, paused=True))
                 return
 
@@ -4269,6 +4271,7 @@ class App:
             union_parent=union_parent,
         )
         save_state(state, state_path(out))
+        self._paused_state = state
 
     # ── settings lock during scan ─────────────────────────────────────────
 
