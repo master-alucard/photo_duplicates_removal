@@ -674,6 +674,15 @@ class App:
         self._scan_selection_cache: dict | None = None
         self._custom_selection_cache: dict | None = None
 
+        # Progress-callback coalescing — prevents flooding the Tk event queue
+        # when the worker thread emits thousands of progress events faster than
+        # the main thread can process them (e.g. cache-hit hashing of 50k files).
+        # Worker writes _pending_progress; main thread reads it in _flush_progress_cb.
+        self._progress_cb_pending:        bool = False
+        self._pending_progress:           "tuple | None" = None
+        self._custom_progress_cb_pending: bool = False
+        self._custom_pending_progress:    "tuple | None" = None
+
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
         self._custom_pause_flag: list[bool] = [False]
@@ -2582,46 +2591,54 @@ class App:
     def _custom_progress_cb(
         self, msg: str, done: int, total: int, phase_name: str
     ) -> None:
-        def _update() -> None:
-            tracker = self._custom_tracker
-            if tracker is None:
-                return
-            self._check_sleep_gap(tracker)
+        # Coalesce: same pattern as _progress_cb — one flush per event-loop tick.
+        self._custom_pending_progress = (msg, done, total, phase_name)
+        if not self._custom_progress_cb_pending:
+            self._custom_progress_cb_pending = True
+            self.root.after(0, self._flush_custom_progress_cb)
 
-            # Map scanner phase names to custom phases.
-            # collect_images reports "Hashing"; find_groups reports "Comparing".
-            # The worker sets the high-level phase via cb() before each call.
-            mapped = phase_name
-            if phase_name == "Hashing":
-                # Keep the current custom phase ("Main folder" or "Check folder")
-                mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
-            elif phase_name not in _CUSTOM_PHASES:
-                mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
+    def _flush_custom_progress_cb(self) -> None:
+        """Drain one pending custom progress update on the main thread."""
+        self._custom_progress_cb_pending = False
+        data = self._custom_pending_progress
+        tracker = self._custom_tracker
+        if data is None or tracker is None:
+            return
+        msg, done, total, phase_name = data
+        self._check_sleep_gap(tracker)
 
-            if tracker.current_phase_name != mapped:
-                tracker.finish_phase()
-                tracker.start_phase(mapped, max(total, 1))
+        # Map scanner phase names to custom phases.
+        # collect_images reports "Hashing"; find_groups reports "Comparing".
+        # The worker sets the high-level phase via cb() before each call.
+        mapped = phase_name
+        if phase_name == "Hashing":
+            # Keep the current custom phase ("Main folder" or "Check folder")
+            mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
+        elif phase_name not in _CUSTOM_PHASES:
+            mapped = tracker.current_phase_name or _CUSTOM_PHASES[0]
 
-            if total > 0:
-                tracker.update(done)
+        if tracker.current_phase_name != mapped:
+            tracker.finish_phase()
+            tracker.start_phase(mapped, max(total, 1))
 
-            pct = tracker.total_pct
-            eta = tracker.format_eta()
-            phase_num = _CUSTOM_PHASES.index(mapped) + 1 if mapped in _CUSTOM_PHASES else "?"
+        if total > 0:
+            tracker.update(done)
 
-            self._custom_progress_bar.stop()
-            self._custom_progress_bar["mode"]  = "determinate"
-            self._custom_progress_bar["value"] = pct
+        pct = tracker.total_pct
+        eta = tracker.format_eta()
+        phase_num = _CUSTOM_PHASES.index(mapped) + 1 if mapped in _CUSTOM_PHASES else "?"
 
-            self._custom_phase_label.set(
-                f"Phase {phase_num}/{len(_CUSTOM_PHASES)}: {mapped}…"
-            )
-            self._custom_eta_var.set(
-                f"{pct:.0f}%  \u00b7  {eta} remaining  \u00b7  {msg[:80]}"
-            )
-            self._update_custom_detail_log()
+        self._custom_progress_bar.stop()
+        self._custom_progress_bar["mode"]  = "determinate"
+        self._custom_progress_bar["value"] = pct
 
-        self.root.after(0, _update)
+        self._custom_phase_label.set(
+            f"Phase {phase_num}/{len(_CUSTOM_PHASES)}: {mapped}…"
+        )
+        self._custom_eta_var.set(
+            f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}"
+        )
+        self._update_custom_detail_log()
 
     def _update_custom_detail_log(self) -> None:
         if not self._custom_details_var.get() or self._custom_tracker is None:
@@ -3960,28 +3977,38 @@ class App:
         self._last_heartbeat = now
 
     def _progress_cb(self, msg: str, done: int, total: int, phase_name: str) -> None:
-        def _update() -> None:
-            if self._tracker is None:
-                return
-            self._check_sleep_gap(self._tracker)
-            if self._tracker.current_phase_name != phase_name:
-                self._tracker.finish_phase()
-                phase_num = PHASE_NAMES.index(phase_name) + 1 if phase_name in PHASE_NAMES else "?"
-                self._tracker.start_phase(phase_name, max(total, 1))
-                self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}…")
-                self._progress_bar.stop()
-                self._progress_bar["mode"] = "determinate"
+        # Coalesce: store the latest data and schedule exactly one flush per
+        # event-loop tick.  Prevents thousands of after(0) callbacks piling up
+        # when the worker runs faster than the UI thread (e.g. warm cache hits).
+        self._pending_progress = (msg, done, total, phase_name)
+        if not self._progress_cb_pending:
+            self._progress_cb_pending = True
+            self.root.after(0, self._flush_progress_cb)
 
-            if total > 0:
-                self._tracker.update(done)
+    def _flush_progress_cb(self) -> None:
+        """Drain one pending progress update on the main thread."""
+        self._progress_cb_pending = False
+        data = self._pending_progress
+        if data is None or self._tracker is None:
+            return
+        msg, done, total, phase_name = data
+        self._check_sleep_gap(self._tracker)
+        if self._tracker.current_phase_name != phase_name:
+            self._tracker.finish_phase()
+            phase_num = PHASE_NAMES.index(phase_name) + 1 if phase_name in PHASE_NAMES else "?"
+            self._tracker.start_phase(phase_name, max(total, 1))
+            self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}…")
+            self._progress_bar.stop()
+            self._progress_bar["mode"] = "determinate"
 
-            pct = self._tracker.total_pct
-            self._progress_bar["value"] = pct
-            eta = self._tracker.format_eta()
-            self._eta_var.set(f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}")
-            self._update_detail_log()
+        if total > 0:
+            self._tracker.update(done)
 
-        self.root.after(0, _update)
+        pct = self._tracker.total_pct
+        self._progress_bar["value"] = pct
+        eta = self._tracker.format_eta()
+        self._eta_var.set(f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}")
+        self._update_detail_log()
 
     def _update_detail_log(self) -> None:
         if not self._details_var.get() or self._tracker is None:

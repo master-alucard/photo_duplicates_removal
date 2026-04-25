@@ -428,6 +428,16 @@ class ReportViewer(tk.Frame):
         self._pending_thumbs: list[tuple] = []  # (path, label, max_px, grayscale) queued during build
         self._thumb_batch_id: int = 0           # bumped on page change to cancel stale loads
 
+        # O(1) path → record lookup (built once; replaces O(n) linear scan in _path_to_record).
+        # Guard against None originals/previews so a single corrupted group never
+        # prevents the viewer from initialising (mirrors the per-card resilience pattern).
+        self._record_by_path: dict[Path, ImageRecord] = {
+            r.path: r
+            for g in groups
+            for r in (g.originals or []) + (g.previews or [])
+        }
+        self._record_by_path.update({r.path: r for r in self._solo_originals})
+
         self._build_ui()
 
     # ── UI construction ───────────────────────────────────────────────────────
@@ -1046,20 +1056,23 @@ class ReportViewer(tk.Frame):
 
     def _spawn_thumb_thread(self, path: Path, label: tk.Label, max_px: int,
                             grayscale: bool, batch_id: int) -> None:
-        """Start a single thumbnail-loading thread."""
+        """Start a single thumbnail-loading thread.
+
+        PIL image decoding happens in the background thread; ALL Tk calls
+        (winfo_exists, ImageTk.PhotoImage creation, label.configure, photo_refs)
+        are marshalled to the main thread via label.after(0, ...) so they never
+        race against the Tcl interpreter.
+        """
         def _load() -> None:
             if not _PIL_AVAILABLE:
                 return
             if batch_id != self._thumb_batch_id:
                 return
-            try:
-                if not label.winfo_exists():
-                    return
-            except Exception:
-                return
             with _THUMB_SEMAPHORE:
                 if batch_id != self._thumb_batch_id:
                     return
+                # ── Decode image in background — no Tk calls here ──────────
+                img_copy = None
                 try:
                     with PILImage.open(path) as img:
                         img.thumbnail((max_px, max_px), PILImage.LANCZOS)
@@ -1067,31 +1080,41 @@ class ReportViewer(tk.Frame):
                             img = img.convert("L").convert("RGB")
                         elif img.mode not in ("RGB", "RGBA"):
                             img = img.convert("RGB")
-                        photo = ImageTk.PhotoImage(img)
-                        self._photo_refs.append(photo)
+                        img_copy = img.copy()   # PIL Image — safe to pass cross-thread
+                except Exception:
+                    pass
+
+                # ── All Tk operations on the main thread via after(0) ───────
+                if img_copy is None:
+                    def _set_err(lbl=label, bid=batch_id):
+                        if bid != self._thumb_batch_id:
+                            return
                         try:
-                            if label.winfo_exists():
-                                def _set_img(p=photo, lbl=label):
-                                    try:
-                                        if lbl.winfo_exists():
-                                            lbl.configure(image=p)
-                                    except Exception:
-                                        pass
-                                label.after(0, _set_img)
+                            if lbl.winfo_exists():
+                                lbl.configure(text="[no preview]", fg=_M_TEXT3)
                         except Exception:
                             pass
-                except Exception:
                     try:
-                        if label.winfo_exists():
-                            def _set_err(lbl=label):
-                                try:
-                                    if lbl.winfo_exists():
-                                        lbl.configure(text="[no preview]", fg=_M_TEXT3)
-                                except Exception:
-                                    pass
-                            label.after(0, _set_err)
+                        label.after(0, _set_err)
                     except Exception:
                         pass
+                    return
+
+                def _set_img(pil_img=img_copy, lbl=label, bid=batch_id):
+                    if bid != self._thumb_batch_id:
+                        return
+                    try:
+                        if not lbl.winfo_exists():
+                            return
+                        photo = ImageTk.PhotoImage(pil_img)
+                        self._photo_refs.append(photo)
+                        lbl.configure(image=photo)
+                    except Exception:
+                        pass
+                try:
+                    label.after(0, _set_img)
+                except Exception:
+                    pass
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -1779,12 +1802,22 @@ class ReportViewer(tk.Frame):
                         key = (idx, "prev", img_idx)
                         if self._image_vars.get(key, _TRUE_STUB).get():
                             continue  # This is a correctly matched image, skip
-                        # This is a false positive — compute distance to originals
+                        # This is a false positive — compute rotation-aware distance to originals.
+                        # Mirror _can_be_similar(): take the minimum across all 7 orientation
+                        # combinations so rotated duplicates produce an accurate calibration signal.
                         for orig in grp.originals:
                             if interrupted[0]:
                                 break
                             try:
-                                dist = rec.phash - orig.phash
+                                dist_normal = rec.phash - orig.phash
+                                dist_r90    = (orig.phash - rec.phash_r90)  if rec.phash_r90  is not None else dist_normal
+                                dist_r180   = (orig.phash - rec.phash_r180) if rec.phash_r180 is not None else dist_normal
+                                dist_r270   = (orig.phash - rec.phash_r270) if rec.phash_r270 is not None else dist_normal
+                                dist_ar90   = (rec.phash_r90  - orig.phash) if rec.phash_r90  is not None else dist_normal
+                                dist_ar180  = (rec.phash_r180 - orig.phash) if rec.phash_r180 is not None else dist_normal
+                                dist_ar270  = (rec.phash_r270 - orig.phash) if rec.phash_r270 is not None else dist_normal
+                                dist = min(dist_normal, dist_r90, dist_r180, dist_r270,
+                                           dist_ar90, dist_ar180, dist_ar270)
                                 fp_distances.append(dist)
                             except Exception:
                                 pass
@@ -2359,15 +2392,8 @@ class ReportViewer(tk.Frame):
         self._manual_group_vars = new_vars
 
     def _path_to_record(self, path: Path) -> Optional[ImageRecord]:
-        """Look up an ImageRecord by path from all groups + solo originals."""
-        for g in self._groups:
-            for r in g.originals + g.previews:
-                if r.path == path:
-                    return r
-        for r in self._solo_originals:
-            if r.path == path:
-                return r
-        return None
+        """Look up an ImageRecord by path — O(1) via pre-built dict."""
+        return self._record_by_path.get(path)
 
     # ── pagination ────────────────────────────────────────────────────────────
 
