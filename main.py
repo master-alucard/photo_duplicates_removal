@@ -701,6 +701,11 @@ class App:
         self._schedule_estimate_update()
         self._heartbeat_tick()
 
+        # Background check for newer GitHub release; pops a modal dialog only if
+        # a newer version exists and the user hasn't already clicked "Skip".
+        # Honours Settings.auto_update (toggle on the About tab).
+        self._check_for_updates_on_startup()
+
         # Clean shutdown when the user clicks the window's X button.
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
@@ -4667,6 +4672,174 @@ class App:
         # the process alive.  Stop flags set in step 1 gave them a clean
         # checkpoint; any still mid-hash are terminated by the OS.
         _os._exit(0)
+
+    # ── Startup update notification ───────────────────────────────────────
+
+    def _check_for_updates_on_startup(self) -> None:
+        """
+        Background GitHub-Releases check that fires a modal popup if a newer
+        version is available and the user hasn't clicked "Skip This Version".
+
+        Runs ~3 s after window-deiconify so the main UI feels instant; the
+        actual HTTP request happens on a daemon thread, the popup is shown
+        on the Tk main thread via root.after(0, …).
+
+        No-op when ``Settings.auto_update`` is False or when the network
+        request fails (offline, GitHub down, parse error — all silent).
+        """
+        if not self.auto_update_var.get():
+            return
+
+        def _worker() -> None:
+            import time as _time
+            _time.sleep(3)   # let the main window finish drawing
+            try:
+                from about_tab import _check_github
+                result = _check_github()
+            except Exception:
+                return
+            if not result or not result.get("url"):
+                return                                      # offline or up-to-date
+            new_ver = result["version"]
+            skipped = list(getattr(self.settings, "skipped_update_versions", []) or [])
+            if new_ver in skipped:
+                return                                      # user opted out for this version
+            try:
+                if not self.root.winfo_exists():
+                    return
+                self.root.after(0, lambda: self._show_update_prompt(
+                    new_ver, result.get("url"), result.get("notes", "")
+                ))
+            except Exception:
+                pass
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_update_prompt(self, new_version: str, url: str | None, notes: str) -> None:
+        """
+        Modal popup announcing a newer version on GitHub.
+
+        Three actions:
+          • Download Now      → opens the .exe asset URL (or releases page)
+          • Remind Me Later   → closes the dialog, will re-prompt next start
+          • Skip This Version → records the version in settings so it's never
+                                announced again until a still-newer one ships
+        """
+        from about_tab import APP_VERSION as _CUR_VER, GITHUB_URL as _GH_URL
+
+        # Guard: don't stack popups if one is already open
+        if getattr(self, "_update_prompt_open", False):
+            return
+        self._update_prompt_open = True
+
+        win = tk.Toplevel(self.root)
+        win.title("Update available")
+        win.configure(bg=_CARD_BG)
+        win.resizable(False, False)
+        win.transient(self.root)
+        try:
+            _ico = _find_ico()
+            if _ico:
+                win.iconbitmap(str(_ico))
+        except Exception:
+            pass
+
+        def _on_close() -> None:
+            self._update_prompt_open = False
+            try:
+                win.grab_release()
+            except Exception:
+                pass
+            win.destroy()
+
+        win.protocol("WM_DELETE_WINDOW", _on_close)
+
+        # ── Hero header ────────────────────────────────────────────────────
+        hero = tk.Frame(win, bg=_M_HEADER_BG, padx=24, pady=16)
+        hero.pack(fill=tk.X)
+        tk.Label(hero, text="🎉  A new version is available!",
+                 font=("Segoe UI", 14, "bold"),
+                 bg=_M_HEADER_BG, fg="#FFFFFF").pack(anchor=tk.W)
+        tk.Label(hero,
+                 text=f"You have {_CUR_VER}  →  Latest is {new_version}",
+                 font=("Segoe UI", 10),
+                 bg=_M_HEADER_BG, fg=_M_HEADER_SUB).pack(anchor=tk.W, pady=(4, 0))
+
+        # ── Body ───────────────────────────────────────────────────────────
+        body = tk.Frame(win, bg=_CARD_BG, padx=24, pady=16)
+        body.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(body, text="What's new",
+                 font=("Segoe UI", 10, "bold"),
+                 bg=_CARD_BG, fg=_M_TEXT1).pack(anchor=tk.W)
+
+        notes_frame = tk.Frame(body, bg=_M_DETAIL_BG, highlightthickness=1,
+                                highlightbackground=_M_DIVIDER)
+        notes_frame.pack(fill=tk.BOTH, expand=True, pady=(6, 12))
+
+        notes_text = tk.Text(notes_frame, wrap=tk.WORD, relief=tk.FLAT,
+                             padx=10, pady=8, bg=_M_DETAIL_BG, fg=_M_TEXT2,
+                             font=("Segoe UI", 9), height=10, width=60)
+        notes_sb = ttk.Scrollbar(notes_frame, orient=tk.VERTICAL,
+                                  command=notes_text.yview)
+        notes_text.configure(yscrollcommand=notes_sb.set)
+        notes_sb.pack(side=tk.RIGHT, fill=tk.Y)
+        notes_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        notes_text.insert("1.0", (notes or "(No release notes provided.)").strip())
+        notes_text.configure(state=tk.DISABLED)
+
+        # ── Action buttons ─────────────────────────────────────────────────
+        btn_row = tk.Frame(win, bg=_CARD_BG, padx=24, pady=(0, 18))
+        btn_row.pack(fill=tk.X)
+
+        def _do_download() -> None:
+            target = url or _GH_URL + "/releases/latest"
+            try:
+                webbrowser.open(target)
+            except Exception:
+                pass
+            _on_close()
+
+        def _do_skip() -> None:
+            try:
+                skipped = list(getattr(self.settings, "skipped_update_versions", []) or [])
+                if new_version not in skipped:
+                    skipped.append(new_version)
+                    self.settings.skipped_update_versions = skipped
+                    save_settings(self.settings, SETTINGS_PATH)
+            except Exception:
+                pass
+            _on_close()
+
+        # Right-aligned: Skip | Later | [Download]
+        skip_btn  = _mat_btn(btn_row, "Skip This Version", _do_skip,
+                              _M3_SURFACE3, fg=_M_TEXT2, font_size=9)
+        later_btn = _mat_btn(btn_row, "Remind Me Later", _on_close,
+                              _M3_SURFACE3, fg=_M_TEXT2, font_size=9)
+        dl_btn    = _mat_btn(btn_row, f"⬇  Download {new_version}",
+                              _do_download, _ACCENT, font_size=9)
+
+        dl_btn.pack(side=tk.RIGHT)
+        later_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        skip_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+        # Centre on parent window
+        win.update_idletasks()
+        try:
+            pw = self.root.winfo_width()  or 1160
+            ph = self.root.winfo_height() or 800
+            px = self.root.winfo_rootx()
+            py = self.root.winfo_rooty()
+            ww = win.winfo_width()
+            wh = win.winfo_height()
+            x = px + (pw - ww) // 2
+            y = py + (ph - wh) // 3
+            win.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        except Exception:
+            pass
+
+        win.grab_set()
+        dl_btn.focus_set()
 
     # ── rawpy installer ───────────────────────────────────────────────────
 
