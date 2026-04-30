@@ -346,6 +346,7 @@ def serialize_record(rec) -> dict:
         "phash_r90":  str(rec.phash_r90)  if rec.phash_r90  is not None else None,
         "phash_r180": str(rec.phash_r180) if rec.phash_r180 is not None else None,
         "phash_r270": str(rec.phash_r270) if rec.phash_r270 is not None else None,
+        "is_video":   getattr(rec, "is_video", False),
     }
 
 
@@ -373,4 +374,5 @@ def deserialize_record(data: dict):
         phash_r90  = imagehash.hex_to_hash(_r90)  if _r90  else None,
         phash_r180 = imagehash.hex_to_hash(_r180) if _r180 else None,
         phash_r270 = imagehash.hex_to_hash(_r270) if _r270 else None,
+        is_video   = bool(data.get("is_video", False)),
     )

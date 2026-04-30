@@ -65,6 +65,9 @@ class Settings:
     custom_main_folder: str = ""            # Custom Scan: reference folder (never modified)
     custom_check_folder: str = ""           # Custom Scan: folder to search for duplicates
     custom_out_folder: str = ""             # Custom Scan: output/trash folder
+    # ── Video duplicate detection ──────────────────────────────────────────────
+    include_videos: bool = False            # Also scan for video duplicates
+    video_use_thumb: bool = True            # Compare thumbnail frames when sizes match
     auto_update: bool = True                # Check for updates on startup
     skipped_update_versions: list = field(default_factory=list)  # Versions the user clicked "Skip" on (no popup)
     developer_mode: bool = False            # Show full error details / tracebacks

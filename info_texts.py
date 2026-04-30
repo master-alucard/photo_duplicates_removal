@@ -418,4 +418,32 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "The first time you organize a folder, leave Dry Run ON, scan, then "
         "review the per-folder counts before turning it OFF."
     ),
+    "include_videos": (
+        "Find Video Duplicates",
+        "When enabled, the scan also looks for duplicate video files in the "
+        "source folder.\n\n"
+        "Video duplicates are detected by exact file size — two videos with an "
+        "identical byte count are almost certainly the same file.  Optionally, "
+        "a thumbnail frame is also compared to improve confidence (see "
+        "\"Compare thumbnail frames\" below).\n\n"
+        "Supported formats: MP4, MOV, AVI, MKV, WMV, M4V, WebM, FLV, 3GP, "
+        "TS/MTS/M2TS, MPG/MPEG, and more.\n\n"
+        "Tip: frame comparison requires ffmpeg on PATH or OpenCV installed.  "
+        "Without either, size-only comparison is used automatically."
+    ),
+    "video_use_thumb": (
+        "Compare Thumbnail Frames",
+        "When enabled and \"Find video duplicates\" is on, the scanner extracts "
+        "a short frame from each same-size video and computes its perceptual hash "
+        "(pHash).\n\n"
+        "Videos with identical size but visually different thumbnails (e.g. two "
+        "different videos that happen to be the same number of bytes) are NOT "
+        "grouped together — only size-identical videos with similar frames are "
+        "reported as duplicates.\n\n"
+        "Frame extraction uses ffmpeg (if available on PATH) or OpenCV (if "
+        "installed).  If neither is found, size-only comparison is used "
+        "automatically and this option has no effect.\n\n"
+        "Disable this if you trust exact file size as sufficient evidence, or if "
+        "frame extraction is slow on your machine."
+    ),
 }

@@ -690,14 +690,23 @@ class ReportViewer(tk.Frame):
         cb.pack(side=tk.LEFT, padx=(10, 0), pady=8)
 
         n_orig = len(group.originals)
+        _is_video_group = any(getattr(r, "is_video", False) for r in group.originals + group.previews)
+        _kind = "video" if _is_video_group else "original"
         lbl = (
-            f"Group #{idx + 1}  ·  {n_orig} original{'s' if n_orig != 1 else ''}"
-            f"  ·  {n_prev} preview{'s' if n_prev != 1 else ''}"
+            f"Group #{idx + 1}  ·  {n_orig} {_kind}{'s' if n_orig != 1 else ''}"
+            f"  ·  {n_prev} duplicate{'s' if n_prev != 1 else ''}"
         )
         _tklabel(
             head, bg=_M_PRIMARY_TINT, fg=_M_PRIMARY, text=lbl,
             font=("Segoe UI", 9, "bold"),
         ).pack(side=tk.LEFT, padx=8, pady=8)
+
+        if _is_video_group:
+            _tklabel(
+                head, bg="#5C6BC0", fg="#FFFFFF", text=" 🎬 VIDEO ",
+                font=("Segoe UI", 8, "bold"),
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
 
         if group.is_series:
             _tklabel(
@@ -751,7 +760,8 @@ class ReportViewer(tk.Frame):
         orig_col = tk.Frame(body, padx=10, pady=8)
         orig_col.configure(bg=_M_SUCCESS_TINT)
         orig_col.grid(row=0, column=0, sticky="nsew")
-        orig_lbl_text = "Originals — kept in place ✓" if apply_state != "none" else "Originals — kept in place"
+        _orig_kind = "Videos" if _is_video_group else "Originals"
+        orig_lbl_text = f"{_orig_kind} — kept in place ✓" if apply_state != "none" else f"{_orig_kind} — kept in place"
         _orig_lbl = tk.Label(
             orig_col, text=orig_lbl_text,
             font=("Segoe UI", 8, "bold"),
@@ -776,14 +786,15 @@ class ReportViewer(tk.Frame):
         prev_col.configure(bg=prev_col_bg)
         prev_col.grid(row=0, column=2, sticky="nsew")
 
+        _dup_kind = "Videos" if _is_video_group else "Duplicates"
         if apply_state == "full":
-            prev_lbl_text = f"Duplicates trashed ✓  →  trash/"
+            prev_lbl_text = f"{_dup_kind} trashed ✓  →  trash/"
             prev_lbl_fg   = _M_SUCCESS
         elif apply_state == "partial":
-            prev_lbl_text = f"Duplicates — {n_trashed}/{n_checked} trashed  →  trash/"
+            prev_lbl_text = f"{_dup_kind} — {n_trashed}/{n_checked} trashed  →  trash/"
             prev_lbl_fg   = _M_WARNING
         else:
-            prev_lbl_text = "Duplicates to trash  →  trash/"
+            prev_lbl_text = f"{_dup_kind} to trash  →  trash/"
             prev_lbl_fg   = _M_ERROR
         _prev_lbl = tk.Label(
             prev_col, text=prev_lbl_text,
@@ -940,9 +951,10 @@ class ReportViewer(tk.Frame):
                 font=("Segoe UI", 8),
                 wraplength=max_thumb,
             ).pack()
+            _dim_text = rec.size_label() if getattr(rec, "is_video", False) else f"{rec.width}×{rec.height}  {rec.size_label()}"
             _tklabel(
                 tile, bg=bg, fg="#9E9E9E",
-                text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                text=_dim_text,
                 font=("Segoe UI", 8),
             ).pack()
         else:
@@ -1004,11 +1016,18 @@ class ReportViewer(tk.Frame):
                     wraplength=max_thumb,
                 ).pack()
 
-            _tklabel(
-                tile, bg=bg, fg=_M_TEXT2,
-                text=f"{rec.width}×{rec.height}  {rec.size_label()}",
-                font=("Segoe UI", 8),
-            ).pack()
+            if getattr(rec, "is_video", False):
+                _tklabel(
+                    tile, bg=bg, fg=_M_TEXT2,
+                    text=f"🎬  {rec.size_label()}",
+                    font=("Segoe UI", 8),
+                ).pack()
+            else:
+                _tklabel(
+                    tile, bg=bg, fg=_M_TEXT2,
+                    text=f"{rec.width}×{rec.height}  {rec.size_label()}",
+                    font=("Segoe UI", 8),
+                ).pack()
             _tklabel(
                 tile, bg=bg, fg=_M_TEXT3,
                 text=rec.date_label(),
@@ -1071,16 +1090,36 @@ class ReportViewer(tk.Frame):
             with _THUMB_SEMAPHORE:
                 if batch_id != self._thumb_batch_id:
                     return
-                # ── Decode image in background — no Tk calls here ──────────
+                # ── Decode image/video frame in background — no Tk calls here ──
                 img_copy = None
                 try:
-                    with PILImage.open(path) as img:
-                        img.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                        if grayscale:
-                            img = img.convert("L").convert("RGB")
-                        elif img.mode not in ("RGB", "RGBA"):
-                            img = img.convert("RGB")
-                        img_copy = img.copy()   # PIL Image — safe to pass cross-thread
+                    # Check if this is a video file (try PIL first; fall back to
+                    # video frame extraction when PIL raises an exception)
+                    _opened_as_image = False
+                    try:
+                        with PILImage.open(path) as img:
+                            img.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                            if grayscale:
+                                img = img.convert("L").convert("RGB")
+                            elif img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGB")
+                            img_copy = img.copy()
+                            _opened_as_image = True
+                    except Exception:
+                        pass
+
+                    if not _opened_as_image:
+                        # Try video frame extraction (ffmpeg / OpenCV)
+                        try:
+                            from scanner import _extract_video_thumb
+                            frame = _extract_video_thumb(path)
+                            if frame is not None:
+                                frame.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                                if grayscale:
+                                    frame = frame.convert("L").convert("RGB")
+                                img_copy = frame.copy()
+                        except Exception:
+                            pass
                 except Exception:
                     pass
 

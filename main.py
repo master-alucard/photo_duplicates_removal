@@ -57,7 +57,8 @@ from config import Settings, DEFAULTS, load_settings, save_settings
 from info_texts import INFO_TEXTS
 import theme as _theme_mod
 from progress_tracker import PhaseTracker
-from scanner import collect_images, find_groups, IMAGE_EXTENSIONS
+from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
+                     collect_videos, find_video_duplicates)
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -824,6 +825,10 @@ class App:
         self._date_sep_var        = tk.StringVar(value=init_sep)
         self._date_fmt_example    = tk.StringVar()
 
+        # Video duplicate detection
+        self.include_videos_var   = tk.BooleanVar(value=s.include_videos)
+        self.video_use_thumb_var  = tk.BooleanVar(value=s.video_use_thumb)
+
         # Auto-update
         self.auto_update_var = tk.BooleanVar(value=s.auto_update)
         self.auto_update_var.trace_add("write", self._on_setting_change)
@@ -869,6 +874,7 @@ class App:
             self.prefer_meta_var, self.meta_csv_var,
             self.ext_report_var,
             self.recursive_var, self.dry_var,
+            self.include_videos_var, self.video_use_thumb_var,
         ):
             var.trace_add("write", self._on_setting_change)
         self.date_sort_var.trace_add("write", self._on_setting_change)
@@ -998,9 +1004,19 @@ class App:
                         variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(_qs_fmt_row, "keep_all_formats").pack(side=tk.LEFT, padx=2)
 
+        _qs_video_row = ttk.Frame(self._quick_speed_frame)
+        _qs_video_row.pack(fill=tk.X, pady=(4, 0))
+        ttk.Checkbutton(_qs_video_row, text="Also find video duplicates",
+                        variable=self.include_videos_var).pack(side=tk.LEFT)
+        _info_btn(_qs_video_row, "include_videos").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_qs_video_row, text="  ").pack(side=tk.LEFT)
+        ttk.Checkbutton(_qs_video_row, text="Compare thumbnail frames",
+                        variable=self.video_use_thumb_var).pack(side=tk.LEFT)
+        _info_btn(_qs_video_row, "video_use_thumb").pack(side=tk.LEFT, padx=2)
+
         # Compact key settings (advanced mode only)
         self._compact_adv_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
-        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(4)]
+        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(5)]
         for cr in _crows:
             cr.pack(fill=tk.X, pady=2)
 
@@ -1034,6 +1050,15 @@ class App:
         ttk.Checkbutton(_crows[3], text="Keep all formats (keep best copy per file extension)",
                         variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(_crows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
+
+        # Video duplicate detection row
+        ttk.Checkbutton(_crows[4], text="Also find video duplicates (by file size)",
+                        variable=self.include_videos_var).pack(side=tk.LEFT)
+        _info_btn(_crows[4], "include_videos").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_crows[4], text="  ", width=3).pack(side=tk.LEFT)
+        ttk.Checkbutton(_crows[4], text="Compare thumbnail frames",
+                        variable=self.video_use_thumb_var).pack(side=tk.LEFT)
+        _info_btn(_crows[4], "video_use_thumb").pack(side=tk.LEFT, padx=2)
 
         # Estimate
         self._estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -2252,7 +2277,7 @@ class App:
         self._custom_ks_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
         ks = self._custom_ks_frame
         ks.pack(fill=tk.X, pady=(0, 6))
-        _ksrows = [ttk.Frame(ks) for _ in range(4)]
+        _ksrows = [ttk.Frame(ks) for _ in range(5)]
         for kr in _ksrows:
             kr.pack(fill=tk.X, pady=2)
 
@@ -2290,6 +2315,15 @@ class App:
         ttk.Checkbutton(_ksrows[3], text="Keep all formats (keep best copy per file extension)",
                         variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(_ksrows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
+
+        # Row 4: Video duplicates
+        ttk.Checkbutton(_ksrows[4], text="Also find video duplicates",
+                        variable=self.include_videos_var).pack(side=tk.LEFT)
+        _info_btn(_ksrows[4], "include_videos").pack(side=tk.LEFT, padx=2)
+        ttk.Label(_ksrows[4], text="  ", width=3).pack(side=tk.LEFT)
+        ttk.Checkbutton(_ksrows[4], text="Compare thumbnail frames",
+                        variable=self.video_use_thumb_var).pack(side=tk.LEFT)
+        _info_btn(_ksrows[4], "video_use_thumb").pack(side=tk.LEFT, padx=2)
 
         # Estimate
         self._custom_estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -3891,6 +3925,8 @@ class App:
         s.auto_update              = self.auto_update_var.get()
         s.developer_mode           = self.developer_mode_var.get()
         s.dark_mode                = self.dark_mode_var.get()
+        s.include_videos           = self.include_videos_var.get()
+        s.video_use_thumb          = self.video_use_thumb_var.get()
         # Threads: always from the Settings dropdown
         try:
             s.scan_threads = max(1, int(self.scan_threads_var.get()))
@@ -3966,6 +4002,8 @@ class App:
         self.date_org_include_raw_var.set(d.date_org_include_raw)
         self.date_org_sidecars_var.set(d.date_org_move_sidecars)
         self.date_org_dry_var.set(d.date_org_dry_run)
+        self.include_videos_var.set(d.include_videos)
+        self.video_use_thumb_var.set(d.video_use_thumb)
         self._schedule_settings_save()
 
     def _open_calibration(self) -> None:
@@ -4655,6 +4693,28 @@ class App:
 
             self.scan_records = records
 
+            # ── Video duplicate detection (optional) ─────────────────────────
+            _video_groups: list = []
+            if getattr(settings, "include_videos", False):
+                cb("Collecting videos…", 0, 1, "Videos")
+                try:
+                    _video_recs = collect_videos(
+                        src, skip_paths, settings,
+                        progress_cb=cb,
+                        stop_flag=self._stop_flag,
+                    )
+                    if not self._stop_flag[0] and _video_recs:
+                        cb("Finding video duplicates…", 0, 1, "Videos")
+                        _video_groups = find_video_duplicates(_video_recs, settings)
+                        # Include video records in scan_records for stats
+                        self.scan_records = records + _video_recs
+                except Exception:
+                    pass   # video detection is best-effort
+
+            if self._stop_flag[0]:
+                self.root.after(0, lambda: self._on_done("Stopped by user.", success=False))
+                return
+
             groups, partial_state = find_groups(
                 records, settings,
                 progress_cb=cb,
@@ -4662,6 +4722,9 @@ class App:
                 pause_flag=self._pause_flag,
                 resume_state=resume_state,
             )
+
+            # Merge video groups with image groups
+            groups = groups + _video_groups
 
             if self._stop_flag[0]:
                 self.root.after(0, lambda: self._on_done("Stopped by user.", success=False))

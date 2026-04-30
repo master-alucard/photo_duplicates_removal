@@ -27,6 +27,12 @@ RAW_EXTENSIONS = {
     ".rw2", ".pef", ".srw", ".x3f", ".3fr",
 }
 
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm",
+    ".flv", ".3gp", ".ts", ".mts", ".m2ts", ".mpg", ".mpeg",
+    ".rm", ".rmvb", ".vob", ".divx", ".asf", ".f4v",
+}
+
 KeepStrategy = Literal["pixels", "oldest"]
 ProgressCb = Callable[[str, int, int, str], None]
 
@@ -155,6 +161,9 @@ class ImageRecord:
     phash_r90:  "Optional[imagehash.ImageHash]" = None
     phash_r180: "Optional[imagehash.ImageHash]" = None
     phash_r270: "Optional[imagehash.ImageHash]" = None
+    # Video flag — True for records created by collect_videos().  width/height=0,
+    # phash holds the thumbnail frame hash (or zero-hash if extraction failed).
+    is_video: bool = False
 
     @property
     def pixels(self) -> int:
@@ -165,6 +174,8 @@ class ImageRecord:
         return f"{mb:.2f} MB" if mb >= 1 else f"{self.file_size // 1024} KB"
 
     def dim_label(self) -> str:
+        if self.is_video:
+            return "Video"
         mp = self.pixels / 1_000_000
         return f"{self.width}x{self.height}  ({mp:.1f} MP)"
 
@@ -1510,3 +1521,231 @@ def _split_by_format(
                     originals.append(m)
 
     return originals, previews
+
+
+# ── Video duplicate detection ─────────────────────────────────────────────────
+
+def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
+    """Try to extract a representative frame from a video file.
+
+    Tries ffmpeg subprocess first (widely available), then OpenCV.
+    Returns a PIL Image (RGB) or None if neither method is available / succeeds.
+    The frame is taken at 1 second into the video (safe for most clips; falls back
+    to the very first frame if the video is shorter than 1 s).
+    """
+    # 1. Try ffmpeg (most reliable; no Python dependency)
+    try:
+        import subprocess
+        import io as _io
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-ss", "00:00:01", "-i", str(path),
+                "-frames:v", "1", "-f", "image2pipe",
+                "-vcodec", "png", "-",
+            ],
+            capture_output=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout:
+            img = Image.open(_io.BytesIO(result.stdout))
+            img.load()
+            return img.convert("RGB") if img.mode != "RGB" else img
+    except Exception:
+        pass
+
+    # 2. Try OpenCV (cv2) — only available if user installed it
+    try:
+        import cv2  # type: ignore
+        cap = cv2.VideoCapture(str(path))
+        # Seek to 1000 ms
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        ret, frame = cap.read()
+        cap.release()
+        if ret and frame is not None:
+            return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except Exception:
+        pass
+
+    return None
+
+
+def collect_videos(
+    folder: Path,
+    skip_paths: set[Path],
+    settings: Settings,
+    progress_cb: Optional[ProgressCb] = None,
+    stop_flag: Optional[list[bool]] = None,
+) -> List[ImageRecord]:
+    """Walk *folder* and return one :class:`ImageRecord` per video file found.
+
+    Records have ``is_video=True``, ``width=0``, ``height=0``.
+    ``phash`` holds a thumbnail pHash when ``settings.video_use_thumb`` is True
+    and a frame could be extracted via ffmpeg or OpenCV; otherwise a zero hash.
+
+    The function is intentionally sequential (no thread pool) because thumbnail
+    extraction already involves spawning ffmpeg subprocesses — parallel spawning
+    would overload the system for large collections.  Size-stat (stat.st_size) is
+    the primary duplicate signal anyway and is nearly free per file.
+    """
+    skip_names_set = {s.strip() for s in settings.skip_names.split(",") if s.strip()}
+    video_paths: list[Path] = []
+
+    if settings.recursive:
+        for root, dirs, files in os.walk(folder):
+            root_path = Path(root).resolve()
+            dirs[:] = [
+                d for d in dirs
+                if (root_path / d).resolve() not in skip_paths
+                and d not in skip_names_set
+            ]
+            for fname in files:
+                fpath = Path(root) / fname
+                if fpath.suffix.lower() in VIDEO_EXTENSIONS:
+                    video_paths.append(fpath)
+    else:
+        for fname in os.listdir(folder):
+            fpath = folder / fname
+            if fpath.is_file() and fpath.suffix.lower() in VIDEO_EXTENSIONS:
+                video_paths.append(fpath)
+
+    total = len(video_paths)
+    _zero = imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
+    use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    records: list[ImageRecord] = []
+
+    for i, path in enumerate(video_paths):
+        if stop_flag and stop_flag[0]:
+            break
+        if progress_cb and (i == 0 or i % 5 == 0 or i == total - 1):
+            progress_cb(
+                f"Indexing video {i + 1}/{total}: {path.name}",
+                i + 1, total, "Videos",
+            )
+        try:
+            stat = path.stat()
+            ph = _zero
+            if use_thumb:
+                try:
+                    thumb = _extract_video_thumb(path)
+                    if thumb is not None:
+                        work = _downscaled_for_hashing(
+                            thumb if thumb.mode == "RGB" else thumb.convert("RGB")
+                        )
+                        ph = imagehash.phash(work)
+                except Exception:
+                    ph = _zero
+
+            records.append(ImageRecord(
+                path=path,
+                width=0, height=0,
+                file_size=stat.st_size,
+                phash=ph,
+                dhash=_zero,
+                mtime=min(stat.st_mtime, stat.st_ctime),
+                brightness=128.0,
+                histogram=[],
+                is_video=True,
+            ))
+        except Exception:
+            pass
+
+    return records
+
+
+def find_video_duplicates(
+    video_records: List[ImageRecord],
+    settings: Settings,
+) -> List[DuplicateGroup]:
+    """Group video files that are likely duplicates.
+
+    Primary criterion: **exact file size**.  Two videos with an identical byte
+    count are almost certainly the same file in a personal photo library.
+
+    Secondary criterion (optional): **thumbnail pHash similarity** within each
+    same-size bucket.  When ``settings.video_use_thumb`` is True and at least one
+    record in a bucket has a non-zero thumbnail hash, the bucket is sub-divided by
+    pHash distance (threshold = 8 bits).  Pairs whose thumbnails differ by more
+    than 8 bits are treated as coincidentally same-size but visually different
+    videos and are *not* grouped together.
+
+    Strategy: keep the file with the earliest mtime (oldest copy) as the original;
+    mark the rest as previews (candidates for trash).
+
+    Returns a list of :class:`DuplicateGroup` objects (group_id prefix ``"v"``).
+    """
+    if not video_records:
+        return []
+
+    _zero_hash_int = 0
+    use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    _THUMB_THR = 8  # Hamming bits — allows minor encode differences in thumbnails
+
+    # Phase 1: bucket by exact file size
+    by_size: dict[int, list[ImageRecord]] = defaultdict(list)
+    for rec in video_records:
+        by_size[rec.file_size].append(rec)
+
+    groups: list[DuplicateGroup] = []
+    group_counter = 0
+
+    for _size, members in by_size.items():
+        if len(members) < 2:
+            continue
+
+        # Check whether any thumbnails were successfully extracted
+        has_thumbs = use_thumb and any(
+            int(str(r.phash), 16) != _zero_hash_int for r in members
+        )
+
+        if has_thumbs:
+            # Phase 2: sub-group within same-size bucket by thumbnail pHash
+            n = len(members)
+            parent = list(range(n))
+
+            def _find(x: int) -> int:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def _union(x: int, y: int) -> None:
+                px, py = _find(x), _find(y)
+                if px != py:
+                    parent[px] = py
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    if members[i].phash - members[j].phash <= _THUMB_THR:
+                        _union(i, j)
+
+            buckets: dict[int, list[int]] = defaultdict(list)
+            for i in range(n):
+                buckets[_find(i)].append(i)
+
+            for bucket_indices in buckets.values():
+                if len(bucket_indices) < 2:
+                    continue
+                bucket_members = [members[i] for i in bucket_indices]
+                # Keep oldest (smallest mtime); use file_size desc as tiebreaker
+                bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
+                group_counter += 1
+                groups.append(DuplicateGroup(
+                    originals=[bucket_members[0]],
+                    previews=bucket_members[1:],
+                    is_series=False,
+                    is_ambiguous=False,
+                    group_id=f"v{group_counter:04d}",
+                ))
+        else:
+            # Size-only: all same-size members are duplicates — keep the oldest
+            members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
+            group_counter += 1
+            groups.append(DuplicateGroup(
+                originals=[members_sorted[0]],
+                previews=members_sorted[1:],
+                is_series=False,
+                is_ambiguous=False,
+                group_id=f"v{group_counter:04d}",
+            ))
+
+    return groups

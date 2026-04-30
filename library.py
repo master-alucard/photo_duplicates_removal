@@ -160,6 +160,7 @@ class FileRecord:
             phash_r90  = _ih.hex_to_hash(self.phash_r90)  if self.phash_r90  else None,
             phash_r180 = _ih.hex_to_hash(self.phash_r180) if self.phash_r180 else None,
             phash_r270 = _ih.hex_to_hash(self.phash_r270) if self.phash_r270 else None,
+            is_video   = False,  # library only caches image records
         )
 
     # ── Staleness check ────────────────────────────────────────────────────
