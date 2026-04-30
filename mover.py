@@ -88,7 +88,11 @@ def move_groups(
     Move duplicate previews to trash/ only. Originals are never touched.
     Returns (moved_count, error_count).
     Writes operations_log.json in output_folder.
-    Raises RuntimeError if ALL files failed to move (so caller can show an error).
+
+    NOTE: As of v1.1.16, "Organize by Date" is no longer wired into the
+    duplicate-removal scan tabs.  Date-based organizing now lives in its
+    own dedicated tab — see ``organize_by_date_standalone`` below.  The
+    ``settings`` parameter is still accepted for forward compatibility.
     """
     trash_dir = output_folder / "trash"
 
@@ -98,21 +102,6 @@ def move_groups(
     moved_previews = 0
     error_count = 0
     operations: list[dict] = []
-
-    _by_date = settings and getattr(settings, "organize_by_date", False)
-    _date_fmt = getattr(settings, "date_folder_format", "%Y-%m") if settings else "%Y-%m"
-    _in_place = settings and getattr(settings, "organize_in_place", False)
-
-    def _dest_dir(base: Path, file_path: Path) -> Path:
-        if _by_date:
-            sub = _date_subfolder(file_path, _date_fmt)
-            d = base / sub
-            if not dry_run:
-                d.mkdir(parents=True, exist_ok=True)
-            return d
-        return base
-
-    moved_originals = 0
 
     for group in groups:
         # Ambiguous groups are flagged for manual review — never move their files
@@ -134,7 +123,7 @@ def move_groups(
                 error_count += 1
                 continue
 
-            dest = _unique_path(_dest_dir(trash_dir, preview.path) / preview.path.name)
+            dest = _unique_path(trash_dir / preview.path.name)
             op = {
                 "group_id": group_id,
                 "type": "preview",
@@ -155,52 +144,292 @@ def move_groups(
                 moved_previews += 1
             operations.append(op)
 
-        # Organize originals when organize_by_date is enabled
-        if _by_date:
-            for original in group.originals:
-                if not original.path.exists():
-                    continue
-                if _in_place:
-                    # Organize in original folder — move into date subfolder
-                    # relative to where the file currently lives
-                    src_dir = original.path.parent
-                    sub = _date_subfolder(original.path, _date_fmt)
-                    dest_dir = src_dir / sub
-                else:
-                    # Move originals to output/results folder with date subfolders
-                    results_dir = output_folder / "results"
-                    sub = _date_subfolder(original.path, _date_fmt)
-                    dest_dir = results_dir / sub
-
-                dest = _unique_path(dest_dir / original.path.name)
-                # Skip if already in the correct folder
-                if dest.parent == original.path.parent:
-                    continue
-                op = {
-                    "group_id": group_id,
-                    "type": "original",
-                    "from": str(original.path),
-                    "to": str(dest),
-                }
-                if not dry_run:
-                    try:
-                        dest_dir.mkdir(parents=True, exist_ok=True)
-                        shutil.move(str(original.path), str(dest))
-                        original.path = dest
-                        moved_originals += 1
-                        op["status"] = "moved"
-                    except Exception as exc:
-                        op["status"] = f"error: {exc}"
-                        error_count += 1
-                else:
-                    op["status"] = "dry_run"
-                    moved_originals += 1
-                operations.append(op)
-
     if not dry_run:
         _write_ops_log(operations, output_folder)
 
     return moved_previews, error_count
+
+
+# ── Standalone "Organize by Date" engine ─────────────────────────────────────
+# Used by the dedicated Organize-by-Date tab.  No coupling to the duplicate
+# pipeline — operates directly on a source folder, optional destination
+# folder, and a small set of explicit knobs.
+
+# Sidecar extensions that travel with their image (RAW edits, iPhone .aae, etc.)
+SIDECAR_EXTENSIONS = {".xmp", ".aae"}
+
+# RAW formats the organize tab can include alongside images.  Mirrors the set
+# in scanner.RAW_EXTENSIONS so the two stay in sync without a hard import.
+ORGANIZE_RAW_EXTENSIONS = {
+    ".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf",
+    ".rw2", ".pef", ".srw", ".x3f", ".3fr",
+}
+
+# Image extensions copied from scanner.IMAGE_EXTENSIONS to avoid a circular
+# import — these are the formats Pillow can open natively.
+ORGANIZE_IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif",
+    ".gif", ".heic", ".heif",
+}
+
+
+def _resolve_date(
+    path: Path,
+    use_exif: bool,
+    use_filename: bool,
+    use_mtime: bool,
+):
+    """Return the first detectable date for *path* per configured priority,
+    or None if every enabled source returns nothing."""
+    import datetime as _dt
+    from metadata import extract_date_from_exif, extract_date_from_filename
+
+    if use_exif and path.exists():
+        try:
+            dt = extract_date_from_exif(path)
+            if dt:
+                return dt
+        except Exception:
+            pass
+    if use_filename:
+        try:
+            dt = extract_date_from_filename(path.name)
+            if dt:
+                return dt
+        except Exception:
+            pass
+    if use_mtime:
+        try:
+            return _dt.datetime.fromtimestamp(path.stat().st_mtime)
+        except Exception:
+            pass
+    return None
+
+
+def _resolve_conflict(dest: Path, policy: str) -> "Path | None":
+    """
+    Apply the conflict policy when *dest* already exists.
+
+    Returns:
+      * a Path to write to ("rename" appends _1, _2, …; "overwrite" returns
+        ``dest`` unchanged after deleting the existing file)
+      * None when policy is "skip" and the destination already exists
+        (caller should record as skipped and move on).
+    """
+    if not dest.exists():
+        return dest
+    if policy == "skip":
+        return None
+    if policy == "overwrite":
+        try:
+            dest.unlink()
+        except Exception:
+            pass
+        return dest
+    # default → rename
+    return _unique_path(dest)
+
+
+def organize_by_date_standalone(
+    src_folder: Path,
+    out_folder: "Path | None",
+    *,
+    in_place: bool,
+    operation: str,                  # "move" | "copy"
+    date_format: str,
+    use_exif: bool,
+    use_filename: bool,
+    use_mtime: bool,
+    unknown_folder: str,
+    conflict_policy: str,            # "rename" | "skip" | "overwrite"
+    recursive: bool,
+    include_raw: bool,
+    move_sidecars: bool,
+    dry_run: bool,
+    progress_cb=None,                # progress(msg, done, total, phase_name)
+    stop_flag: "list[bool] | None" = None,
+) -> dict:
+    """
+    Walk *src_folder*, classify each image by date, and move or copy it into
+    a date-named subfolder.
+
+    Returns a result dict with counters and an operations list.  Writes
+    ``operations_log.json`` next to the chosen destination root so the
+    standard :func:`revert_operations` continues to work.
+    """
+    src_folder = Path(src_folder)
+    if not src_folder.exists() or not src_folder.is_dir():
+        raise FileNotFoundError(f"Source folder not found: {src_folder}")
+
+    # Resolve destination root
+    if in_place:
+        dest_root = src_folder
+    else:
+        if out_folder is None:
+            raise ValueError("out_folder is required when in_place=False")
+        dest_root = Path(out_folder)
+        if not dry_run:
+            dest_root.mkdir(parents=True, exist_ok=True)
+
+    # Build the file extension whitelist
+    exts = set(ORGANIZE_IMAGE_EXTENSIONS)
+    if include_raw:
+        exts |= ORGANIZE_RAW_EXTENSIONS
+
+    # ── Phase 1: discover candidate files ────────────────────────────────
+    if progress_cb:
+        progress_cb("Scanning source folder…", 0, 0, "Scanning")
+
+    files: list[Path] = []
+    if recursive:
+        iterator = src_folder.rglob("*")
+    else:
+        iterator = src_folder.iterdir()
+
+    # Skip date-target subfolders that we'd create ourselves so re-running
+    # the operation in-place doesn't churn already-organized files.
+    for p in iterator:
+        if stop_flag and stop_flag[0]:
+            break
+        try:
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in exts:
+                continue
+            files.append(p)
+        except Exception:
+            continue
+
+    total = len(files)
+    if total == 0:
+        if progress_cb:
+            progress_cb("No images found.", 0, 0, "Done")
+        return {
+            "scanned": 0, "moved": 0, "copied": 0, "skipped": 0,
+            "errors": 0, "no_date": 0, "operations": [], "dry_run": dry_run,
+            "dest_root": str(dest_root),
+        }
+
+    # ── Phase 2: organize ────────────────────────────────────────────────
+    operations: list[dict] = []
+    moved = copied = skipped = errors = no_date = 0
+    sidecar_count = 0
+
+    for i, src_path in enumerate(files):
+        if stop_flag and stop_flag[0]:
+            break
+        if progress_cb and (i % 25 == 0 or i == total - 1):
+            progress_cb(f"Organizing {i + 1:,} / {total:,}…", i, total, "Organizing")
+
+        dt = _resolve_date(src_path, use_exif, use_filename, use_mtime)
+        if dt is None:
+            sub = unknown_folder or "unknown_date"
+            no_date += 1
+        else:
+            try:
+                sub = dt.strftime(date_format)
+            except Exception:
+                sub = unknown_folder or "unknown_date"
+                no_date += 1
+
+        dest_dir = dest_root / sub
+        dest = dest_dir / src_path.name
+
+        # Skip when source is already in the correct folder
+        if dest_dir.resolve() == src_path.parent.resolve():
+            skipped += 1
+            operations.append({
+                "type": "organize", "op": operation,
+                "from": str(src_path), "to": str(dest),
+                "status": "skipped: already in target folder",
+            })
+            continue
+
+        resolved = _resolve_conflict(dest, conflict_policy)
+        if resolved is None:
+            skipped += 1
+            operations.append({
+                "type": "organize", "op": operation,
+                "from": str(src_path), "to": str(dest),
+                "status": "skipped: target exists (conflict=skip)",
+            })
+            continue
+        dest = resolved
+
+        op = {
+            "type": "organize", "op": operation,
+            "from": str(src_path), "to": str(dest),
+        }
+        if dry_run:
+            op["status"] = "dry_run"
+            if operation == "move":
+                moved += 1
+            else:
+                copied += 1
+            operations.append(op)
+        else:
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                if operation == "copy":
+                    shutil.copy2(str(src_path), str(dest))
+                    copied += 1
+                else:
+                    shutil.move(str(src_path), str(dest))
+                    moved += 1
+                op["status"] = operation + "d"
+                operations.append(op)
+
+                # Co-locate sidecars (xmp / aae)
+                if move_sidecars:
+                    for ext in SIDECAR_EXTENSIONS:
+                        sib = src_path.with_suffix(ext)
+                        if not sib.exists():
+                            # Try uppercase too (camera default on some bodies)
+                            sib_u = src_path.with_suffix(ext.upper())
+                            sib = sib_u if sib_u.exists() else None
+                        if sib is None or not sib.exists():
+                            continue
+                        sib_dest = _unique_path(dest_dir / sib.name)
+                        try:
+                            if operation == "copy":
+                                shutil.copy2(str(sib), str(sib_dest))
+                            else:
+                                shutil.move(str(sib), str(sib_dest))
+                            sidecar_count += 1
+                            operations.append({
+                                "type": "organize_sidecar", "op": operation,
+                                "from": str(sib), "to": str(sib_dest),
+                                "status": operation + "d",
+                            })
+                        except Exception as exc:
+                            operations.append({
+                                "type": "organize_sidecar", "op": operation,
+                                "from": str(sib), "to": str(sib_dest),
+                                "status": f"error: {exc}",
+                            })
+            except Exception as exc:
+                op["status"] = f"error: {exc}"
+                errors += 1
+                operations.append(op)
+
+    if not dry_run and operations:
+        _write_ops_log(operations, dest_root)
+
+    if progress_cb:
+        progress_cb("Done.", total, total, "Done")
+
+    return {
+        "scanned": total,
+        "moved": moved,
+        "copied": copied,
+        "skipped": skipped,
+        "errors": errors,
+        "no_date": no_date,
+        "sidecars": sidecar_count,
+        "operations": operations,
+        "dry_run": dry_run,
+        "dest_root": str(dest_root),
+    }
 
 
 def revert_operations(

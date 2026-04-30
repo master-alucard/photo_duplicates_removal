@@ -731,6 +731,7 @@ class App:
 
         self._tab_scan     = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_custom   = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_organize = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_history  = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_library  = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_settings = ttk.Frame(self._nb, style="Page.TFrame")
@@ -738,6 +739,7 @@ class App:
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
         self._nb.add(self._tab_custom,   text="  Compare Scan  ")
+        self._nb.add(self._tab_organize, text="  Organize by Date  ")
         self._nb.add(self._tab_history,  text="  History  ")
         self._nb.add(self._tab_library,  text="  Library  ")
         self._nb.add(self._tab_settings, text="  Settings  ")
@@ -749,6 +751,7 @@ class App:
         self._build_scan_tab()
         self._build_results_tab_content()
         self._build_custom_scan_tab()
+        self._build_organize_tab()
         self._build_history_tab()
         self._build_library_tab()
         self._build_settings_tab()
@@ -789,8 +792,22 @@ class App:
         self.scan_threads_var = tk.StringVar(value=str(_default_threads))
         self.scan_threads_var.trace_add("write", self._on_setting_change)
         self.dry_var            = tk.BooleanVar(value=s.dry_run)
-        self.org_date_var       = tk.BooleanVar(value=s.organize_by_date)
-        self.org_in_place_var   = tk.BooleanVar(value=s.organize_in_place)
+
+        # ── Organize by Date (standalone tab) — own state, decoupled from scan tabs ──
+        self.date_org_src_var          = tk.StringVar(value=s.date_org_src)
+        self.date_org_out_var          = tk.StringVar(value=s.date_org_out)
+        self.date_org_in_place_var     = tk.BooleanVar(value=s.date_org_in_place)
+        self.date_org_op_var           = tk.StringVar(value=s.date_org_op)              # "move" | "copy"
+        self.date_org_use_exif_var     = tk.BooleanVar(value=s.date_org_use_exif)
+        self.date_org_use_filename_var = tk.BooleanVar(value=s.date_org_use_filename)
+        self.date_org_use_mtime_var    = tk.BooleanVar(value=s.date_org_use_mtime)
+        self.date_org_unknown_var      = tk.StringVar(value=s.date_org_unknown_folder)
+        self.date_org_conflict_var     = tk.StringVar(value=s.date_org_conflict)        # "rename" | "skip" | "overwrite"
+        self.date_org_recursive_var    = tk.BooleanVar(value=s.date_org_recursive)
+        self.date_org_include_raw_var  = tk.BooleanVar(value=s.date_org_include_raw)
+        self.date_org_sidecars_var     = tk.BooleanVar(value=s.date_org_move_sidecars)
+        self.date_org_dry_var          = tk.BooleanVar(value=s.date_org_dry_run)
+
         self._details_var       = tk.BooleanVar(value=s.details_visible)
         self._phase_label_var   = tk.StringVar(value="Ready.")
         self._eta_var           = tk.StringVar(value="")
@@ -851,10 +868,22 @@ class App:
             self.disable_series_var, self.rawpy_var, self.all_formats_var,
             self.prefer_meta_var, self.meta_csv_var,
             self.ext_report_var,
-            self.recursive_var, self.dry_var, self.org_date_var,
+            self.recursive_var, self.dry_var,
         ):
             var.trace_add("write", self._on_setting_change)
         self.date_sort_var.trace_add("write", self._on_setting_change)
+
+        # Organize-by-Date tab — persist any change immediately
+        for _v in (
+            self.date_org_src_var, self.date_org_out_var,
+            self.date_org_in_place_var, self.date_org_op_var,
+            self.date_org_use_exif_var, self.date_org_use_filename_var,
+            self.date_org_use_mtime_var, self.date_org_unknown_var,
+            self.date_org_conflict_var, self.date_org_recursive_var,
+            self.date_org_include_raw_var, self.date_org_sidecars_var,
+            self.date_org_dry_var,
+        ):
+            _v.trace_add("write", self._on_setting_change)
 
         self.strategy_var.trace_add("write", self._on_setting_change)
         self.skip_names_var.trace_add("write", self._on_setting_change)
@@ -1005,48 +1034,6 @@ class App:
         ttk.Checkbutton(_crows[3], text="Keep all formats (keep best copy per file extension)",
                         variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(_crows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
-
-        # Actions
-        act = _section(body, "Actions")
-
-        r = _row(act)
-        ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
-        _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="Create date subfolders in results/ and trash/",
-                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-
-        # Organize destination radio group (shown when Organize by Date is enabled)
-        self._org_dest_frame = ttk.Frame(act)
-        _od_r1 = ttk.Frame(self._org_dest_frame)
-        _od_r1.pack(fill=tk.X, pady=2)
-        ttk.Label(_od_r1, text="  ", width=2).pack(side=tk.LEFT)
-        ttk.Radiobutton(_od_r1, text="Move originals to Output/results folder",
-                        variable=self.org_in_place_var, value=False,
-                        command=self._on_setting_change).pack(side=tk.LEFT)
-        _od_r2 = ttk.Frame(self._org_dest_frame)
-        _od_r2.pack(fill=tk.X, pady=2)
-        ttk.Label(_od_r2, text="  ", width=2).pack(side=tk.LEFT)
-        ttk.Radiobutton(_od_r2, text="Organize files in original folder",
-                        variable=self.org_in_place_var, value=True,
-                        command=self._on_setting_change).pack(side=tk.LEFT)
-        self._toggle_org_dest()
-        self.org_date_var.trace_add("write", lambda *_: self._toggle_org_dest())
-
-        # Date format
-        r = _row(act)
-        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
-        init_order_idx, init_sep = self._guess_order_sep(self.settings.date_folder_format)
-        self._date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
-                                           width=14, state="readonly")
-        self._date_order_cb.pack(side=tk.LEFT)
-        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
-        self._date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
-                                         values=self._DATE_SEPARATORS, width=4, state="readonly")
-        self._date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
-        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
-        ttk.Label(r, textvariable=self._date_fmt_example,
-                  foreground=_M_HINT2, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
-        self._refresh_date_order_choices(init_sep, init_order_idx)
 
         # Estimate
         self._estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -1354,6 +1341,517 @@ class App:
         self._results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._results_divider.pack(fill=tk.X, padx=16, pady=14)
         self._results_new_frame.pack(pady=10)
+
+    # ── Organize by Date tab ──────────────────────────────────────────────
+
+    def _build_organize_tab(self) -> None:
+        """Standalone tab for organizing photos into date-named subfolders.
+
+        Independent of the duplicate-removal pipeline — no scanning, no
+        deduplication, no comparing.  Just date detection (EXIF / filename /
+        mtime) → subfolder routing → move or copy.
+        """
+        tab = self._tab_organize
+
+        # Scrollable body
+        outer, body = _scrollable_frame(tab)
+
+        # ── Intro card ────────────────────────────────────────────────────
+        intro = tk.Frame(body, bg=_M_INFO_BG, highlightthickness=1,
+                          highlightbackground=_M_INFO_BORDER)
+        intro.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(intro,
+                 text="Organize photos into date-named subfolders",
+                 font=("Segoe UI", 11, "bold"),
+                 bg=_M_INFO_BG, fg=_M_INFO_FG,
+                 anchor=tk.W).pack(fill=tk.X, padx=14, pady=(10, 0))
+        tk.Label(intro,
+                 text=("Detects each image's date from EXIF, then filename, then file-modified time, "
+                       "and moves or copies it into a date-named subfolder. Duplicates are NOT touched — "
+                       "for that, use the Scan or Compare Scan tabs."),
+                 font=("Segoe UI", 9), bg=_M_INFO_BG, fg=_M_INFO_FG,
+                 anchor=tk.W, justify=tk.LEFT, wraplength=720).pack(fill=tk.X, padx=14, pady=(2, 10))
+
+        # ── Folders ───────────────────────────────────────────────────────
+        folders = _section(body, "Folders")
+
+        # Source row
+        src_row = ttk.Frame(folders); src_row.pack(fill=tk.X, pady=3)
+        ttk.Label(src_row, text="Source folder:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        src_ent = ttk.Entry(src_row, textvariable=self.date_org_src_var)
+        src_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self._bind_paste_normalize(src_ent, self.date_org_src_var)
+        ttk.Button(src_row, text="Browse…",
+                   command=lambda: self._browse(self.date_org_src_var, "date_org_src")).pack(side=tk.RIGHT)
+
+        # Destination row + in-place toggle
+        dest_row = ttk.Frame(folders); dest_row.pack(fill=tk.X, pady=3)
+        ttk.Label(dest_row, text="Destination:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        self._date_org_out_ent = ttk.Entry(dest_row, textvariable=self.date_org_out_var)
+        self._date_org_out_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self._bind_paste_normalize(self._date_org_out_ent, self.date_org_out_var)
+        self._date_org_out_btn = ttk.Button(dest_row, text="Browse…",
+                   command=lambda: self._browse(self.date_org_out_var, "date_org_out"))
+        self._date_org_out_btn.pack(side=tk.RIGHT)
+
+        ip_row = ttk.Frame(folders); ip_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Checkbutton(ip_row,
+                        text="Organize files inside the source folder (no separate destination)",
+                        variable=self.date_org_in_place_var,
+                        command=self._on_date_org_in_place_toggle).pack(side=tk.LEFT)
+        _info_btn(ip_row, "date_org_in_place").pack(side=tk.LEFT, padx=4)
+
+        # ── Operation ─────────────────────────────────────────────────────
+        op_section = _section(body, "Operation")
+        op_row = _row(op_section)
+        ttk.Label(op_row, text="Action:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Radiobutton(op_row, text="Move", variable=self.date_org_op_var, value="move").pack(side=tk.LEFT)
+        ttk.Radiobutton(op_row, text="Copy (non-destructive)",
+                        variable=self.date_org_op_var, value="copy").pack(side=tk.LEFT, padx=(12, 0))
+        _info_btn(op_row, "date_org_op").pack(side=tk.LEFT, padx=4)
+
+        sc_row = _row(op_section)
+        ttk.Checkbutton(sc_row, text="Move/copy sidecars (.xmp, .aae)",
+                        variable=self.date_org_sidecars_var).pack(side=tk.LEFT)
+        _info_btn(sc_row, "date_org_move_sidecars").pack(side=tk.LEFT, padx=4)
+
+        raw_row = _row(op_section)
+        ttk.Checkbutton(raw_row, text="Include RAW files (CR2 / NEF / ARW / DNG / …)",
+                        variable=self.date_org_include_raw_var).pack(side=tk.LEFT)
+        _info_btn(raw_row, "date_org_include_raw").pack(side=tk.LEFT, padx=4)
+
+        rec_row = _row(op_section)
+        ttk.Checkbutton(rec_row, text="Recursive — include subfolders",
+                        variable=self.date_org_recursive_var).pack(side=tk.LEFT)
+        _info_btn(rec_row, "date_org_recursive").pack(side=tk.LEFT, padx=4)
+
+        # ── Date detection ────────────────────────────────────────────────
+        dd = _section(body, "Date Detection (priority order)")
+
+        ttk.Label(dd, text="Each file's date is taken from the first source below that returns a value.",
+                 foreground=_M_HINT, font=("Segoe UI", 8), wraplength=720).pack(anchor=tk.W, pady=(0, 4))
+
+        for label, var, key in (
+            ("1.  EXIF DateTimeOriginal (camera capture time)", self.date_org_use_exif_var,     "date_org_use_exif"),
+            ("2.  Date in filename (e.g. IMG_20240315_…)",       self.date_org_use_filename_var, "date_org_use_filename"),
+            ("3.  File modified time (filesystem fallback)",     self.date_org_use_mtime_var,    "date_org_use_mtime"),
+        ):
+            r = _row(dd)
+            ttk.Checkbutton(r, text=label, variable=var).pack(side=tk.LEFT)
+            _info_btn(r, key).pack(side=tk.LEFT, padx=4)
+
+        ud_row = _row(dd)
+        ttk.Label(ud_row, text="Unknown date folder:", width=22, anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Entry(ud_row, textvariable=self.date_org_unknown_var, width=24).pack(side=tk.LEFT)
+        _info_btn(ud_row, "date_org_unknown_folder").pack(side=tk.LEFT, padx=4)
+        ttk.Label(ud_row, text="(used when no date can be detected)",
+                 foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+
+        # ── Folder format ─────────────────────────────────────────────────
+        ff = _section(body, "Folder Format")
+
+        fmt_row = _row(ff)
+        ttk.Label(fmt_row, text="Date order:", width=16, anchor=tk.W).pack(side=tk.LEFT)
+        init_idx, init_sep = self._guess_order_sep(self.settings.date_folder_format)
+        # Reuse the shared format vars (now this tab is the only consumer)
+        self._date_order_cb = ttk.Combobox(fmt_row, textvariable=self._date_order_var,
+                                            width=18, state="readonly")
+        self._date_order_cb.pack(side=tk.LEFT)
+        ttk.Label(fmt_row, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
+        self._date_sep_cb = ttk.Combobox(fmt_row, textvariable=self._date_sep_var,
+                                          values=self._DATE_SEPARATORS, width=4, state="readonly")
+        self._date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
+        _info_btn(fmt_row, "date_folder_format").pack(side=tk.LEFT, padx=4)
+        ttk.Label(fmt_row, textvariable=self._date_fmt_example,
+                 foreground=_M_HINT2, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
+        self._refresh_date_order_choices(init_sep, init_idx)
+
+        # ── Conflicts ─────────────────────────────────────────────────────
+        co = _section(body, "Conflict Policy")
+        co_row = _row(co)
+        ttk.Label(co_row, text="If file already exists:", width=22, anchor=tk.W).pack(side=tk.LEFT)
+        for val, lbl in (("rename", "Rename (append _1, _2, …)"),
+                         ("skip", "Skip"),
+                         ("overwrite", "Overwrite")):
+            ttk.Radiobutton(co_row, text=lbl, variable=self.date_org_conflict_var,
+                            value=val).pack(side=tk.LEFT, padx=(0, 8))
+        _info_btn(co_row, "date_org_conflict").pack(side=tk.LEFT, padx=4)
+
+        # ── Dry-run + start ───────────────────────────────────────────────
+        run_section = _section(body, "Run")
+        dr_row = _row(run_section)
+        ttk.Checkbutton(dr_row, text="Dry run — preview only, no files moved or copied",
+                        variable=self.date_org_dry_var).pack(side=tk.LEFT)
+        _info_btn(dr_row, "date_org_dry_run").pack(side=tk.LEFT, padx=4)
+
+        # ── Progress (above buttons; wired by worker) ─────────────────────
+        self._date_org_phase_var = tk.StringVar(value="Ready.")
+        self._date_org_msg_var   = tk.StringVar(value="")
+        prog_section = _section(body, "Progress")
+        ttk.Label(prog_section, textvariable=self._date_org_phase_var,
+                 font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        self._date_org_pbar = ttk.Progressbar(prog_section, mode="determinate", maximum=100)
+        self._date_org_pbar.pack(fill=tk.X, pady=(6, 3))
+        ttk.Label(prog_section, textvariable=self._date_org_msg_var,
+                 foreground=_M_TEXT2, font=("Segoe UI", 8)).pack(anchor=tk.W)
+
+        # ── Results panel ─────────────────────────────────────────────────
+        self._date_org_result_section = _section(body, "Last Run Summary")
+        self._date_org_result_text = tk.Text(
+            self._date_org_result_section, height=8, state=tk.DISABLED,
+            font=("Consolas", 9), bg=_M3_SURFACE1, fg=_M_TEXT2,
+            relief=tk.FLAT, highlightthickness=0, wrap=tk.NONE,
+        )
+        self._date_org_result_text.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+        self._set_date_org_result(
+            "No run yet. Pick a source folder, choose Move or Copy, and click Start.\n"
+            "Tip: leave 'Dry run' ON the first time to preview the result without moving anything."
+        )
+
+        # ── Button bar (sticky bottom) ────────────────────────────────────
+        btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
+        btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
+
+        _GR = "#616161"
+        self._date_org_idle_frame = tk.Frame(btn_bar, bg=_M3_SURFACE2)
+        self._date_org_idle_frame.pack(fill=tk.X, padx=4)
+        _mat_btn(self._date_org_idle_frame, "Reset Defaults",
+                 self._reset_date_org_defaults, _GR).pack(side=tk.LEFT, padx=4)
+        _mat_btn(self._date_org_idle_frame, "↩ Revert Last Run",
+                 self._revert_date_org_run, _GR).pack(side=tk.LEFT, padx=4)
+        _mat_btn(self._date_org_idle_frame, "Start",
+                 self._start_date_org, _ACCENT).pack(side=tk.RIGHT, padx=4)
+
+        self._date_org_active_frame = tk.Frame(btn_bar, bg=_M3_SURFACE2)
+        _mat_btn(self._date_org_active_frame, "Stop",
+                 self._stop_date_org, _M_ERROR).pack(side=tk.RIGHT, padx=4)
+
+        # Internal state
+        self._date_org_running   = False
+        self._date_org_stop_flag: list[bool] = [False]
+        self._date_org_thread = None
+        # Progress callback coalescing — same pattern as scan tabs
+        self._date_org_cb_pending: bool = False
+        self._date_org_pending: "tuple | None" = None
+
+        # Apply initial visibility for in-place toggle
+        self._on_date_org_in_place_toggle()
+
+    # ── Organize-by-Date helpers / controls ───────────────────────────────
+
+    def _on_date_org_in_place_toggle(self) -> None:
+        """Disable the destination entry/browse button when 'in-place' is on."""
+        in_place = bool(self.date_org_in_place_var.get())
+        try:
+            state = "disabled" if in_place else "normal"
+            self._date_org_out_ent.configure(state=state)
+            self._date_org_out_btn.configure(state=state)
+        except Exception:
+            pass
+        self._on_setting_change()
+
+    def _set_date_org_result(self, text: str) -> None:
+        try:
+            w = self._date_org_result_text
+            w.configure(state=tk.NORMAL)
+            w.delete("1.0", tk.END)
+            w.insert("1.0", text)
+            w.configure(state=tk.DISABLED)
+        except Exception:
+            pass
+
+    def _reset_date_org_defaults(self) -> None:
+        """Reset only the Organize-by-Date toggles (folders are kept)."""
+        d = DEFAULTS
+        self.date_org_in_place_var.set(d.date_org_in_place)
+        self.date_org_op_var.set(d.date_org_op)
+        self.date_org_use_exif_var.set(d.date_org_use_exif)
+        self.date_org_use_filename_var.set(d.date_org_use_filename)
+        self.date_org_use_mtime_var.set(d.date_org_use_mtime)
+        self.date_org_unknown_var.set(d.date_org_unknown_folder)
+        self.date_org_conflict_var.set(d.date_org_conflict)
+        self.date_org_recursive_var.set(d.date_org_recursive)
+        self.date_org_include_raw_var.set(d.date_org_include_raw)
+        self.date_org_sidecars_var.set(d.date_org_move_sidecars)
+        self.date_org_dry_var.set(d.date_org_dry_run)
+        self._on_date_org_in_place_toggle()
+        self._schedule_settings_save()
+
+    def _date_org_validate(self) -> "tuple[Path, Path | None] | None":
+        """Validate the form and return (src, dest_or_None). Show messagebox on failure."""
+        src_str = self.date_org_src_var.get().strip()
+        if not src_str:
+            messagebox.showerror("Source folder required",
+                                 "Please choose a source folder before starting.",
+                                 parent=self.root)
+            return None
+        src = Path(self._normalize_folder_path(src_str))
+        if not src.exists() or not src.is_dir():
+            messagebox.showerror("Source folder not found",
+                                 f"The source folder does not exist or is not a folder:\n\n{src}",
+                                 parent=self.root)
+            return None
+
+        if self.date_org_in_place_var.get():
+            return src, None
+
+        out_str = self.date_org_out_var.get().strip()
+        if not out_str:
+            messagebox.showerror("Destination required",
+                                 "Please choose a destination folder, or enable "
+                                 "'Organize files inside the source folder'.",
+                                 parent=self.root)
+            return None
+        dest = Path(self._normalize_folder_path(out_str))
+        try:
+            if dest.resolve() == src.resolve():
+                messagebox.showerror("Source and destination are the same",
+                                     "The destination folder must be different from the source. "
+                                     "If you want to organize files in place, enable the in-place option.",
+                                     parent=self.root)
+                return None
+        except Exception:
+            pass
+
+        if not (self.date_org_use_exif_var.get()
+                or self.date_org_use_filename_var.get()
+                or self.date_org_use_mtime_var.get()):
+            messagebox.showerror("No date source enabled",
+                                 "Enable at least one date detection source "
+                                 "(EXIF, filename, or file modified time) before starting.",
+                                 parent=self.root)
+            return None
+        return src, dest
+
+    def _start_date_org(self) -> None:
+        if self._date_org_running:
+            return
+
+        # Block if a duplicate scan is in progress (shared error_handler / progress UI)
+        if self._scanning:
+            messagebox.showinfo("Scan in progress",
+                                "A duplicate scan is currently running.  Wait for it to finish "
+                                "before starting an Organize-by-Date run.",
+                                parent=self.root)
+            return
+
+        validated = self._date_org_validate()
+        if validated is None:
+            return
+        src, dest = validated
+
+        # Persist current settings before running
+        self._collect_settings()
+        save_settings(self.settings, SETTINGS_PATH)
+
+        # Snapshot every option onto local plain values so the worker thread
+        # never reads Tk vars (those are main-thread-only).
+        op_settings = {
+            "src": src,
+            "dest": dest,
+            "in_place": self.date_org_in_place_var.get(),
+            "operation": self.date_org_op_var.get() or "move",
+            "date_format": self.settings.date_folder_format or "%Y-%m",
+            "use_exif": self.date_org_use_exif_var.get(),
+            "use_filename": self.date_org_use_filename_var.get(),
+            "use_mtime": self.date_org_use_mtime_var.get(),
+            "unknown_folder": (self.date_org_unknown_var.get() or "unknown_date").strip() or "unknown_date",
+            "conflict_policy": self.date_org_conflict_var.get() or "rename",
+            "recursive": self.date_org_recursive_var.get(),
+            "include_raw": self.date_org_include_raw_var.get(),
+            "move_sidecars": self.date_org_sidecars_var.get(),
+            "dry_run": self.date_org_dry_var.get(),
+        }
+
+        # Switch button bar to "running"
+        self._date_org_idle_frame.pack_forget()
+        self._date_org_active_frame.pack(fill=tk.X, padx=4)
+        self._date_org_running = True
+        self._date_org_stop_flag = [False]
+        self._date_org_pbar["value"] = 0
+        self._date_org_phase_var.set("Starting…")
+        self._date_org_msg_var.set("")
+        self._set_date_org_result("Running…  See the Progress section above for live status.")
+
+        self._date_org_thread = threading.Thread(
+            target=self._date_org_worker,
+            args=(op_settings,),
+            daemon=True,
+        )
+        self._date_org_thread.start()
+
+    def _stop_date_org(self) -> None:
+        self._date_org_stop_flag[0] = True
+        self._date_org_phase_var.set("Stopping…")
+
+    def _date_org_progress_cb(self, msg: str, done: int, total: int, phase: str) -> None:
+        # Coalesce — same pattern as the scan callbacks.
+        self._date_org_pending = (msg, done, total, phase)
+        if not self._date_org_cb_pending:
+            self._date_org_cb_pending = True
+            self.root.after(0, self._flush_date_org_cb)
+
+    def _flush_date_org_cb(self) -> None:
+        self._date_org_cb_pending = False
+        data = self._date_org_pending
+        if data is None:
+            return
+        msg, done, total, phase = data
+        self._date_org_phase_var.set(phase)
+        if total > 0:
+            pct = (done / total) * 100
+        else:
+            pct = 0
+        self._date_org_pbar["value"] = pct
+        # Truncate long messages to keep the label short
+        self._date_org_msg_var.set(f"{pct:.0f}%  ·  {msg[:120]}")
+
+    def _date_org_worker(self, op: dict) -> None:
+        try:
+            from mover import organize_by_date_standalone
+            result = organize_by_date_standalone(
+                src_folder=op["src"],
+                out_folder=op["dest"],
+                in_place=op["in_place"],
+                operation=op["operation"],
+                date_format=op["date_format"],
+                use_exif=op["use_exif"],
+                use_filename=op["use_filename"],
+                use_mtime=op["use_mtime"],
+                unknown_folder=op["unknown_folder"],
+                conflict_policy=op["conflict_policy"],
+                recursive=op["recursive"],
+                include_raw=op["include_raw"],
+                move_sidecars=op["move_sidecars"],
+                dry_run=op["dry_run"],
+                progress_cb=self._date_org_progress_cb,
+                stop_flag=self._date_org_stop_flag,
+            )
+            self.root.after(0, lambda: self._date_org_done(result, None))
+        except Exception as exc:
+            err = f"{type(exc).__name__}: {exc}"
+            self.root.after(0, lambda: self._date_org_done(None, err))
+
+    def _date_org_done(self, result: "dict | None", error: "str | None") -> None:
+        # Restore button bar
+        self._date_org_active_frame.pack_forget()
+        self._date_org_idle_frame.pack(fill=tk.X, padx=4)
+        self._date_org_running = False
+
+        if error:
+            self._date_org_phase_var.set("Error.")
+            self._set_date_org_result(f"Run failed:\n  {error}")
+            messagebox.showerror("Organize by Date — error", error, parent=self.root)
+            return
+
+        if result is None:
+            self._date_org_phase_var.set("Cancelled.")
+            self._set_date_org_result("Run cancelled by user.")
+            return
+
+        if self._date_org_stop_flag[0]:
+            self._date_org_phase_var.set("Stopped.")
+        else:
+            self._date_org_phase_var.set("Done.")
+        self._date_org_pbar["value"] = 100
+
+        # Aggregate per-folder counts for a nice summary
+        per_folder: dict[str, int] = {}
+        for entry in result.get("operations", []):
+            if entry.get("type") != "organize":
+                continue
+            try:
+                target = Path(entry["to"]).parent.name or "<root>"
+                per_folder[target] = per_folder.get(target, 0) + 1
+            except Exception:
+                continue
+
+        # Build summary text
+        op_word = self.date_org_op_var.get() or "move"
+        verb = "Would " if result.get("dry_run") else ""
+        action_count = result.get("copied" if op_word == "copy" else "moved", 0)
+        lines = []
+        lines.append(f"{'(DRY RUN) ' if result.get('dry_run') else ''}"
+                     f"Scanned: {result.get('scanned', 0):,} files")
+        lines.append(f"{verb}{op_word.capitalize()}d: {action_count:,}")
+        lines.append(f"Skipped:  {result.get('skipped', 0):,}")
+        lines.append(f"Errors:   {result.get('errors', 0):,}")
+        if result.get("no_date"):
+            lines.append(f"No date detected → '{self.date_org_unknown_var.get() or 'unknown_date'}': "
+                         f"{result['no_date']:,}")
+        if result.get("sidecars"):
+            lines.append(f"Sidecars relocated: {result['sidecars']:,}")
+        lines.append(f"Destination: {result.get('dest_root', '')}")
+
+        if per_folder:
+            lines.append("")
+            lines.append("Per-folder breakdown (top 30):")
+            for folder, count in sorted(per_folder.items(), key=lambda x: -x[1])[:30]:
+                lines.append(f"  {folder:<24}  {count:,}")
+            if len(per_folder) > 30:
+                lines.append(f"  … and {len(per_folder) - 30:,} more")
+
+        self._set_date_org_result("\n".join(lines))
+
+        # Toast
+        if not result.get("dry_run") and not self._date_org_stop_flag[0]:
+            n = result.get("moved", 0) + result.get("copied", 0)
+            if n > 0:
+                messagebox.showinfo(
+                    "Organize by Date",
+                    f"{n:,} files {op_word}d into date subfolders.\n\n"
+                    f"Destination: {result.get('dest_root', '')}",
+                    parent=self.root,
+                )
+
+    def _revert_date_org_run(self) -> None:
+        """Revert the last organize run by reading operations_log.json from the destination."""
+        if self._date_org_running:
+            messagebox.showinfo("Run in progress",
+                                "Wait for the current run to finish before reverting.",
+                                parent=self.root)
+            return
+
+        # Choose where the ops log lives (same logic as _start_date_org)
+        if self.date_org_in_place_var.get():
+            base_str = self.date_org_src_var.get().strip()
+        else:
+            base_str = self.date_org_out_var.get().strip()
+        if not base_str:
+            messagebox.showerror("No destination",
+                                 "Set the source/destination folder first so I know where to look "
+                                 "for the operations log.", parent=self.root)
+            return
+        base = Path(self._normalize_folder_path(base_str))
+        from mover import ops_log_path, revert_operations
+        log = ops_log_path(base)
+        if not log.exists():
+            messagebox.showinfo("No log found",
+                                f"No operations_log.json was found in:\n\n{base}\n\n"
+                                "Either no run has been performed, the destination has changed, "
+                                "or the run was a dry-run (no log written).",
+                                parent=self.root)
+            return
+
+        if not messagebox.askyesno(
+            "Revert last run?",
+            f"This will move every file recorded in operations_log.json back to its "
+            f"original location.\n\nLog: {log}\n\nProceed?",
+            parent=self.root,
+        ):
+            return
+
+        try:
+            reverted, errors = revert_operations(log)
+        except Exception as exc:
+            messagebox.showerror("Revert failed", str(exc), parent=self.root)
+            return
+        msg = f"Reverted {reverted:,} file{'s' if reverted != 1 else ''}."
+        if errors:
+            msg += f"  ({errors} error{'s' if errors != 1 else ''})"
+        messagebox.showinfo("Revert complete", msg, parent=self.root)
+        self._set_date_org_result(msg + f"\nLog: {log}")
 
     # ── History tab ───────────────────────────────────────────────────────
 
@@ -1792,48 +2290,6 @@ class App:
         ttk.Checkbutton(_ksrows[3], text="Keep all formats (keep best copy per file extension)",
                         variable=self.all_formats_var).pack(side=tk.LEFT)
         _info_btn(_ksrows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
-
-        # ── Actions ───────────────────────────────────────────────────────
-        act = _section(body, "Actions")
-
-        r = _row(act)
-        ttk.Checkbutton(r, text="Organize by Date", variable=self.org_date_var).pack(side=tk.LEFT)
-        _info_btn(r, "organize_by_date").pack(side=tk.LEFT, padx=2)
-        ttk.Label(r, text="Create date subfolders in results/ and trash/",
-                  foreground=_M_HINT, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=8)
-
-        # Organize destination radio group (shown when Organize by Date is enabled)
-        self._custom_org_dest_frame = ttk.Frame(act)
-        _cod_r1 = ttk.Frame(self._custom_org_dest_frame)
-        _cod_r1.pack(fill=tk.X, pady=2)
-        ttk.Label(_cod_r1, text="  ", width=2).pack(side=tk.LEFT)
-        ttk.Radiobutton(_cod_r1, text="Move originals to Output/results folder",
-                        variable=self.org_in_place_var, value=False,
-                        command=self._on_setting_change).pack(side=tk.LEFT)
-        _cod_r2 = ttk.Frame(self._custom_org_dest_frame)
-        _cod_r2.pack(fill=tk.X, pady=2)
-        ttk.Label(_cod_r2, text="  ", width=2).pack(side=tk.LEFT)
-        ttk.Radiobutton(_cod_r2, text="Organize files in original folder",
-                        variable=self.org_in_place_var, value=True,
-                        command=self._on_setting_change).pack(side=tk.LEFT)
-        self._toggle_custom_org_dest()
-        self.org_date_var.trace_add("write", lambda *_: self._toggle_custom_org_dest())
-
-        # Date format
-        r = _row(act)
-        ttk.Label(r, text="  Date order:", width=12, anchor=tk.W).pack(side=tk.LEFT)
-        init_order_idx2, init_sep2 = self._guess_order_sep(self.settings.date_folder_format)
-        self._custom_date_order_cb = ttk.Combobox(r, textvariable=self._date_order_var,
-                                                   width=14, state="readonly")
-        self._custom_date_order_cb.pack(side=tk.LEFT)
-        ttk.Label(r, text="  Separator:").pack(side=tk.LEFT, padx=(8, 0))
-        self._custom_date_sep_cb = ttk.Combobox(r, textvariable=self._date_sep_var,
-                                                 values=self._DATE_SEPARATORS, width=4, state="readonly")
-        self._custom_date_sep_cb.pack(side=tk.LEFT, padx=(2, 0))
-        _info_btn(r, "date_folder_format").pack(side=tk.LEFT, padx=4)
-        ttk.Label(r, textvariable=self._date_fmt_example,
-                  foreground=_M_HINT2, font=("Segoe UI", 8)).pack(side=tk.LEFT, padx=6)
-        self._refresh_date_order_choices(init_sep2, init_order_idx2)
 
         # Estimate
         self._custom_estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -3412,9 +3868,21 @@ class App:
         s.recursive                = self.recursive_var.get()
         s.skip_names               = self.skip_names_var.get()
         s.dry_run                  = self.dry_var.get()
-        s.organize_by_date         = self.org_date_var.get()
-        s.organize_in_place        = self.org_in_place_var.get()
         s.date_folder_format       = self.date_fmt_var.get() or "%Y-%m-%d"
+        # Organize-by-Date tab — fully decoupled from the duplicate-removal pipeline
+        s.date_org_src             = self.date_org_src_var.get()
+        s.date_org_out             = self.date_org_out_var.get()
+        s.date_org_in_place        = self.date_org_in_place_var.get()
+        s.date_org_op              = self.date_org_op_var.get() or "move"
+        s.date_org_use_exif        = self.date_org_use_exif_var.get()
+        s.date_org_use_filename    = self.date_org_use_filename_var.get()
+        s.date_org_use_mtime       = self.date_org_use_mtime_var.get()
+        s.date_org_unknown_folder  = (self.date_org_unknown_var.get() or "unknown_date").strip() or "unknown_date"
+        s.date_org_conflict        = self.date_org_conflict_var.get() or "rename"
+        s.date_org_recursive       = self.date_org_recursive_var.get()
+        s.date_org_include_raw     = self.date_org_include_raw_var.get()
+        s.date_org_move_sidecars   = self.date_org_sidecars_var.get()
+        s.date_org_dry_run         = self.date_org_dry_var.get()
         s.details_visible          = self._details_var.get()
         s.dry_run                  = self._custom_dry_var.get()  # shared dry-run flag
         s.custom_main_folder       = self._custom_main_var.get()
@@ -3481,12 +3949,23 @@ class App:
         self.dry_var.set(d.dry_run)
         import os as _os
         self.scan_threads_var.set(str(max(1, _os.cpu_count() or 1)))
-        self.org_date_var.set(d.organize_by_date)
         new_fmt = d.date_folder_format
         idx, sep = self._guess_order_sep(new_fmt)
         self._date_sep_var.set(sep)
         self._refresh_date_order_choices(sep, idx)
         self.date_fmt_var.set(new_fmt)
+        # Organize-by-Date tab — keep current source/output paths, reset only the toggles
+        self.date_org_in_place_var.set(d.date_org_in_place)
+        self.date_org_op_var.set(d.date_org_op)
+        self.date_org_use_exif_var.set(d.date_org_use_exif)
+        self.date_org_use_filename_var.set(d.date_org_use_filename)
+        self.date_org_use_mtime_var.set(d.date_org_use_mtime)
+        self.date_org_unknown_var.set(d.date_org_unknown_folder)
+        self.date_org_conflict_var.set(d.date_org_conflict)
+        self.date_org_recursive_var.set(d.date_org_recursive)
+        self.date_org_include_raw_var.set(d.date_org_include_raw)
+        self.date_org_sidecars_var.set(d.date_org_move_sidecars)
+        self.date_org_dry_var.set(d.date_org_dry_run)
         self._schedule_settings_save()
 
     def _open_calibration(self) -> None:
@@ -4043,21 +4522,6 @@ class App:
         else:
             self._detail_text.pack_forget()
         self._save_settings_now()
-
-    def _toggle_org_dest(self) -> None:
-        """Show/hide the organize-destination radio group based on Organize by Date."""
-        if self.org_date_var.get():
-            self._org_dest_frame.pack(fill=tk.X, pady=(0, 4))
-        else:
-            self._org_dest_frame.pack_forget()
-        self._on_setting_change()
-
-    def _toggle_custom_org_dest(self) -> None:
-        if self.org_date_var.get():
-            self._custom_org_dest_frame.pack(fill=tk.X, pady=(0, 4))
-        else:
-            self._custom_org_dest_frame.pack_forget()
-        self._on_setting_change()
 
     # ── worker thread ─────────────────────────────────────────────────────
 

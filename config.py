@@ -41,9 +41,25 @@ class Settings:
     details_visible: bool = False
     ambiguous_detection: bool = False
     ambiguous_threshold_factor: float = 1.5
-    organize_by_date: bool = False
-    organize_in_place: bool = False         # True=organize in original folder, False=move to output
-    date_folder_format: str = "%Y-%m-%d"
+    organize_by_date: bool = False           # legacy, no longer wired into scan tabs (kept for backward-compat)
+    organize_in_place: bool = False          # legacy, no longer wired into scan tabs
+    date_folder_format: str = "%Y-%m-%d"     # shared "date subfolder" strftime format (used by Organize tab)
+    # ── Organize by Date (standalone tab) ─────────────────────────────────────
+    # All date_org_* fields are owned by the new "Organize by Date" tab and are
+    # completely independent of the duplicate-removal pipeline.
+    date_org_src: str = ""                          # source folder
+    date_org_out: str = ""                          # destination root (used when not in-place)
+    date_org_in_place: bool = False                 # True = organize within source; False = use date_org_out
+    date_org_op: str = "move"                       # "move" or "copy"
+    date_org_use_exif: bool = True                  # priority 1: EXIF DateTimeOriginal
+    date_org_use_filename: bool = True              # priority 2: date embedded in filename
+    date_org_use_mtime: bool = True                 # priority 3: file modification time (last fallback)
+    date_org_unknown_folder: str = "unknown_date"   # subfolder name for files with no detectable date
+    date_org_conflict: str = "rename"               # "rename" | "skip" | "overwrite"
+    date_org_recursive: bool = True
+    date_org_include_raw: bool = True               # include CR2/NEF/ARW/DNG/etc in addition to JPEG/PNG
+    date_org_move_sidecars: bool = True             # also relocate .xmp/.aae companions next to their image
+    date_org_dry_run: bool = True                   # default to safe preview on first launch
     disable_series_detection: bool = False  # skip series promotion in _classify_group
     calib_folder: str = ""                  # last-used calibration folder
     calibrated_threshold: int = 0           # best threshold from last calibration (0 = none)

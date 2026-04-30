@@ -335,4 +335,102 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "options, and filter settings.\n\n"
         "Your settings are preserved when switching between modes."
     ),
+
+    # ── Organize by Date tab ──────────────────────────────────────────────
+    "date_org_op": (
+        "Move vs Copy",
+        "Choose how files are placed into date subfolders:\n\n"
+        "  • Move — relocates the file (source folder is changed). "
+        "Faster on the same drive, but the original layout is lost.\n"
+        "  • Copy — duplicates the file into the destination, leaving the "
+        "source untouched. Twice the disk space, but completely non-destructive.\n\n"
+        "Tip: Use 'Copy' the first time you organize a folder, verify the result, "
+        "then run again with 'Move' if you're happy."
+    ),
+    "date_org_in_place": (
+        "Organize in Place vs to Output",
+        "  • Organize in original folder — date subfolders are created inside "
+        "the source folder itself. Best for libraries already in place that "
+        "you want to tidy without moving them anywhere.\n"
+        "  • Use a separate destination — files are placed in a clean output "
+        "folder. The source folder is left as a flat list (when copying) or "
+        "emptied (when moving).\n\n"
+        "When 'Copy' is selected, the source folder is never modified."
+    ),
+    "date_org_use_exif": (
+        "Use EXIF DateTimeOriginal",
+        "Highest-priority date source — actual capture time stored by the camera. "
+        "Available for JPEG, TIFF, and most RAW formats from real cameras.\n\n"
+        "Falls back to 'Filename date' or 'File modified time' if the EXIF tag is "
+        "missing or unreadable.\n\n"
+        "Recommended: ON for camera/phone photo libraries."
+    ),
+    "date_org_use_filename": (
+        "Use Filename Date",
+        "Second-priority date source — extracts dates embedded in filenames such as "
+        "IMG_20240315_120000.jpg, Screenshot_2024-03-15.png, or VID_20240315.mov.\n\n"
+        "Useful for screenshots, scanned photos, and downloaded files where EXIF "
+        "is missing but the filename contains a date.\n\n"
+        "Recommended: ON."
+    ),
+    "date_org_use_mtime": (
+        "Use File Modified Time",
+        "Last-resort date source — uses the file's last modification timestamp "
+        "from the filesystem. Always available but unreliable: copying or "
+        "transferring files often resets mtime to the date of the copy.\n\n"
+        "Disable this if you prefer files with no detectable date to land in "
+        "the 'unknown date' folder rather than under the wrong year.\n\n"
+        "Recommended: ON as a fallback, OFF if you only trust EXIF."
+    ),
+    "date_org_unknown_folder": (
+        "Unknown Date Folder Name",
+        "Subfolder name used for files where every enabled date source returned "
+        "nothing (no EXIF, no filename date, mtime disabled or unreadable).\n\n"
+        "Default: 'unknown_date'.\n\n"
+        "Use a name that's easy to spot afterwards so you can manually sort "
+        "those files later if needed."
+    ),
+    "date_org_conflict": (
+        "Conflict Policy",
+        "What to do when a file with the same name already exists in the target "
+        "date subfolder:\n\n"
+        "  • Rename — append _1, _2, … to the new file's stem (default, safe).\n"
+        "  • Skip — leave the existing file in place; the source file is NOT moved.\n"
+        "  • Overwrite — delete the existing file and replace it.\n\n"
+        "Recommended: Rename for safety. Use Overwrite only when re-running on "
+        "the same source folder where you trust the source is authoritative."
+    ),
+    "date_org_recursive": (
+        "Recursive Subfolder Scan",
+        "When enabled, every subfolder under the source folder is scanned and "
+        "all matching files get organized into the destination.\n\n"
+        "When disabled, only the top-level directory is scanned.\n\n"
+        "Recommended: ON for messy collections, OFF for one-folder cleanup."
+    ),
+    "date_org_include_raw": (
+        "Include RAW Files",
+        "When enabled, RAW formats (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, "
+        "PEF, SRW, X3F, 3FR) are organized alongside JPEG/PNG.\n\n"
+        "When disabled, RAW files are left exactly where they are.\n\n"
+        "Tip: Keep this ON together with 'Move sidecars (.xmp/.aae)' so RAW "
+        "edits stay attached to their RAW files."
+    ),
+    "date_org_move_sidecars": (
+        "Move/Copy Sidecars (.xmp / .aae)",
+        "When enabled, .xmp (RAW edit metadata) and .aae (iPhone Live Photo / "
+        "edit metadata) files that share an image's stem are relocated alongside "
+        "the image file.\n\n"
+        "Without this, your RAW edits and Live Photo metadata would be left "
+        "behind in the source folder when you organize.\n\n"
+        "Recommended: ON."
+    ),
+    "date_org_dry_run": (
+        "Dry Run (Preview Only)",
+        "When enabled, NO files are moved or copied. The operation runs to "
+        "completion and reports exactly what would happen, so you can verify "
+        "the date detection and target folders before committing.\n\n"
+        "Disable this checkbox to actually perform the operation.\n\n"
+        "The first time you organize a folder, leave Dry Run ON, scan, then "
+        "review the per-folder counts before turning it OFF."
+    ),
 }
