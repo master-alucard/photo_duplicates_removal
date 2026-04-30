@@ -278,21 +278,6 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "Files remain in their original locations until you click 'Accept & Move'.\n\n"
         "Recommended: ON for first-time use of a new source folder."
     ),
-    "organize_by_date": (
-        "Organize Output by Date",
-        "When enabled, moved files are placed into date-named subfolders inside "
-        "results/ and trash/ instead of a flat folder.\n\n"
-        "The date is taken from (in order of preference):\n"
-        "  1. EXIF DateTimeOriginal (actual capture time)\n"
-        "  2. Date embedded in the filename (e.g. IMG_20240315_...)\n"
-        "  3. File modification time (fallback)\n\n"
-        "Example with format '%Y-%m':\n"
-        "  results/2024-03/IMG_1234.jpg\n"
-        "  results/2024-05/IMG_5678.jpg\n"
-        "  trash/2024-03/IMG_1234_thumb.jpg\n\n"
-        "Useful for building a date-organized photo library from a messy folder.\n\n"
-        "Recommended: OFF unless you want to reorganize by date."
-    ),
     "date_folder_format": (
         "Date Folder Format",
         "strftime format string used to name the date subfolders.\n\n"
@@ -301,7 +286,7 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "  %Y/%m      → 2024/03  (nested year/month folders)\n"
         "  %Y-%m-%d   → 2024-03-15  (one folder per day)\n"
         "  %Y         → 2024  (one folder per year)\n\n"
-        "Only used when 'Organize Output by Date' is enabled."
+        "Used by the Organize-by-Date tab to name each subfolder."
     ),
     "ambiguous_detection": (
         "Ambiguous Match Detection",

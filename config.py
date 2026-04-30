@@ -41,9 +41,7 @@ class Settings:
     details_visible: bool = False
     ambiguous_detection: bool = False
     ambiguous_threshold_factor: float = 1.5
-    organize_by_date: bool = False           # legacy, no longer wired into scan tabs (kept for backward-compat)
-    organize_in_place: bool = False          # legacy, no longer wired into scan tabs
-    date_folder_format: str = "%Y-%m-%d"     # shared "date subfolder" strftime format (used by Organize tab)
+    date_folder_format: str = "%Y-%m-%d"     # strftime format for date subfolders (used by Organize tab)
     # ── Organize by Date (standalone tab) ─────────────────────────────────────
     # All date_org_* fields are owned by the new "Organize by Date" tab and are
     # completely independent of the duplicate-removal pipeline.

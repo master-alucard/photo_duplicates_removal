@@ -89,10 +89,9 @@ def move_groups(
     Returns (moved_count, error_count).
     Writes operations_log.json in output_folder.
 
-    NOTE: As of v1.1.16, "Organize by Date" is no longer wired into the
-    duplicate-removal scan tabs.  Date-based organizing now lives in its
-    own dedicated tab — see ``organize_by_date_standalone`` below.  The
-    ``settings`` parameter is still accepted for forward compatibility.
+    Date-based organizing lives in its own tab — see
+    ``organize_by_date_standalone`` below.  The ``settings`` parameter is
+    accepted but unused; kept for call-site compatibility.
     """
     trash_dir = output_folder / "trash"
 
