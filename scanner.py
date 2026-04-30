@@ -6,6 +6,7 @@ series detection, RAW companion matching, and pause/resume support.
 from __future__ import annotations
 
 import os
+import time as _time
 from collections import defaultdict
 import numpy as _np
 from dataclasses import dataclass, field
@@ -79,9 +80,11 @@ _HASH_WORKING_SIZE = 1024
 
 # When the scan folder lives on an HDD (seek-sensitive), cap parallel readers to
 # this value to prevent seek-thrash and reduce disk overheating.  Purely CPU-bound
-# work (pHash on a pre-downscaled image) is light enough that 2 threads saturate
-# any single spinning disk.
-_HDD_THREAD_CAP = 2
+# work (pHash on a pre-downscaled image) is light enough that 4 threads saturate
+# a modern SSD / NVMe without thrashing an HDD (2 sequential decoders + 2 CPU-only
+# workers is a good balance for mixed drives).  Users with slow spinning disks can
+# override via Settings → scan_threads = 1.
+_HDD_THREAD_CAP = 4
 
 
 # ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────
@@ -435,6 +438,13 @@ def collect_images(
             ordered: dict[int, Optional[ImageRecord]] = {}
             ordered_cache_hit: dict[int, bool] = {}
             _interrupted = False
+            # Rate-limit progress callbacks: emit at most 20 updates/sec.
+            # Without this, a warm library cache can produce 10,000+ callbacks/sec
+            # which — in the old root.after(0, ...) pattern — hammered the Tcl
+            # lock.  Even with the new poll-ticker, limiting to 20/sec keeps the
+            # main thread free for UI events.
+            _last_cb: float = 0.0
+            _CB_INTERVAL: float = 0.05  # seconds between progress updates
             for fut in as_completed(futures):
                 if stop_flag and stop_flag[0]:
                     _interrupted = True
@@ -449,7 +459,10 @@ def collect_images(
                     continue
                 completed += 1
                 if progress_cb:
-                    progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                    _now = _time.monotonic()
+                    if _now - _last_cb >= _CB_INTERVAL or completed == total:
+                        progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                        _last_cb = _now
                 if exc is not None:
                     if failed_paths is not None:
                         failed_paths.append(path)
@@ -476,6 +489,8 @@ def collect_images(
             if not ordered_cache_hit.get(idx, True):
                 _freshly_hashed.append((resolved_strs[idx], rec))
     else:
+        _last_cb_seq: float = 0.0
+        _CB_INTERVAL_SEQ: float = 0.05
         for i, path in enumerate(all_image_paths):
             if stop_flag and stop_flag[0]:
                 break
@@ -483,7 +498,10 @@ def collect_images(
                 break
 
             if progress_cb:
-                progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
+                _now_seq = _time.monotonic()
+                if _now_seq - _last_cb_seq >= _CB_INTERVAL_SEQ or i + 1 == total:
+                    progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
+                    _last_cb_seq = _now_seq
 
             try:
                 rec = None
@@ -579,6 +597,11 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
     """Open a regular image and compute all hash/feature data.
 
     Performance notes:
+      • JPEG draft mode: ``img.draft("RGB", (W, H))`` is called immediately
+        after ``Image.open()`` (before any pixel access).  For a 24 MP JPEG
+        libjpeg will decode at 1/8 scale, reducing decode time by ~4-8× and
+        memory by ~64×.  The downscaled image is visually identical to the
+        full-res source for pHash purposes.
       • The image is pre-downscaled to ``_HASH_WORKING_SIZE`` before any hash
         computation — full-res 24 MP buffers are never held in RAM, and the
         three rotation hashes cost ~40× less CPU than before.
@@ -586,8 +609,15 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         file open via count_metadata_fields(path) as in earlier versions).
     """
     with Image.open(path) as img:
+        # JPEG draft mode — must be set BEFORE the first pixel access.
+        # exif_transpose() triggers img.load() internally, so draft must
+        # come first.  Only effective for JPEG; silently ignored by other formats.
+        if getattr(img, "format", None) == "JPEG":
+            img.draft("RGB", (_HASH_WORKING_SIZE, _HASH_WORKING_SIZE))
+
         # EXIF metadata count — read BEFORE exif_transpose, which strips the
-        # orientation tag.  Use the currently-open file handle (no re-open).
+        # orientation tag.  EXIF is parsed from the file header during open()
+        # without triggering pixel load, so this is safe after draft().
         metadata_count = 0
         if settings.collect_metadata:
             from metadata import count_metadata_fields_from_img

@@ -13,6 +13,7 @@ ETA strategy:
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -65,7 +66,7 @@ class PhaseTracker:
         self._phases: list[_PhaseInfo] = []
         self._current_idx: int = -1
         self._total_weight: int = 0
-        self._speed_samples: list[tuple[float, int]] = []  # (timestamp, cumulative_done)
+        self._speed_samples: deque[tuple[float, int]] = deque(maxlen=30)  # (timestamp, cumulative_done)
         # Track completed phase durations for better cross-phase projection
         self._completed_time_per_weight: list[float] = []
 
@@ -102,9 +103,7 @@ class PhaseTracker:
         phase.done_units = min(done_units, phase.total_units)
         now = time.monotonic()
         self._speed_samples.append((now, done_units))
-        # Keep only the last 30 samples for speed estimation
-        if len(self._speed_samples) > 30:
-            self._speed_samples.pop(0)
+        # deque(maxlen=30) auto-evicts oldest — no pop(0) O(n) needed
 
     def notify_gap(self, gap_seconds: float) -> None:
         """Compensate for a detected time gap (e.g., system sleep/hibernate).
@@ -267,6 +266,22 @@ class PhaseTracker:
             mins = minutes % 60
             return f"~{hours}h {mins}m"
         return f"~{minutes}m {seconds}s"
+
+    @property
+    def current_speed(self) -> float:
+        """Estimated current processing speed in units/sec (sliding window).
+
+        Returns 0.0 if there are not enough samples yet.
+        """
+        if len(self._speed_samples) < 2:
+            return 0.0
+        t0, u0 = self._speed_samples[0]
+        t1, u1 = self._speed_samples[-1]
+        dt = t1 - t0
+        du = u1 - u0
+        if dt < 0.1 or du <= 0:
+            return 0.0
+        return du / dt
 
     @property
     def current_phase_name(self) -> str:

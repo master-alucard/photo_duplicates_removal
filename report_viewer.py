@@ -936,7 +936,8 @@ class ReportViewer(tk.Frame):
         thumb_lbl = tk.Label(tile, image=_placeholder)
         thumb_lbl.configure(bg=bg)
         thumb_lbl.pack()
-        self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed)
+        self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed,
+                                   is_video=getattr(rec, "is_video", False))
 
         if trashed:
             # ── Trashed tile: show badge, gray out, disable checkbox ─────
@@ -1044,9 +1045,9 @@ class ReportViewer(tk.Frame):
             self._bind_tile_select(child, path)
 
     def _load_thumbnail_async(self, path: Path, label: tk.Label, max_px: int,
-                              grayscale: bool = False) -> None:
+                              grayscale: bool = False, is_video: bool = False) -> None:
         """Queue a thumbnail for deferred loading (batched after page renders)."""
-        self._pending_thumbs.append((path, label, max_px, grayscale))
+        self._pending_thumbs.append((path, label, max_px, grayscale, is_video))
 
     def _flush_pending_thumbs(self) -> None:
         """Spawn thumbnail-loading threads in staggered batches to avoid flooding."""
@@ -1065,8 +1066,8 @@ class ReportViewer(tk.Frame):
             return  # page changed — cancel
         end = min(offset + self._THUMB_BATCH, len(items))
         for i in range(offset, end):
-            path, label, max_px, grayscale = items[i]
-            self._spawn_thumb_thread(path, label, max_px, grayscale, batch_id)
+            path, label, max_px, grayscale, is_video = items[i]
+            self._spawn_thumb_thread(path, label, max_px, grayscale, batch_id, is_video)
         if end < len(items):
             try:
                 self._canvas.after(16, lambda: self._drain_thumb_batch(items, end, batch_id))
@@ -1074,7 +1075,7 @@ class ReportViewer(tk.Frame):
                 pass
 
     def _spawn_thumb_thread(self, path: Path, label: tk.Label, max_px: int,
-                            grayscale: bool, batch_id: int) -> None:
+                            grayscale: bool, batch_id: int, is_video: bool = False) -> None:
         """Start a single thumbnail-loading thread.
 
         PIL image decoding happens in the background thread; ALL Tk calls
@@ -1108,8 +1109,11 @@ class ReportViewer(tk.Frame):
                     except Exception:
                         pass
 
-                    if not _opened_as_image:
-                        # Try video frame extraction (ffmpeg / OpenCV)
+                    if not _opened_as_image and is_video:
+                        # Extract a frame only when this is a known video record.
+                        # Never call ffmpeg for ordinary images that PIL failed to
+                        # open (e.g. truncated files) — that would block the
+                        # semaphore for up to 15 s per file.
                         try:
                             from scanner import _extract_video_thumb
                             frame = _extract_video_thumb(path)

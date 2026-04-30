@@ -675,14 +675,15 @@ class App:
         self._scan_selection_cache: dict | None = None
         self._custom_selection_cache: dict | None = None
 
-        # Progress-callback coalescing — prevents flooding the Tk event queue
-        # when the worker thread emits thousands of progress events faster than
-        # the main thread can process them (e.g. cache-hit hashing of 50k files).
-        # Worker writes _pending_progress; main thread reads it in _flush_progress_cb.
-        self._progress_cb_pending:        bool = False
+        # Progress data written by the worker thread (pure Python attr store,
+        # no Tcl lock needed).  The main-thread _progress_tick / _custom_progress_tick
+        # polls these every 50 ms and flushes to the UI — eliminates the Tcl-lock
+        # contention that caused UI freezes when root.after(0,…) was called from
+        # a worker thread while the main thread held the interpreter lock.
         self._pending_progress:           "tuple | None" = None
-        self._custom_progress_cb_pending: bool = False
         self._custom_pending_progress:    "tuple | None" = None
+        self._progress_tick_after_id:     "int | None"   = None
+        self._custom_progress_tick_after_id: "int | None" = None
 
         # Custom scan state
         self._custom_stop_flag:  list[bool] = [False]
@@ -2716,6 +2717,11 @@ class App:
 
         _set_sleep_prevention(True)
         self._custom_scan_start_time = time.perf_counter()
+
+        # Start custom-scan progress ticker (same non-blocking poll pattern).
+        if not self._custom_progress_tick_after_id:
+            self._custom_progress_tick_after_id = self.root.after(50, self._custom_progress_tick)
+
         _use_lib_main  = self.main_mode_var.get() == "library"
         _trust_main    = self.trust_lib_main_var.get() if _use_lib_main else False
         _use_lib_check = self.check_mode_var.get() == "library"
@@ -3086,16 +3092,23 @@ class App:
     def _custom_progress_cb(
         self, msg: str, done: int, total: int, phase_name: str
     ) -> None:
-        # Coalesce: same pattern as _progress_cb — one flush per event-loop tick.
+        # Pure Python attribute write — same non-blocking pattern as _progress_cb.
+        # _custom_progress_tick (main thread, 50 ms poll) drains this.
         self._custom_pending_progress = (msg, done, total, phase_name)
-        if not self._custom_progress_cb_pending:
-            self._custom_progress_cb_pending = True
-            self.root.after(0, self._flush_custom_progress_cb)
+
+    def _custom_progress_tick(self) -> None:
+        """Main-thread 50 ms poll for custom-scan progress updates."""
+        if self._custom_pending_progress is not None:
+            self._flush_custom_progress_cb()
+        if self._scanning or self._custom_pending_progress is not None:
+            self._custom_progress_tick_after_id = self.root.after(50, self._custom_progress_tick)
+        else:
+            self._custom_progress_tick_after_id = None
 
     def _flush_custom_progress_cb(self) -> None:
         """Drain one pending custom progress update on the main thread."""
-        self._custom_progress_cb_pending = False
         data = self._custom_pending_progress
+        self._custom_pending_progress = None
         tracker = self._custom_tracker
         if data is None or tracker is None:
             return
@@ -4393,6 +4406,13 @@ class App:
 
         _set_sleep_prevention(True)
         self._scan_start_time = time.perf_counter()
+
+        # Start the non-blocking progress polling ticker.
+        # The worker thread writes _pending_progress without touching the Tcl
+        # lock; _progress_tick reads it on the main thread every 50 ms.
+        if not self._progress_tick_after_id:
+            self._progress_tick_after_id = self.root.after(50, self._progress_tick)
+
         _use_lib  = self.src_mode_var.get() == "library"
         _trust    = self.trust_lib_src_var.get() if _use_lib else False
         threading.Thread(
@@ -4499,18 +4519,35 @@ class App:
         self._last_heartbeat = now
 
     def _progress_cb(self, msg: str, done: int, total: int, phase_name: str) -> None:
-        # Coalesce: store the latest data and schedule exactly one flush per
-        # event-loop tick.  Prevents thousands of after(0) callbacks piling up
-        # when the worker runs faster than the UI thread (e.g. warm cache hits).
+        # Pure Python attribute write — never calls root.after() or any Tcl API.
+        # This means the worker thread never has to acquire the Tcl interpreter
+        # lock for progress reporting, eliminating the UI-freeze deadlock that
+        # occurred when a warm-cache hashing burst emitted thousands of
+        # root.after(0,…) calls per second while the main thread was busy.
+        # The main thread drains this via _progress_tick (50 ms poll).
         self._pending_progress = (msg, done, total, phase_name)
-        if not self._progress_cb_pending:
-            self._progress_cb_pending = True
-            self.root.after(0, self._flush_progress_cb)
+
+    def _progress_tick(self) -> None:
+        """Main-thread 50 ms poll: drain pending scan progress, then reschedule.
+
+        Replaces the worker-side root.after(0, …) pattern.  Because this method
+        always runs on the main thread (scheduled via root.after from the main
+        thread), there is no Tcl-lock contention regardless of how fast the
+        worker produces updates.
+        """
+        if self._pending_progress is not None:
+            self._flush_progress_cb()
+        # Keep ticking while the scan is running OR while there is still data to
+        # flush (the final batch of updates may arrive after _scanning goes False).
+        if self._scanning or self._pending_progress is not None:
+            self._progress_tick_after_id = self.root.after(50, self._progress_tick)
+        else:
+            self._progress_tick_after_id = None
 
     def _flush_progress_cb(self) -> None:
         """Drain one pending progress update on the main thread."""
-        self._progress_cb_pending = False
         data = self._pending_progress
+        self._pending_progress = None
         if data is None or self._tracker is None:
             return
         msg, done, total, phase_name = data
@@ -4529,21 +4566,43 @@ class App:
         pct = self._tracker.total_pct
         self._progress_bar["value"] = pct
         eta = self._tracker.format_eta()
-        self._eta_var.set(f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}")
+
+        # Rich status line: global %, ETA, phase files/total + rate
+        phase_pct = self._tracker.current_phase_pct
+        speed = self._tracker.current_speed
+        if speed >= 1.0:
+            rate_str = f"  ·  {speed:,.0f} files/s"
+        else:
+            rate_str = ""
+        if total > 0:
+            file_info = f"  ·  {done:,}/{total:,} ({phase_pct:.0f}%){rate_str}"
+        else:
+            file_info = rate_str
+        self._eta_var.set(
+            f"{pct:.0f}%  ·  {eta} remaining{file_info}  ·  {msg[:60]}"
+        )
         self._update_detail_log()
 
     def _update_detail_log(self) -> None:
         if not self._details_var.get() or self._tracker is None:
             return
         summaries = self._tracker.phase_summaries
+        speed = self._tracker.current_speed
         lines = []
         for s in summaries:
             if s["status"] == "done":
                 icon = "✓"
-                info = f"{s['total_units']} units  {s['duration_s']:.1f}s"
+                dur = s["duration_s"]
+                n = s["total_units"]
+                rate = f"  {n/dur:,.0f}/s" if dur > 0.1 and n > 0 else ""
+                info = f"{s['total_units']:,} files  {dur:.1f}s{rate}"
             elif s["status"] == "active":
                 icon = "→"
-                info = f"{s['done_units']}/{s['total_units']}  ongoing"
+                done_u = s["done_units"]
+                total_u = s["total_units"]
+                pct_s = f"{done_u/total_u*100:.0f}%" if total_u > 0 else "?"
+                rate_s = f"  {speed:,.0f}/s" if speed >= 1.0 else ""
+                info = f"{done_u:,}/{total_u:,} ({pct_s}){rate_s}"
             else:
                 icon = "○"
                 info = "waiting"
