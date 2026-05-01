@@ -5,6 +5,7 @@ series detection, RAW companion matching, and pause/resume support.
 """
 from __future__ import annotations
 
+import datetime
 import os
 import time as _time
 from collections import defaultdict
@@ -17,7 +18,11 @@ from PIL import Image, ImageOps
 import imagehash
 
 from config import Settings
-from metadata import extract_date_from_filename, extract_date_from_exif
+from metadata import (
+    extract_date_from_filename,
+    extract_date_from_exif,
+    extract_date_from_exif_from_img,
+)
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".gif", ".heic", ".heif",
@@ -167,6 +172,11 @@ class ImageRecord:
     # Video flag — True for records created by collect_videos().  width/height=0,
     # phash holds the thumbnail frame hash (or zero-hash if extraction failed).
     is_video: bool = False
+    # EXIF capture date/time (DateTimeOriginal).  None when unavailable (RAW postprocess
+    # path, PNG, non-EXIF formats, old library cache entries).  Used by the cross-format
+    # date guard in _can_be_similar to prevent same-subject photos from different days
+    # from being chained into one group via the lenient cross-format pHash threshold.
+    exif_date: "Optional[datetime.datetime]" = None
 
     @property
     def pixels(self) -> int:
@@ -623,13 +633,17 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         if getattr(img, "format", None) == "JPEG":
             img.draft("RGB", (_HASH_WORKING_SIZE, _HASH_WORKING_SIZE))
 
-        # EXIF metadata count — read BEFORE exif_transpose, which strips the
-        # orientation tag.  EXIF is parsed from the file header during open()
-        # without triggering pixel load, so this is safe after draft().
+        # EXIF metadata count and capture date — read BEFORE exif_transpose, which
+        # strips the orientation tag.  EXIF is parsed from the file header during
+        # open() without triggering pixel load, so this is safe after draft().
         metadata_count = 0
         if settings.collect_metadata:
             from metadata import count_metadata_fields_from_img
             metadata_count = count_metadata_fields_from_img(img)
+
+        # Always extract EXIF date (needed for cross-format date guard regardless
+        # of collect_metadata setting).  Falls back to None for non-EXIF formats.
+        exif_date = extract_date_from_exif_from_img(img)
 
         img = ImageOps.exif_transpose(img)
         img.load()
@@ -685,6 +699,7 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         histogram=hist,
         metadata_count=metadata_count,
         phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
+        exif_date=exif_date,
     )
 
 
@@ -740,6 +755,15 @@ def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
     if full_w == 0 or full_h == 0:
         full_w, full_h = img.size
 
+    # Extract EXIF date BEFORE mode conversion: .convert("RGB") strips metadata.
+    # For the embedded-JPEG-thumb path, img is a PIL JPEG with a full EXIF block
+    # including DateTimeOriginal.  For the postprocess path, img comes from a
+    # numpy array (no EXIF) so attempt 1 returns None and we fall back to a
+    # direct PIL open of the RAW file which may expose EXIF via a TIFF reader.
+    raw_exif_date = extract_date_from_exif_from_img(img)
+    if raw_exif_date is None:
+        raw_exif_date = extract_date_from_exif(path)
+
     if img.mode not in ("RGB", "RGBA", "L"):
         img = img.convert("RGB")
     if img.mode == "RGBA":
@@ -771,6 +795,7 @@ def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
         histogram=hist,
         metadata_count=0,
         phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
+        exif_date=raw_exif_date,
     )
 
 
@@ -819,6 +844,21 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         getattr(settings, "cross_format_threshold_factor", 2.0)
         if cross_format else 1.0
     )
+
+    # Cross-format EXIF date guard.
+    # Same-shot RAW+JPEG pairs share identical DateTimeOriginal timestamps.
+    # Photos of the same scene taken on different days (or different sessions)
+    # can still pass the lenient cross-format pHash threshold (12 bits) even
+    # though they are genuinely different images — e.g., a recurring landscape
+    # shot at the same location.  Reject any cross-format pair whose EXIF dates
+    # differ by more than 5 minutes: a genuine RAW+JPEG pair shot by the same
+    # camera will always have timestamps within a few seconds of each other.
+    if cross_format:
+        a_date = getattr(a, "exif_date", None)
+        b_date = getattr(b, "exif_date", None)
+        if a_date is not None and b_date is not None:
+            if abs((a_date - b_date).total_seconds()) > 300:
+                return False
 
     # 2. Brightness guard — relax for cross-format: RAW white balance differs from JPEG
     if abs(a.brightness - b.brightness) > settings.brightness_max_diff * cf_factor:
@@ -1592,10 +1632,21 @@ def _split_by_format(
                 originals.append(ns_best)
             else:
                 previews.append(ns_best)
-            # Remaining: preview-size check only — near-same-size kept as originals
+            # Remaining: preview-size check — near-same-size kept as originals.
+            # Extra guard for same-dimension files: only trash if pHash is close
+            # enough to confirm an exact duplicate.  Different photos taken with
+            # the same camera model share identical width×height but have distinct
+            # content and must not be trashed as previews.
             for _, m in non_series_in_ext[1:]:
                 if _is_preview(m, global_best, preview_ratio_gap):
-                    previews.append(m)
+                    if m.width == global_best.width and m.height == global_best.height:
+                        # Same dimensions as best: only trash genuine exact duplicates.
+                        if (m.phash - ns_best.phash) <= _EXACT_DUP_PHASH:
+                            previews.append(m)   # exact duplicate → trash
+                        else:
+                            originals.append(m)  # different shot, same camera → keep
+                    else:
+                        previews.append(m)   # rotation-equivalent or smaller → trash
                 else:
                     originals.append(m)
 
@@ -1777,7 +1828,11 @@ def find_video_duplicates(
         )
 
         if has_thumbs:
-            # Phase 2: sub-group within same-size bucket by thumbnail pHash
+            # Phase 2: sub-group within same-size bucket by thumbnail pHash.
+            # Videos whose thumbnail extraction failed (zero hash) are treated
+            # as size-only matches and grouped with every other member in the
+            # bucket — their content is unknown but exact-size match is already
+            # strong evidence of duplication in a personal library.
             n = len(members)
             parent = list(range(n))
 
@@ -1794,7 +1849,11 @@ def find_video_duplicates(
 
             for i in range(n):
                 for j in range(i + 1, n):
-                    if members[i].phash - members[j].phash <= _THUMB_THR:
+                    pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
+                    pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
+                    # If either thumbnail is missing, group by size alone.
+                    if (pi_zero or pj_zero or
+                            members[i].phash - members[j].phash <= _THUMB_THR):
                         _union(i, j)
 
             buckets: dict[int, list[int]] = defaultdict(list)

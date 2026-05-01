@@ -85,6 +85,7 @@ class FileRecord:
     phash_r90:      str = ""   # rotation hashes for rotation-aware comparison
     phash_r180:     str = ""
     phash_r270:     str = ""
+    exif_date:      str = ""   # ISO-8601 DateTimeOriginal string, or "" if unavailable
 
     # ── Construction helpers ───────────────────────────────────────────────
 
@@ -104,6 +105,7 @@ class FileRecord:
             phash_r90      = d.get("phash_r90",  ""),
             phash_r180     = d.get("phash_r180", ""),
             phash_r270     = d.get("phash_r270", ""),
+            exif_date      = d.get("exif_date", ""),
         )
 
     @classmethod
@@ -118,6 +120,7 @@ class FileRecord:
                       ``min(st_mtime, st_ctime)`` formula, which on Windows
                       returns the creation time and never changes on overwrite.
         """
+        _exif_date = getattr(rec, "exif_date", None)
         return cls(
             path           = str(rec.path),
             mtime          = st_mtime if st_mtime is not None else rec.mtime,
@@ -132,6 +135,7 @@ class FileRecord:
             phash_r90      = str(rec.phash_r90)  if rec.phash_r90  is not None else "",
             phash_r180     = str(rec.phash_r180) if rec.phash_r180 is not None else "",
             phash_r270     = str(rec.phash_r270) if rec.phash_r270 is not None else "",
+            exif_date      = _exif_date.isoformat() if _exif_date is not None else "",
         )
 
     # ── Conversion back to scanner type ───────────────────────────────────
@@ -139,12 +143,21 @@ class FileRecord:
     def to_image_record(self):
         """Reconstruct a scanner.ImageRecord from this cached record."""
         from scanner import ImageRecord
+        from datetime import datetime as _DT
         import imagehash as _ih
         import numpy as _np
 
         _zero = _ih.ImageHash(_np.zeros((8, 8), dtype=bool))
         ph = _ih.hex_to_hash(self.phash) if self.phash else _zero
         dh = _ih.hex_to_hash(self.dhash) if self.dhash else _zero
+
+        _exif_date_str = getattr(self, "exif_date", "")
+        _exif_date = None
+        if _exif_date_str:
+            try:
+                _exif_date = _DT.fromisoformat(_exif_date_str)
+            except (ValueError, AttributeError):
+                _exif_date = None
 
         return ImageRecord(
             path           = Path(self.path),
@@ -161,6 +174,7 @@ class FileRecord:
             phash_r180 = _ih.hex_to_hash(self.phash_r180) if self.phash_r180 else None,
             phash_r270 = _ih.hex_to_hash(self.phash_r270) if self.phash_r270 else None,
             is_video   = False,  # library only caches image records
+            exif_date  = _exif_date,
         )
 
     # ── Staleness check ────────────────────────────────────────────────────

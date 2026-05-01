@@ -79,6 +79,36 @@ def count_metadata_fields_from_img(img) -> int:
         return 0
 
 
+def extract_date_from_exif_from_img(img) -> Optional[datetime]:
+    """Return DateTimeOriginal from an already-open PIL Image, or None.
+
+    Works from the already-parsed in-memory EXIF without a second file open —
+    use this inside :func:`~scanner._hash_image` where the image is already open.
+    The EXIF data must be read *before* ``ImageOps.exif_transpose()`` which strips
+    the orientation tag.
+    """
+    try:
+        exif_data = img._getexif()  # type: ignore[attr-defined]
+        if not exif_data:
+            return None
+        # Tag IDs: 36867 = DateTimeOriginal, 36868 = DateTimeDigitized, 306 = DateTime
+        for tag_id in (36867, 36868, 306):
+            value = exif_data.get(tag_id)
+            if value and isinstance(value, str):
+                try:
+                    return datetime.strptime(value.strip(), "%Y:%m:%d %H:%M:%S")
+                except ValueError:
+                    pass
+                for fmt in ("%Y-%m-%d %H:%M:%S", "%Y/%m/%d %H:%M:%S"):
+                    try:
+                        return datetime.strptime(value.strip(), fmt)
+                    except ValueError:
+                        continue
+    except Exception:
+        pass
+    return None
+
+
 def extract_date_from_exif(path: Path) -> Optional[datetime]:
     """Return DateTimeOriginal or DateTime from EXIF, or None if not found."""
     try:
