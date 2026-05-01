@@ -157,5 +157,106 @@ class TestFindGroupsEndToEnd(unittest.TestCase):
                         "find_groups must split oversized union-find buckets")
 
 
+class TestCrossFormatKeepAllFormats(unittest.TestCase):
+    """
+    Verify that keep_all_formats=True hides cross-format groups entirely.
+
+    When the user enables "keep all formats", a JPEG+NEF pair should NOT
+    appear in the review list at all — neither file should be trashable.
+    With keep_all_formats=False, the RAW (NEF) stays as the original and
+    the JPEG is flagged as a duplicate (preview).
+    """
+
+    BASE_HASH = "0" * 16   # pHash = 0 → distance 0 to itself → exact match
+
+    def _nef_record(self, w: int = 6036, h: int = 4020) -> ImageRecord:
+        return ImageRecord(
+            path=Path("/photos/img_001.nef"),
+            width=w, height=h,
+            file_size=22_000_000,
+            phash=imagehash.hex_to_hash(self.BASE_HASH),
+            dhash=imagehash.hex_to_hash(self.BASE_HASH),
+            mtime=1_555_000_000.0,
+            brightness=128.0,
+            histogram=[1 / 96] * 96,
+            companions=[],
+            metadata_count=3,
+        )
+
+    def _jpg_record(self, w: int = 6000, h: int = 4000) -> ImageRecord:
+        return ImageRecord(
+            path=Path("/photos/img_001.jpg"),
+            width=w, height=h,
+            file_size=12_000_000,
+            phash=imagehash.hex_to_hash(self.BASE_HASH),
+            dhash=imagehash.hex_to_hash(self.BASE_HASH),
+            mtime=1_556_000_000.0,
+            brightness=130.0,
+            histogram=[1 / 96] * 96,
+            companions=[],
+            metadata_count=3,
+        )
+
+    def _settings(self, keep_all_formats: bool) -> Settings:
+        s = Settings()
+        s.threshold = 2
+        s.keep_all_formats = keep_all_formats
+        s.keep_strategy = "pixels"
+        s.use_histogram = False
+        s.dark_protection = False
+        s.series_threshold_factor = 2.0
+        return s
+
+    def test_keep_all_formats_true_hides_cross_format_group(self):
+        """
+        With keep_all_formats=True a JPEG+NEF pair must NOT appear in results.
+        Both formats are kept → previews list is empty → group returns None.
+        """
+        records = [self._nef_record(), self._jpg_record()]
+        settings = self._settings(keep_all_formats=True)
+
+        groups, _ = find_groups(records, settings)
+
+        self.assertEqual(
+            len(groups), 0,
+            "keep_all_formats=True must hide JPEG+NEF cross-format pairs "
+            f"(got {len(groups)} group(s))",
+        )
+
+    def test_keep_all_formats_false_puts_jpeg_in_previews(self):
+        """
+        With keep_all_formats=False the NEF is kept and the JPEG is a duplicate.
+        """
+        records = [self._nef_record(), self._jpg_record()]
+        settings = self._settings(keep_all_formats=False)
+
+        groups, _ = find_groups(records, settings)
+
+        self.assertEqual(len(groups), 1, "Expected exactly 1 group")
+        g = groups[0]
+        orig_paths = {r.path.suffix.lower() for r in g.originals}
+        prev_paths = {r.path.suffix.lower() for r in g.previews}
+        self.assertIn(".nef", orig_paths, "NEF must be in originals")
+        self.assertIn(".jpg", prev_paths, "JPEG must be in previews (duplicate)")
+        self.assertNotIn(".nef", prev_paths, "NEF must NOT be in previews")
+
+    def test_keep_all_formats_true_portrait_landscape_pair(self):
+        """
+        Portrait JPEG (4000×6000) matched with landscape NEF (6036×4020)
+        via rotation-aware dimension check — must also be hidden when
+        keep_all_formats=True.
+        """
+        nef = self._nef_record(w=6036, h=4020)   # landscape NEF
+        jpg = self._jpg_record(w=4000, h=6000)   # portrait JPEG
+        settings = self._settings(keep_all_formats=True)
+
+        groups, _ = find_groups([nef, jpg], settings)
+
+        self.assertEqual(
+            len(groups), 0,
+            "Portrait JPEG + landscape NEF with keep_all_formats=True must be hidden",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

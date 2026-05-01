@@ -1255,10 +1255,11 @@ def _classify_group(
     Same-dimension handling distinguishes three cases:
       - Exact duplicates (pHash ≤ _EXACT_DUP_PHASH within the bucket): same image
         saved/exported twice.  Keep the best copy; trash the rest as duplicates.
-      - Cross-format pairs (RAW vs JPEG of the same shot): ALL RAW files in the
-        bucket are kept as originals (series); ALL non-RAW (JPEG/PNG) files are
-        marked as duplicates (previews).  keep_all_formats is intentionally
-        ignored — for RAW+JPEG the RAW is the authoritative master regardless.
+      - Cross-format pairs (RAW vs JPEG of the same shot): behaviour depends on
+        keep_all_formats.  When True (default), ALL members are kept as originals
+        so the group disappears from the review list — nothing is trashable.
+        When False, the RAW is the authoritative master (kept) and every non-RAW
+        (JPEG/PNG) is marked as a duplicate (preview/trash).
       - Genuine series / burst (pHash > _EXACT_DUP_PHASH, same format): different
         shots at the same resolution.  Keep all; none are previews.
 
@@ -1354,22 +1355,24 @@ def _classify_group(
             if all_cross_format:
                 # Cross-format bucket: same shot captured as both RAW and JPEG.
                 #
-                # Strategy (applies regardless of keep_all_formats):
-                #   • Every RAW file in the bucket → series_indices (always kept).
-                #     Multiple RAWs = burst shots; all survive as separate originals.
-                #   • Every non-RAW (JPEG/PNG) file → exact_dup_indices (preview).
+                # keep_all_formats=True  → user explicitly wants every format
+                #   preserved.  Mark ALL members as series originals; this leaves
+                #   previews empty so _classify_group returns None and the group
+                #   never appears in the review list — nothing can be trashed.
                 #
-                # Why keep_all_formats is intentionally ignored here:
-                #   keep_all_formats is designed for same-content files in two
-                #   non-RAW formats (e.g. a JPEG + a PNG export of the same image).
-                #   For a RAW+JPEG pair the RAW is unambiguously the master file;
-                #   hiding the group when keep_all_formats=True means the user
-                #   never sees the pairing and cannot act on it at all.
-                for bi in bucket_indices:
-                    if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS:
-                        series_indices.add(bi)      # RAW: always keep as original
-                    else:
-                        exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
+                # keep_all_formats=False → RAW is the authoritative master; the
+                #   camera-generated JPEG is a derivative that can be trashed.
+                #   • Every RAW file in the bucket → series_indices (always kept).
+                #   • Every non-RAW (JPEG/PNG) file → exact_dup_indices (preview).
+                if getattr(settings, "keep_all_formats", True):
+                    # All formats preserved — hide the group entirely.
+                    series_indices.update(bucket_indices)
+                else:
+                    for bi in bucket_indices:
+                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS:
+                            series_indices.add(bi)      # RAW: always keep as original
+                        else:
+                            exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
                 is_series = True
             elif max_pdist <= _EXACT_DUP_PHASH:
                 # True exact duplicates: same format, same content.
