@@ -4,7 +4,7 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName      "Image Deduper"
-#define AppVersion   "1.1.19"
+#define AppVersion   "1.1.20"
 #define AppPublisher "Katador.net"
 #define AppURL       "https://github.com/master-alucard/photo_duplicates_removal"
 #define AppEmail     "office@katador.net"
