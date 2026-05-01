@@ -308,6 +308,47 @@ class TestCrossFormatKeepAllFormats(unittest.TestCase):
             "Portrait JPEG + landscape NEF with keep_all_formats=True must be hidden",
         )
 
+    def test_keep_all_formats_near_full_res_jpeg_hidden(self):
+        """
+        Near-full-res JPEG (5705×3803, ~5.5% smaller than NEF 6036×4020) must
+        NOT appear as a preview when keep_all_formats=True.
+
+        Regression: _split_by_format used a strict 2% cross-format tolerance for
+        _same_size_as_best, which incorrectly classified 5705×3803 as "too small"
+        and put it in previews.  The fix adds a fallback: if _is_preview() returns
+        False (the file is ≥ 90% of global_best in both dimensions), it is kept
+        as an original regardless of the 2% cross-format dim tolerance.
+        """
+        nef = self._nef_record(w=6036, h=4020)    # full-res RAW
+        jpg = self._jpg_record(w=5705, h=3803)    # ~94 % of NEF size — not a thumbnail
+        settings = self._settings(keep_all_formats=True)
+
+        groups, _ = find_groups([nef, jpg], settings)
+
+        self.assertEqual(
+            len(groups), 0,
+            "Near-full-res JPEG (≥90 % of NEF) must be hidden with keep_all_formats=True "
+            f"(got {len(groups)} group(s) — JPEG incorrectly in previews)",
+        )
+
+    def test_keep_all_formats_thumbnail_jpeg_still_trashed(self):
+        """
+        A genuine thumbnail JPEG (3000×2000, 50% of NEF 6036×4020) must still
+        appear as a preview even when keep_all_formats=True.
+
+        The fallback in _split_by_format must not absorb actual thumbnails.
+        """
+        nef = self._nef_record(w=6036, h=4020)    # full-res RAW
+        jpg = self._jpg_record(w=3000, h=2000)    # 50 % size — clear thumbnail
+        settings = self._settings(keep_all_formats=True)
+
+        groups, _ = find_groups([nef, jpg], settings)
+
+        self.assertEqual(len(groups), 1, "Thumbnail JPEG must produce a group")
+        g = groups[0]
+        prev_paths = {r.path.suffix.lower() for r in g.previews}
+        self.assertIn(".jpg", prev_paths, "Thumbnail JPEG must be in previews")
+
 
 if __name__ == "__main__":
     unittest.main()

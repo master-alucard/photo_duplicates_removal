@@ -609,6 +609,14 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         file open via count_metadata_fields(path) as in earlier versions).
     """
     with Image.open(path) as img:
+        # Capture the declared file dimensions BEFORE draft mode is applied.
+        # img.size after Image.open() but before img.load() reads from the
+        # file header and gives the *true* source dimensions.  After draft()
+        # and load() img.size returns the smaller decoded dimensions (e.g.
+        # 3000×2000 for a 6000×4000 JPEG decoded at 1/2 scale), which would
+        # make the JPEG appear as a preview-sized copy of its NEF companion.
+        file_w, file_h = img.size
+
         # JPEG draft mode — must be set BEFORE the first pixel access.
         # exif_transpose() triggers img.load() internally, so draft must
         # come first.  Only effective for JPEG; silently ignored by other formats.
@@ -631,7 +639,22 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
 
-        w, h = img.size
+        draft_w, draft_h = img.size
+
+        # Recover original dimensions from the pre-draft file size, correcting
+        # for any EXIF rotation that exif_transpose() may have applied.
+        # Strategy: compare aspect ratios to detect whether w and h were swapped.
+        #   • If scale_x ≈ scale_y  → no rotation (or 180°) — use file_w, file_h.
+        #   • If scale_x ≈ draft_w/file_h → 90°/270° rotation — swap file dims.
+        if file_w > 0 and file_h > 0 and draft_w > 0 and draft_h > 0:
+            err_normal  = abs(draft_h / file_h  - draft_w / file_w)
+            err_rotated = abs(draft_h / file_w  - draft_w / file_h)
+            if err_rotated < err_normal:
+                w, h = file_h, file_w   # exif_transpose swapped width↔height
+            else:
+                w, h = file_w, file_h   # no swap (0° or 180°)
+        else:
+            w, h = draft_w, draft_h     # fallback for zero-dimension edge cases
 
         if settings.min_dimension > 0 and max(w, h) < settings.min_dimension:
             return None
@@ -1557,7 +1580,15 @@ def _split_by_format(
         # For non-series, non-exact-dup members: keep the best if full-resolution
         if non_series_in_ext:
             ns_best_idx, ns_best = non_series_in_ext[0]
-            if _same_size_as_best(ns_best):
+            # A format's best copy is kept as an original when it is either:
+            #   (a) same-size as the global best (within cross-format tolerance), OR
+            #   (b) not small enough to count as a preview under the preview_ratio rule.
+            # Case (b) handles cross-format pairs like a 5 700×3 800 camera JPEG matched
+            # with a 6 036×4 020 RAW — they differ by ~5 % which exceeds the strict
+            # 2 % cross-format dim tolerance but are clearly not preview-sized thumbnails
+            # (94 % of full size).  Without this fallback those near-full-res JPEGs were
+            # incorrectly trashed even when keep_all_formats=True.
+            if _same_size_as_best(ns_best) or not _is_preview(ns_best, global_best, preview_ratio_gap):
                 originals.append(ns_best)
             else:
                 previews.append(ns_best)
