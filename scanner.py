@@ -899,9 +899,9 @@ def _split_oversized_bucket(
     photos into one mega-group via 1-bit pHash intermediates.  The chain
     breaker: pick the medoid (index with minimum total pHash distance to
     sampled peers) and demand every member pass the full ``_can_be_similar``
-    guard against that medoid directly.  Rejected members are re-split
-    recursively so a bucket that actually contains several distinct
-    duplicate clusters still surfaces all of them.
+    guard against that medoid directly.  Rejected members are processed
+    iteratively so a bucket that contains several distinct duplicate clusters
+    still surfaces all of them.
 
     Called only for buckets whose size exceeds ``settings.max_group_size``.
     Small buckets keep their original transitive closure, which is the
@@ -909,56 +909,71 @@ def _split_oversized_bucket(
 
     ``cap <= 0`` is treated as "feature disabled" — the bucket is returned
     unchanged regardless of its size.
+
+    Implemented iteratively (work-queue) rather than recursively to avoid
+    Python's call-stack limit.  In the worst case (every medoid matches only
+    itself) the old recursive version needed O(n) stack frames — fatal for
+    buckets > ~1 000 images.  The iterative version has O(1) stack depth.
     """
     if cap <= 0 or len(indices) <= cap:
         return [list(indices)]
 
-    # Sample if huge — O(k) medoid computation for k=200 is plenty.
-    if len(indices) <= 200:
-        sample = list(indices)
-    else:
-        # Deterministic stride sample so the split is reproducible
-        # across re-runs (pytest, cache replays, etc.).
-        step = max(1, len(indices) // 200)
-        sample = [indices[i] for i in range(0, len(indices), step)][:200]
+    result:  list[list[int]] = []
+    pending: list[list[int]] = [list(indices)]   # work queue
 
-    def _total_dist(idx: int) -> int:
-        h_i = records[idx].phash
-        total = 0
-        for j in sample:
-            if j == idx:
-                continue
-            total += h_i - records[j].phash   # Hamming distance via ImageHash.__sub__
-        return total
+    while pending:
+        bucket = pending.pop()
 
-    medoid = min(sample, key=_total_dist)
-
-    # Split: members that pass the FULL similarity guard against medoid stay;
-    # others are rejected for recursive re-splitting.
-    kept: list[int]     = [medoid]
-    rejected: list[int] = []
-    med_rec = records[medoid]
-    for idx in indices:
-        if idx == medoid:
+        # Small enough — keep transitive closure as-is (genuine dup group).
+        if len(bucket) <= cap:
+            result.append(bucket)
             continue
-        if _can_be_similar(med_rec, records[idx], settings):
-            kept.append(idx)
+
+        # Sample if huge — O(k) medoid computation for k=200 is plenty.
+        if len(bucket) <= 200:
+            sample: list[int] = bucket
         else:
-            rejected.append(idx)
+            # Deterministic stride sample so the split is reproducible
+            # across re-runs (pytest, cache replays, etc.).
+            step = max(1, len(bucket) // 200)
+            sample = [bucket[i] for i in range(0, len(bucket), step)][:200]
 
-    sub_groups: list[list[int]] = []
-    # Only surface the kept bucket if it still has >= 2 members.
-    if len(kept) >= 2:
-        sub_groups.append(kept)
+        def _total_dist(idx: int, _sample: list[int] = sample) -> int:
+            h_i = records[idx].phash
+            total = 0
+            for j in _sample:
+                if j != idx:
+                    total += h_i - records[j].phash   # Hamming via ImageHash.__sub__
+            return total
 
-    # Recurse on rejected so genuine sub-clusters inside the oversized bucket
-    # are also recovered.  Guard against pathological cases where nothing
-    # matches the medoid — then each rejected item becomes its own singleton
-    # and we simply drop them (no group).
-    if rejected and len(rejected) < len(indices):
-        sub_groups.extend(_split_oversized_bucket(rejected, records, settings, cap))
+        medoid = min(sample, key=_total_dist)
 
-    return sub_groups
+        # Members that pass the FULL similarity guard against the medoid are
+        # kept together; others are queued for another split round.
+        kept:     list[int] = [medoid]
+        rejected: list[int] = []
+        med_rec = records[medoid]
+        for idx in bucket:
+            if idx == medoid:
+                continue
+            if _can_be_similar(med_rec, records[idx], settings):
+                kept.append(idx)
+            else:
+                rejected.append(idx)
+
+        # Publish the kept cluster if meaningful.
+        if len(kept) >= 2:
+            result.append(kept)
+
+        # Queue the rejected remainder for another split round.
+        # Termination guarantee: len(rejected) < len(bucket) always because
+        # the medoid is always consumed into `kept`.  The work queue strictly
+        # shrinks every iteration, so the loop terminates in ≤ n rounds.
+        if len(rejected) >= 2:
+            pending.append(rejected)
+        # Single rejected items have no pair — silently drop (no group).
+
+    return result
 
 
 def _sort_key(r: ImageRecord, settings: Settings):

@@ -126,6 +126,57 @@ class TestSplitOversizedBucket(unittest.TestCase):
         self.assertEqual(len(result[0]), 100)
 
 
+class TestSplitRecursionLimit(unittest.TestCase):
+    """
+    Regression test for RecursionError in _split_oversized_bucket.
+
+    When a large bucket contains images where every medoid matches nothing,
+    the old recursive implementation removed exactly 1 item per call, hitting
+    Python's ~1000-frame call-stack limit for buckets > ~1000 images.
+    The iterative rewrite must handle this without raising RecursionError.
+    """
+
+    def test_large_unmatching_bucket_does_not_recurse(self):
+        """1 200 records in a bucket where every medoid matches nothing.
+
+        Old recursive code: 1 200 - cap ≈ 1 150 stack frames → RecursionError.
+        Iterative rewrite: 1 150 loop iterations → completes normally.
+        """
+        from scanner import _split_oversized_bucket
+
+        settings = Settings()
+        # threshold=0 → only exact hash matches (distance=0) are accepted.
+        # Every record has a unique hash (distance ≥ 1 from all others), so
+        # _can_be_similar always returns False: every medoid matches nothing.
+        settings.threshold = 0
+        settings.use_histogram = False
+        settings.dark_protection = False
+
+        n = 1200
+        records = []
+        for i in range(n):
+            # f"{i:016x}" gives 1 200 distinct 64-bit hex values; each pair has
+            # Hamming distance ≥ 1 which exceeds threshold=0.
+            h = f"{i:016x}"
+            records.append(_make_record(i, h, brightness=128.0, w=100, h=100))
+
+        indices = list(range(n))
+        # cap=50 — bucket is 24× oversized; each iteration only removes the
+        # lone medoid, so the old code needed ~1 150 recursive calls.
+        try:
+            result = _split_oversized_bucket(indices, records, settings, cap=50)
+        except RecursionError:
+            self.fail(
+                "_split_oversized_bucket raised RecursionError on a "
+                f"{n}-item all-unmatching bucket — must use iterative implementation"
+            )
+        # No matches → no pair survives → result has at most the final
+        # capped-out remainder (≤ cap items).
+        total_members = sum(len(g) for g in result)
+        self.assertLessEqual(total_members, 50,
+                             "Only the final capped remainder should survive")
+
+
 class TestFindGroupsEndToEnd(unittest.TestCase):
     """End-to-end: find_groups with many near-identical images should not
     return one mega-group when ``max_group_size`` is set."""
