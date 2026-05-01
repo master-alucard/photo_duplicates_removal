@@ -5075,11 +5075,14 @@ class App:
                 self.root.after(0, lambda: _mat_enable(self.revert_all_btn))
                 from scan_state import delete_results
                 delete_results(Path(out))
-                # Update history entry applied flag
+                # Update history entry applied flag.
+                # _save_scan_history() is a file write — safe from background.
+                # _refresh_history_view() updates Tkinter widgets — must go
+                # through root.after() to stay on the main thread.
                 if self._scan_history:
                     self._scan_history[-1]["applied"] = True
                     self._save_scan_history()
-                    self._refresh_history_view()
+                    self.root.after(0, self._refresh_history_view)
                 if self._last_scan_info:
                     self._last_scan_info["applied"] = True
                     self.root.after(0, self._update_results_tab_ui)
