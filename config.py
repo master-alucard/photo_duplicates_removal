@@ -66,8 +66,15 @@ class Settings:
     custom_check_folder: str = ""           # Custom Scan: folder to search for duplicates
     custom_out_folder: str = ""             # Custom Scan: output/trash folder
     # ── Video duplicate detection ──────────────────────────────────────────────
-    include_videos: bool = False            # Also scan for video duplicates
+    # Default ON so videos are no longer silently skipped (issue #300).  Out-of-the-box
+    # behaviour: bucket video files by (extension, file size) — sufficient to detect
+    # the most common case of the same clip copied twice in a personal library.
+    include_videos: bool = True             # Also scan for video duplicates
     video_use_thumb: bool = True            # Compare thumbnail frames when sizes match
+    # Compare Conditions for videos (issue #300).  At least one of these must be ON
+    # for video grouping to produce any results.  Both default ON.
+    video_match_format: bool = True         # Two videos must share the same file extension
+    video_match_size: bool = True           # Two videos must have an identical byte count
     auto_update: bool = True                # Check for updates on startup
     skipped_update_versions: list = field(default_factory=list)  # Versions the user clicked "Skip" on (no popup)
     developer_mode: bool = False            # Show full error details / tracebacks
