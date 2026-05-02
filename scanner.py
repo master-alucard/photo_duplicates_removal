@@ -7,12 +7,29 @@ from __future__ import annotations
 
 import datetime
 import os
+import sys as _sys
 import time as _time
 from collections import defaultdict
 import numpy as _np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
+
+# ── Recursion-depth safety net ───────────────────────────────────────────────
+# Raise Python's default 1 000-frame recursion limit when scanning very large
+# image collections.  Most code paths in this module are iterative (BK-tree
+# query/insert, _split_oversized_bucket work-queue, union-find with path
+# compression), but defensive numerics inside dependencies (numpy / Pillow
+# format plugins) and any future contributor mistakes still benefit from a
+# bigger headroom on a 64-bit Python.  The chosen value is well below the
+# native C-stack limit on Windows / Linux / macOS so we won't blow the stack.
+_MIN_RECURSION_LIMIT = 5000
+try:
+    if _sys.getrecursionlimit() < _MIN_RECURSION_LIMIT:
+        _sys.setrecursionlimit(_MIN_RECURSION_LIMIT)
+except Exception:
+    # setrecursionlimit can fail on exotic interpreters — keep the default.
+    pass
 
 from PIL import Image, ImageOps
 import imagehash
