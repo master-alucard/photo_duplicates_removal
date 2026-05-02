@@ -495,6 +495,19 @@ class ReportViewer(tk.Frame):
         self._apply_btn = _mat_btn(hdr, "📦  Move Duplicates", self._on_apply, _RV_BTN_SUCCESS)
         self._apply_btn.pack(side=tk.RIGHT, padx=(4, 12), pady=8)
 
+        # Change Folder button — lets user redirect trash before applying
+        self._change_folder_btn = _mat_btn(
+            hdr, "📁  Change Folder", self._on_change_folder,
+            _RV_HEADER_BG, fg=_RV_HEADER_STATS, font_size=9)
+        self._change_folder_btn.pack(side=tk.RIGHT, padx=(0, 4), pady=8)
+
+        # Current trash destination label
+        self._trash_folder_lbl = _tklabel(
+            hdr, bg=_RV_HEADER_BG, fg=_RV_HEADER_STATS,
+            text=self._get_trash_folder_display(),
+            font=("Segoe UI", 8))
+        self._trash_folder_lbl.pack(side=tk.RIGHT, padx=(8, 0))
+
         # ── Header separator line ─────────────────────────────────────────
         _tkframe(self, bg=_M_DIVIDER, height=1).pack(fill=tk.X)
 
@@ -1281,6 +1294,41 @@ class ReportViewer(tk.Frame):
 
     # ── apply / revert ────────────────────────────────────────────────────────
 
+    def _get_trash_folder_display(self) -> str:
+        """Return a short display string for the current trash destination."""
+        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        if out:
+            folder = Path(out) / "trash"
+        else:
+            first_preview = next(
+                (r for g in self._groups for r in (g.previews or [])), None
+            )
+            folder = (first_preview.path.parent / "trash") if first_preview else Path("trash")
+        s = str(folder)
+        if len(s) > 48:
+            s = "…" + s[-45:]
+        return f"\U0001f4c1  {s}"
+
+    def _on_change_folder(self) -> None:
+        """Open a folder browser so the user can redirect the trash destination."""
+        from tkinter import filedialog
+        initial = (self._settings.out_folder.strip() if self._settings else "") or "/"
+        new_folder = filedialog.askdirectory(
+            title="Select Output Folder  (duplicates go to <folder>/trash)",
+            initialdir=initial,
+            parent=self.winfo_toplevel(),
+        )
+        if not new_folder:
+            return
+        if self._settings:
+            self._settings.out_folder = new_folder
+            try:
+                self._settings.save()
+            except Exception:
+                pass
+        if hasattr(self, "_trash_folder_lbl"):
+            self._trash_folder_lbl.configure(text=self._get_trash_folder_display())
+
     def _on_apply(self) -> None:
         """Collect checked-preview paths and move them to trash. Originals stay."""
         # Collect only previews from checked groups whose per-image checkbox is also checked.
@@ -1311,6 +1359,18 @@ class ReportViewer(tk.Frame):
             trash_dir = Path(out) / "trash"
         else:
             trash_dir = paths_to_trash[0].parent / "trash"
+
+        # Validate that the output drive is accessible before starting the move
+        _anchor = trash_dir.anchor  # e.g. "G:\\" on Windows, "/" on Unix
+        if _anchor and not Path(_anchor).exists():
+            messagebox.showerror(
+                "Trash Folder Unavailable",
+                f"The output drive is not accessible:\n\n  {trash_dir}\n\n"
+                "Use the \U0001f4c1 Change Folder button to select a folder "
+                "on a connected drive.",
+                parent=self.winfo_toplevel(),
+            )
+            return
 
         dry = False  # Move Duplicates always performs the real move
 
