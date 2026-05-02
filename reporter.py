@@ -8,6 +8,7 @@ from __future__ import annotations
 import base64
 import html
 import io
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
 from pathlib import Path
 from typing import List
 
@@ -22,6 +23,10 @@ def _thumb_b64(path: Path, max_px: int = 400) -> str:
     """Base64 data-URI thumbnail, resized to fit max_px. Returns '' on error."""
     try:
         with PILImage.open(path) as img:
+            # JPEG fast-decode: request a DCT-scaled draft before loading pixels.
+            # This alone makes JPEG thumbnailing 3-4× faster on large photos.
+            if img.format == "JPEG" and hasattr(img, "draft"):
+                img.draft("RGB", (max_px, max_px))
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGB")
             img.thumbnail((max_px, max_px), PILImage.LANCZOS)
@@ -116,7 +121,16 @@ def _preview_card(rec, extended: bool = False) -> str:
 
 # ── main entry ────────────────────────────────────────────────────────────────
 
-_THUMB_GROUP_LIMIT = 500  # groups above this get no embedded thumbnails
+# Embed base64 thumbnails only when the total number of images across all groups
+# is at or below this limit.  Beyond it, thumbnails are skipped so the HTML stays
+# lightweight and report generation stays fast.  The in-app viewer always shows
+# full previews regardless of this setting.
+_THUMB_MAX_IMAGES = 200
+
+# Per-thumbnail wall-clock timeout (seconds).  A stuck PIL decode (e.g. a
+# corrupted TIFF or a file on a disconnected NAS) is abandoned after this long
+# so one bad file cannot freeze the entire report step.
+_THUMB_TIMEOUT_S = 10.0
 
 
 def generate_report(
@@ -138,31 +152,96 @@ def generate_report(
     format_label = "Yes" if settings.keep_all_formats else "No"
     dry_run = settings.dry_run
 
-    # For very large scans, skip embedded base64 thumbnails to keep the HTML
-    # file size manageable.  Thumbnails are still viewable in the in-app viewer.
-    embed_thumbs = len(groups) <= _THUMB_GROUP_LIMIT
+    # Decide whether to embed thumbnails based on total image count (not group
+    # count) so a scan with 300 groups × 2 images doesn't try to decode 600 files.
+    total_group_images = sum(len(g.originals) + len(g.previews) for g in groups)
+    embed_thumbs = total_group_images <= _THUMB_MAX_IMAGES
+
+    # ── Pre-generate all thumbnails in parallel ───────────────────────────────
+    # Build a (path, max_px) → data-URI cache before assembling any HTML so that
+    # the card-building loop is pure string concatenation with no I/O.
+    # _orig_card uses max_px=280, _preview_card uses max_px=160.
+    _b64: dict[tuple, str] = {}
+    if embed_thumbs:
+        _orig_jobs = [(r.path, 280) for g in groups for r in g.originals]
+        _prev_jobs = [(r.path, 160) for g in groups for r in g.previews]
+        _all_jobs: list[tuple[Path, int]] = _orig_jobs + _prev_jobs
+
+        _pool = ThreadPoolExecutor(max_workers=4)
+        _futs = {_pool.submit(_thumb_b64, p, px): (p, px) for p, px in _all_jobs}
+        for _fut, _key in _futs.items():
+            try:
+                _b64[_key] = _fut.result(timeout=_THUMB_TIMEOUT_S)
+            except Exception:
+                # TimeoutError (hung PIL) or any other failure → blank placeholder
+                _b64[_key] = ""
+        # Don't wait for threads that timed out; they'll be GC'd with the pool.
+        _pool.shutdown(wait=False)
+
+    # ── Cached img-tag helper (uses pre-built b64 dict) ──────────────────────
+    def _img_tag_c(path: Path, max_w: int, max_h: int) -> str:
+        src = _b64.get((path, max(max_w, max_h)), "")
+        name = html.escape(path.name)
+        if not src:
+            return f'<div class="no-img">! {name}</div>'
+        return (
+            f'<img src="{src}" '
+            f'style="max-width:{max_w}px;max-height:{max_h}px;object-fit:contain;" '
+            f'title="{html.escape(str(path))}" />'
+        )
 
     def _orig_card_maybe(rec, extended=False):
-        if embed_thumbs:
-            return _orig_card(rec, extended=extended)
-        name = html.escape(rec.path.name)
-        return (
-            f'<div class="img-wrap">'
-            f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
-            f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
-            f'<span class="dt">{rec.date_label()}</span></div></div>'
-        )
+        if not embed_thumbs:
+            name = html.escape(rec.path.name)
+            return (
+                f'<div class="img-wrap">'
+                f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
+                f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
+                f'<span class="dt">{rec.date_label()}</span></div></div>'
+            )
+        ext_badge = f'<span class="ext-badge">{rec.path.suffix.upper().lstrip(".")}</span>'
+        companions_html = ""
+        if rec.companions:
+            names = ", ".join(c.name for c in rec.companions[:3])
+            companions_html = f'<span class="companions">+ RAW: {html.escape(names)}</span>'
+        exif_html = _exif_section_html(rec.path) if extended else ""
+        return f"""
+      <div class="orig-item">
+        <div class="orig-thumb">{_img_tag_c(rec.path, 280, 240)}</div>
+        <div class="ometa">
+          {ext_badge}
+          <span class="fname" title="{html.escape(str(rec.path))}">{html.escape(rec.path.name)}</span>
+          <span class="dim">{rec.dim_label()}</span>
+          <span class="sz">{rec.size_label()}</span>
+          <span class="dt">{rec.date_label()}</span>
+          {companions_html}
+          {exif_html}
+        </div>
+      </div>"""
 
     def _preview_card_maybe(rec, extended=False):
-        if embed_thumbs:
-            return _preview_card(rec, extended=extended)
-        name = html.escape(rec.path.name)
-        return (
-            f'<div class="img-wrap">'
-            f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
-            f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
-            f'<span class="dt">{rec.date_label()}</span></div></div>'
-        )
+        if not embed_thumbs:
+            name = html.escape(rec.path.name)
+            return (
+                f'<div class="img-wrap">'
+                f'<div class="no-img" title="{html.escape(str(rec.path))}">{name}</div>'
+                f'<div class="meta"><span class="sz">{rec.size_label()}</span>'
+                f'<span class="dt">{rec.date_label()}</span></div></div>'
+            )
+        ext_badge = f'<span class="ext-badge trash-ext">{rec.path.suffix.upper().lstrip(".")}</span>'
+        exif_html = _exif_section_html(rec.path) if extended else ""
+        return f"""
+            <div class="preview-card">
+              <div class="thumb">{_img_tag_c(rec.path, 160, 140)}</div>
+              <div class="pmeta">
+                {ext_badge}
+                <span class="fname" title="{html.escape(str(rec.path))}">{html.escape(rec.path.name)}</span>
+                <span class="dim">{rec.dim_label()}</span>
+                <span class="sz">{rec.size_label()}</span>
+                <span class="dt">{rec.date_label()}</span>
+                {exif_html}
+              </div>
+            </div>"""
 
     # ── group cards ──────────────────────────────────────────────────────
     cards: list[str] = []
@@ -229,7 +308,7 @@ def generate_report(
         f'<div style="background:#fff8e1;border-left:4px solid #f9a825;'
         f'padding:10px 18px;margin:0 32px 16px;border-radius:4px;font-size:.85rem;">'
         f'&#9432; Thumbnails are not embedded in this report because the scan produced '
-        f'{len(groups):,} groups (limit: {_THUMB_GROUP_LIMIT:,}). '
+        f'{total_group_images:,} images across all groups (limit: {_THUMB_MAX_IMAGES:,}). '
         f'Use the <strong>In-App Viewer</strong> to browse groups with full previews.</div>'
     ) if not embed_thumbs else ""
 
