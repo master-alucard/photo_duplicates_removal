@@ -3081,6 +3081,72 @@ class App:
             n_inner = sum(len(g.previews) for g in within_check_groups)
             n_total = n_cross + n_inner
 
+            # ── Video duplicate detection (Compare Scan) ─────────────────
+            # Mirrors the regular-scan video pipeline (issue #300): respect
+            # include_videos + Compare Conditions (video_match_format /
+            # video_match_size).  Without this, the Custom-Scan Key Settings
+            # video checkboxes would be UI-only and have no effect.
+            if getattr(settings, "include_videos", False) and not self._custom_stop_flag[0]:
+                try:
+                    cb("Collecting videos (main folder)…", 0, 1, "Comparing")
+                    _main_videos = collect_videos(
+                        main_path,
+                        {(out_path / "results").resolve(),
+                         (out_path / "trash").resolve(),
+                         out_path.resolve()},
+                        settings,
+                        progress_cb=cb,
+                        stop_flag=self._custom_stop_flag,
+                    )
+                    if not self._custom_stop_flag[0]:
+                        cb("Collecting videos (check folder)…", 0, 1, "Comparing")
+                        _check_videos = collect_videos(
+                            check_path,
+                            {(out_path / "results").resolve(),
+                             (out_path / "trash").resolve(),
+                             out_path.resolve()},
+                            settings,
+                            progress_cb=cb,
+                            stop_flag=self._custom_stop_flag,
+                        )
+                    else:
+                        _check_videos = []
+
+                    _all_videos = _main_videos + _check_videos
+                    if not self._custom_stop_flag[0] and _all_videos:
+                        cb("Finding video duplicates…", 0, 1, "Comparing")
+                        _video_groups_raw = find_video_duplicates(_all_videos, settings)
+
+                        # Reclassify same as image groups: main → originals,
+                        # check → previews.  Drop main-only or check-only-singleton.
+                        _video_cross: list = []
+                        _video_within_check: list = []
+                        for vg in _video_groups_raw:
+                            vmembers = vg.originals + vg.previews
+                            v_from_main  = [r for r in vmembers if _in_folder(r.path, main_res)]
+                            v_from_check = [r for r in vmembers if _in_folder(r.path, check_res)]
+                            if v_from_main and v_from_check:
+                                vg.originals = v_from_main
+                                vg.previews  = v_from_check
+                                _video_cross.append(vg)
+                            elif not v_from_main and len(v_from_check) > 1:
+                                vg.originals = v_from_check[:1]
+                                vg.previews  = v_from_check[1:]
+                                _video_within_check.append(vg)
+
+                        combined_groups = combined_groups + _video_cross + _video_within_check
+                        _vn_cross = sum(len(g.previews) for g in _video_cross)
+                        _vn_inner = sum(len(g.previews) for g in _video_within_check)
+                        n_cross += _vn_cross
+                        n_inner += _vn_inner
+                        n_total += _vn_cross + _vn_inner
+                        # Include video records in main/check counts so the
+                        # final summary reflects what was actually scanned.
+                        main_records = main_records + _main_videos
+                        check_records = check_records + _check_videos
+                except Exception:
+                    pass   # video detection is best-effort, never blocks image results
+
             # Phase 4 — report
             cb("Generating report…", 0, 1, "Report")
             report = generate_report(
