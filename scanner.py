@@ -7,12 +7,29 @@ from __future__ import annotations
 
 import datetime
 import os
+import sys as _sys
 import time as _time
 from collections import defaultdict
 import numpy as _np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
+
+# ── Recursion-depth safety net ───────────────────────────────────────────────
+# Raise Python's default 1 000-frame recursion limit when scanning very large
+# image collections.  Most code paths in this module are iterative (BK-tree
+# query/insert, _split_oversized_bucket work-queue, union-find with path
+# compression), but defensive numerics inside dependencies (numpy / Pillow
+# format plugins) and any future contributor mistakes still benefit from a
+# bigger headroom on a 64-bit Python.  The chosen value is well below the
+# native C-stack limit on Windows / Linux / macOS so we won't blow the stack.
+_MIN_RECURSION_LIMIT = 5000
+try:
+    if _sys.getrecursionlimit() < _MIN_RECURSION_LIMIT:
+        _sys.setrecursionlimit(_MIN_RECURSION_LIMIT)
+except Exception:
+    # setrecursionlimit can fail on exotic interpreters — keep the default.
+    pass
 
 from PIL import Image, ImageOps
 import imagehash
@@ -1808,17 +1825,31 @@ def find_video_duplicates(
 
     _zero_hash_int = 0
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    match_format = bool(getattr(settings, "video_match_format", True))
+    match_size = bool(getattr(settings, "video_match_size", True))
     _THUMB_THR = 8  # Hamming bits — allows minor encode differences in thumbnails
 
-    # Phase 1: bucket by exact file size
-    by_size: dict[int, list[ImageRecord]] = defaultdict(list)
+    # If neither format nor size matching is enabled, do not group anything.
+    # (Without at least one criterion every pair would be a "duplicate" — useless
+    # and dangerous.  Issue #300: the UI guarantees at least one is ON, but this
+    # belt-and-braces check protects programmatic callers.)
+    if not match_format and not match_size:
+        return []
+
+    # Phase 1: bucket by (ext if format-match enabled, size if size-match enabled).
+    # An empty string / zero acts as a wildcard for the disabled dimension.
+    by_key: dict[tuple[str, int], list[ImageRecord]] = defaultdict(list)
     for rec in video_records:
-        by_size[rec.file_size].append(rec)
+        ext_key = rec.path.suffix.lower() if match_format else ""
+        size_key = rec.file_size if match_size else 0
+        by_key[(ext_key, size_key)].append(rec)
+    # Local alias so the rest of the function reads naturally.
+    by_size = by_key
 
     groups: list[DuplicateGroup] = []
     group_counter = 0
 
-    for _size, members in by_size.items():
+    for _key, members in by_size.items():
         if len(members) < 2:
             continue
 

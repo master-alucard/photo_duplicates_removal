@@ -431,6 +431,25 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "Tip: frame comparison requires ffmpeg on PATH or OpenCV installed.  "
         "Without either, size-only comparison is used automatically."
     ),
+    "video_match_format": (
+        "Match Same Video Format",
+        "Two videos must share the same file extension (e.g. both .mp4) to be "
+        "flagged as duplicates.\n\n"
+        "Disabling this allows cross-format matches (e.g. an .mp4 and an .mov of "
+        "the same byte length) but is rarely useful in personal libraries — videos "
+        "in different containers almost always differ in encoded byte count.\n\n"
+        "Default: ON.  At least one of \"Match format\" or \"Match file size\" must "
+        "be enabled."
+    ),
+    "video_match_size": (
+        "Match Exact File Size",
+        "Two videos must have an identical byte count to be flagged as duplicates.\n\n"
+        "This is the strongest signal of duplication for video files in a personal "
+        "library — re-encoding a video almost always changes its size, so two clips "
+        "with the same byte count are nearly always the same file.\n\n"
+        "Default: ON.  At least one of \"Match format\" or \"Match file size\" must "
+        "be enabled."
+    ),
     "video_use_thumb": (
         "Compare Thumbnail Frames",
         "When enabled and \"Find video duplicates\" is on, the scanner extracts "

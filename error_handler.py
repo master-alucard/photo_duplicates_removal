@@ -148,11 +148,33 @@ def format_scan_error(exc: BaseException, tb: str) -> tuple[str, str]:
     """
     Return (user_msg, detail) for a scan/processing exception.
     Analyses the exception type to give the most helpful user message.
+
+    When the original exception was wrapped as a plain ``Exception(message)``
+    by the worker thread (the marshalling pattern used by ``_on_error``),
+    fall back to scanning the message string AND the traceback for telltale
+    signatures so type-specific messages (e.g. RecursionError) still fire.
     """
     user_msg = _classify_exception(exc)
     detail = f"{type(exc).__name__}: {exc}"
     if tb:
         detail += f"\n\n{tb}"
+
+    # When the worker wraps the original exception as ``Exception(str(exc))``
+    # the type-based classifier above only sees ``Exception`` and misses
+    # specific cases.  Re-classify by scanning the message and traceback for
+    # known signatures so the user still gets actionable wording.
+    is_generic = type(exc) is Exception
+    if is_generic:
+        haystack = f"{exc}\n{tb or ''}".lower()
+        if "recursionerror" in haystack or "maximum recursion depth" in haystack:
+            user_msg = _classify_exception(RecursionError(str(exc)))
+        elif "memoryerror" in haystack:
+            user_msg = _classify_exception(MemoryError(str(exc)))
+        elif "permissionerror" in haystack or "permission denied" in haystack:
+            user_msg = _classify_exception(PermissionError(str(exc)))
+        elif "filenotfounderror" in haystack or "no such file" in haystack:
+            user_msg = _classify_exception(FileNotFoundError(str(exc)))
+
     return user_msg, detail
 
 
@@ -203,6 +225,22 @@ def _classify_exception(exc: BaseException) -> str:
         return (
             "The app ran out of memory.\n"
             "Try scanning a smaller folder or closing other applications."
+        )
+    # RecursionError can surface from very large duplicate clusters that defeat
+    # the union-find / medoid-split safety net (e.g. tens of thousands of
+    # near-identical images).  Give the user actionable advice instead of the
+    # generic "unexpected error" wording.
+    if isinstance(exc, RecursionError) or "maximum recursion depth" in msg:
+        return (
+            "The scan hit Python's call-stack limit while grouping duplicates.\n"
+            "This usually happens with a very large folder of near-identical "
+            "images (e.g. thousands of blank screenshots or document scans).\n\n"
+            "Try one of the following:\n"
+            "  • Lower the 'Max group size' setting (Settings → Advanced) to "
+            "something between 20 and 50 so runaway groups are split sooner.\n"
+            "  • Raise the pHash threshold so trivial 1-bit matches are not "
+            "chained into one mega-group.\n"
+            "  • Scan a sub-folder at a time."
         )
     if "rawpy" in msg or "libraw" in msg.lower():
         return (

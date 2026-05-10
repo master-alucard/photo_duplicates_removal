@@ -829,6 +829,9 @@ class App:
         # Video duplicate detection
         self.include_videos_var   = tk.BooleanVar(value=s.include_videos)
         self.video_use_thumb_var  = tk.BooleanVar(value=s.video_use_thumb)
+        # Compare Conditions for videos (issue #300)
+        self.video_match_format_var = tk.BooleanVar(value=getattr(s, "video_match_format", True))
+        self.video_match_size_var   = tk.BooleanVar(value=getattr(s, "video_match_size", True))
 
         # Auto-update
         self.auto_update_var = tk.BooleanVar(value=s.auto_update)
@@ -876,6 +879,7 @@ class App:
             self.ext_report_var,
             self.recursive_var, self.dry_var,
             self.include_videos_var, self.video_use_thumb_var,
+            self.video_match_format_var, self.video_match_size_var,
         ):
             var.trace_add("write", self._on_setting_change)
         self.date_sort_var.trace_add("write", self._on_setting_change)
@@ -1015,9 +1019,22 @@ class App:
                         variable=self.video_use_thumb_var).pack(side=tk.LEFT)
         _info_btn(_qs_video_row, "video_use_thumb").pack(side=tk.LEFT, padx=2)
 
+        # Compare Conditions row (issue #300) — controls how two videos are
+        # judged identical.  Indented under the video toggle for visual grouping.
+        _qs_video_cc_row = ttk.Frame(self._quick_speed_frame)
+        _qs_video_cc_row.pack(fill=tk.X, pady=(2, 0))
+        ttk.Label(_qs_video_cc_row, text="    Compare Conditions:").pack(side=tk.LEFT)
+        ttk.Checkbutton(_qs_video_cc_row, text="Same format",
+                        variable=self.video_match_format_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_qs_video_cc_row, "video_match_format").pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(_qs_video_cc_row, text="Same file size",
+                        variable=self.video_match_size_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_qs_video_cc_row, "video_match_size").pack(side=tk.LEFT, padx=2)
+
         # Compact key settings (advanced mode only)
         self._compact_adv_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
-        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(5)]
+        # Row 5 (index) hosts the video Compare Conditions added for issue #300.
+        _crows = [ttk.Frame(self._compact_adv_frame) for _ in range(6)]
         for cr in _crows:
             cr.pack(fill=tk.X, pady=2)
 
@@ -1053,13 +1070,22 @@ class App:
         _info_btn(_crows[3], "keep_all_formats").pack(side=tk.LEFT, padx=2)
 
         # Video duplicate detection row
-        ttk.Checkbutton(_crows[4], text="Also find video duplicates (by file size)",
+        ttk.Checkbutton(_crows[4], text="Also find video duplicates",
                         variable=self.include_videos_var).pack(side=tk.LEFT)
         _info_btn(_crows[4], "include_videos").pack(side=tk.LEFT, padx=2)
         ttk.Label(_crows[4], text="  ", width=3).pack(side=tk.LEFT)
         ttk.Checkbutton(_crows[4], text="Compare thumbnail frames",
                         variable=self.video_use_thumb_var).pack(side=tk.LEFT)
         _info_btn(_crows[4], "video_use_thumb").pack(side=tk.LEFT, padx=2)
+
+        # Compare Conditions row for videos (issue #300)
+        ttk.Label(_crows[5], text="    Compare Conditions:").pack(side=tk.LEFT)
+        ttk.Checkbutton(_crows[5], text="Same format",
+                        variable=self.video_match_format_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_crows[5], "video_match_format").pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(_crows[5], text="Same file size",
+                        variable=self.video_match_size_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_crows[5], "video_match_size").pack(side=tk.LEFT, padx=2)
 
         # Estimate
         self._estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -2278,7 +2304,7 @@ class App:
         self._custom_ks_frame = ttk.LabelFrame(body, text="Key Settings", padding=(10, 6, 10, 8))
         ks = self._custom_ks_frame
         ks.pack(fill=tk.X, pady=(0, 6))
-        _ksrows = [ttk.Frame(ks) for _ in range(5)]
+        _ksrows = [ttk.Frame(ks) for _ in range(6)]
         for kr in _ksrows:
             kr.pack(fill=tk.X, pady=2)
 
@@ -2325,6 +2351,15 @@ class App:
         ttk.Checkbutton(_ksrows[4], text="Compare thumbnail frames",
                         variable=self.video_use_thumb_var).pack(side=tk.LEFT)
         _info_btn(_ksrows[4], "video_use_thumb").pack(side=tk.LEFT, padx=2)
+
+        # Row 5: Compare Conditions for videos (issue #300)
+        ttk.Label(_ksrows[5], text="    Compare Conditions:").pack(side=tk.LEFT)
+        ttk.Checkbutton(_ksrows[5], text="Same format",
+                        variable=self.video_match_format_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_ksrows[5], "video_match_format").pack(side=tk.LEFT, padx=2)
+        ttk.Checkbutton(_ksrows[5], text="Same file size",
+                        variable=self.video_match_size_var).pack(side=tk.LEFT, padx=(6, 0))
+        _info_btn(_ksrows[5], "video_match_size").pack(side=tk.LEFT, padx=2)
 
         # Estimate
         self._custom_estimate_frame = ttk.Frame(body, style="Page.TFrame")
@@ -3045,6 +3080,72 @@ class App:
             n_cross = sum(len(g.previews) for g in cross_groups)
             n_inner = sum(len(g.previews) for g in within_check_groups)
             n_total = n_cross + n_inner
+
+            # ── Video duplicate detection (Compare Scan) ─────────────────
+            # Mirrors the regular-scan video pipeline (issue #300): respect
+            # include_videos + Compare Conditions (video_match_format /
+            # video_match_size).  Without this, the Custom-Scan Key Settings
+            # video checkboxes would be UI-only and have no effect.
+            if getattr(settings, "include_videos", False) and not self._custom_stop_flag[0]:
+                try:
+                    cb("Collecting videos (main folder)…", 0, 1, "Comparing")
+                    _main_videos = collect_videos(
+                        main_path,
+                        {(out_path / "results").resolve(),
+                         (out_path / "trash").resolve(),
+                         out_path.resolve()},
+                        settings,
+                        progress_cb=cb,
+                        stop_flag=self._custom_stop_flag,
+                    )
+                    if not self._custom_stop_flag[0]:
+                        cb("Collecting videos (check folder)…", 0, 1, "Comparing")
+                        _check_videos = collect_videos(
+                            check_path,
+                            {(out_path / "results").resolve(),
+                             (out_path / "trash").resolve(),
+                             out_path.resolve()},
+                            settings,
+                            progress_cb=cb,
+                            stop_flag=self._custom_stop_flag,
+                        )
+                    else:
+                        _check_videos = []
+
+                    _all_videos = _main_videos + _check_videos
+                    if not self._custom_stop_flag[0] and _all_videos:
+                        cb("Finding video duplicates…", 0, 1, "Comparing")
+                        _video_groups_raw = find_video_duplicates(_all_videos, settings)
+
+                        # Reclassify same as image groups: main → originals,
+                        # check → previews.  Drop main-only or check-only-singleton.
+                        _video_cross: list = []
+                        _video_within_check: list = []
+                        for vg in _video_groups_raw:
+                            vmembers = vg.originals + vg.previews
+                            v_from_main  = [r for r in vmembers if _in_folder(r.path, main_res)]
+                            v_from_check = [r for r in vmembers if _in_folder(r.path, check_res)]
+                            if v_from_main and v_from_check:
+                                vg.originals = v_from_main
+                                vg.previews  = v_from_check
+                                _video_cross.append(vg)
+                            elif not v_from_main and len(v_from_check) > 1:
+                                vg.originals = v_from_check[:1]
+                                vg.previews  = v_from_check[1:]
+                                _video_within_check.append(vg)
+
+                        combined_groups = combined_groups + _video_cross + _video_within_check
+                        _vn_cross = sum(len(g.previews) for g in _video_cross)
+                        _vn_inner = sum(len(g.previews) for g in _video_within_check)
+                        n_cross += _vn_cross
+                        n_inner += _vn_inner
+                        n_total += _vn_cross + _vn_inner
+                        # Include video records in main/check counts so the
+                        # final summary reflects what was actually scanned.
+                        main_records = main_records + _main_videos
+                        check_records = check_records + _check_videos
+                except Exception:
+                    pass   # video detection is best-effort, never blocks image results
 
             # Phase 4 — report
             cb("Generating report…", 0, 1, "Report")
@@ -3940,6 +4041,16 @@ class App:
         s.dark_mode                = self.dark_mode_var.get()
         s.include_videos           = self.include_videos_var.get()
         s.video_use_thumb          = self.video_use_thumb_var.get()
+        s.video_match_format       = self.video_match_format_var.get()
+        s.video_match_size         = self.video_match_size_var.get()
+        # Belt-and-braces: ensure at least one of format/size matching is on so the
+        # video pipeline can never silently match every pair (issue #300).
+        if not s.video_match_format and not s.video_match_size:
+            s.video_match_size = True
+            try:
+                self.video_match_size_var.set(True)
+            except Exception:
+                pass
         # Threads: always from the Settings dropdown
         try:
             s.scan_threads = max(1, int(self.scan_threads_var.get()))
@@ -4017,6 +4128,8 @@ class App:
         self.date_org_dry_var.set(d.date_org_dry_run)
         self.include_videos_var.set(d.include_videos)
         self.video_use_thumb_var.set(d.video_use_thumb)
+        self.video_match_format_var.set(getattr(d, "video_match_format", True))
+        self.video_match_size_var.set(getattr(d, "video_match_size", True))
         self._schedule_settings_save()
 
     def _open_calibration(self) -> None:
