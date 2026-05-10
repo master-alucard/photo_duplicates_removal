@@ -67,8 +67,10 @@ ProgressCb = Callable[[str, int, int, str], None]
 _EXACT_DUP_PHASH = 2
 
 # Use BK-tree candidate filtering when the collection exceeds this size.
-# Below this threshold the O(n²) brute-force is fast enough.
-_BKTREE_THRESHOLD = 200
+# Lowered from 200: BK-tree is O(n log n) vs brute-force O(n²), and 50 images
+# is already enough to see a speedup. 200 was leaving medium-sized scans on the
+# slow path unnecessarily.
+_BKTREE_THRESHOLD = 50
 
 # When comparing RAW vs JPEG file dimensions, allow up to this relative
 # difference before declaring them "different resolutions".  rawpy decodes
@@ -1134,7 +1136,7 @@ def find_groups(
     # the exact per-pair logic.
     _max_query_thr = max(
         settings.threshold,
-        int(settings.threshold * getattr(settings, "series_threshold_factor",    2.0)),
+        int(settings.threshold * getattr(settings, "series_threshold_factor",    1.0)),
         int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
         int(2 * getattr(settings, "rotation_threshold_factor",  3.0)),  # fixed floor, not scaled
     )
@@ -1506,9 +1508,41 @@ def _classify_group(
                     for dup_idx in bucket_indices[1:]:
                         exact_dup_indices.add(dup_idx)
                 else:
-                    # Genuine series / burst: keep every member.
-                    is_series = True
-                    series_indices.update(bucket_indices)
+                    # Possible series / burst.  Union-find is single-linkage, so a
+                    # chain A→B→C (each pair ≤ threshold) can end up in the same
+                    # bucket even when A and C are visually unrelated.  Guard against
+                    # this by requiring every confirmed series member to be within
+                    # series_threshold of the bucket medoid — not just of its nearest
+                    # neighbour.  Outliers are excluded from series_indices and fall
+                    # through to the normal _is_preview check below.
+                    series_thr = int(settings.threshold * settings.series_threshold_factor)
+
+                    # Medoid: the member with the smallest total pHash distance to
+                    # all others in the bucket (most "central" image).
+                    medoid_local = min(
+                        range(len(recs)),
+                        key=lambda li: sum(
+                            int(recs[li].phash - recs[lj].phash)
+                            for lj in range(len(recs)) if lj != li
+                        ),
+                    )
+                    med_rec = recs[medoid_local]
+
+                    confirmed_series: list[int] = []
+                    for k_local, (bi, rec_bi) in enumerate(zip(bucket_indices, recs)):
+                        # Use rotation-aware distance so rotated copies aren't evicted.
+                        d = int(med_rec.phash - rec_bi.phash)
+                        for rh in (rec_bi.phash_r90, rec_bi.phash_r180, rec_bi.phash_r270):
+                            if rh is not None:
+                                d = min(d, int(med_rec.phash - rh))
+                        if d <= series_thr:
+                            confirmed_series.append(bi)
+
+                    if len(confirmed_series) >= 2:
+                        is_series = True
+                        series_indices.update(confirmed_series)
+                    # Members not in confirmed_series are not added to series_indices;
+                    # they fall through to _is_preview at the classify stage below.
 
     # ── classify originals vs previews ───────────────────────────────────
     preview_ratio_gap = 1.0 - settings.preview_ratio

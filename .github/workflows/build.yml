@@ -40,6 +40,10 @@ jobs:
           python -c "import rawpy; print('rawpy OK —', rawpy.__version__)"
           python -c "from PIL import Image; import imagehash, piexif, pywt; print('Core deps OK')"
 
+      # ── 4b. Run test suite ────────────────────────────────────────────────────
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
       # ── 5. Bundle with PyInstaller ───────────────────────────────────────────
       - name: Build EXE with PyInstaller
         run: pyinstaller image_deduper.spec

@@ -82,16 +82,11 @@ def move_groups(
     groups: List,
     output_folder: Path,
     dry_run: bool = False,
-    settings=None,
 ) -> tuple[int, int]:
     """
     Move duplicate previews to trash/ only. Originals are never touched.
     Returns (moved_count, error_count).
     Writes operations_log.json in output_folder.
-
-    Date-based organizing lives in its own tab — see
-    ``organize_by_date_standalone`` below.  The ``settings`` parameter is
-    accepted but unused; kept for call-site compatibility.
     """
     trash_dir = output_folder / "trash"
 

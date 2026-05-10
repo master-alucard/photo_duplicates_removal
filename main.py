@@ -3434,7 +3434,7 @@ class App:
             try:
                 moved_prev, err_count = move_groups(
                     self._custom_groups, Path(out),
-                    dry_run=False, settings=self.settings,
+                    dry_run=False,
                 )
                 report = generate_report(
                     self._custom_groups, Path(out),
@@ -4924,7 +4924,7 @@ class App:
 
             if not settings.dry_run and groups:
                 cb("Moving files…", 0, len(groups), "Moving")
-                move_groups(groups, out, dry_run=False, settings=settings)
+                move_groups(groups, out, dry_run=False)
 
             # Move broken/unreadable files to trash/broken/
             broken = getattr(self, "_broken_files", [])
@@ -5173,7 +5173,7 @@ class App:
         def _do_move() -> None:
             try:
                 moved_prev, err_count = move_groups(
-                    self.scan_groups, Path(out), dry_run=False, settings=self.settings
+                    self.scan_groups, Path(out), dry_run=False
                 )
                 report = generate_report(
                     self.scan_groups, Path(out),
