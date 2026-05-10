@@ -35,6 +35,37 @@ def _date_subfolder(path: Path, fmt: str) -> str:
         return "unknown_date"
 
 
+def _drive_available(path: Path) -> bool:
+    """Return False when the root drive/mount of *path* is not accessible."""
+    try:
+        return Path(path.anchor).exists()
+    except OSError:
+        return False
+
+
+def _safe_exists(path: Path) -> bool:
+    """path.exists() that returns False instead of raising on disconnected drives."""
+    try:
+        return path.exists()
+    except OSError:
+        return False
+
+
+def _ensure_trash_dir(trash_dir: Path) -> None:
+    """Create trash_dir, raising FileNotFoundError with a helpful message when
+    the underlying drive is not connected."""
+    try:
+        trash_dir.mkdir(parents=True, exist_ok=True)
+    except (FileNotFoundError, OSError) as exc:
+        drive = Path(trash_dir.anchor)
+        if not _drive_available(drive):
+            raise FileNotFoundError(
+                f"Drive {drive} is not available.\n"
+                "Reconnect the drive and try again."
+            ) from exc
+        raise
+
+
 def trash_files(
     paths: List[Path],
     trash_dir: Path,
@@ -47,14 +78,14 @@ def trash_files(
     Appends operations to operations_log.json in trash_dir.parent.
     """
     if not dry_run:
-        trash_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_trash_dir(trash_dir)
 
     moved = 0
     errors: list[str] = []
     operations: list[dict] = []
 
     for p in paths:
-        if not p.exists():
+        if not _safe_exists(p):
             errors.append(f"{p.name}: file not found")
             continue
         dest = _unique_path(trash_dir / p.name)
@@ -91,7 +122,7 @@ def move_groups(
     trash_dir = output_folder / "trash"
 
     if not dry_run:
-        trash_dir.mkdir(parents=True, exist_ok=True)
+        _ensure_trash_dir(trash_dir)
 
     moved_previews = 0
     error_count = 0
@@ -105,7 +136,7 @@ def move_groups(
         group_id = getattr(group, "group_id", "unknown")
 
         for preview in group.previews:
-            if not preview.path.exists():
+            if not _safe_exists(preview.path):
                 op = {
                     "group_id": group_id,
                     "type": "preview",

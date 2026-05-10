@@ -172,6 +172,8 @@ def format_scan_error(exc: BaseException, tb: str) -> tuple[str, str]:
             user_msg = _classify_exception(MemoryError(str(exc)))
         elif "permissionerror" in haystack or "permission denied" in haystack:
             user_msg = _classify_exception(PermissionError(str(exc)))
+        elif "winerror 3" in haystack or "cannot find the path" in haystack:
+            user_msg = _classify_exception(FileNotFoundError(str(exc)))
         elif "filenotfounderror" in haystack or "no such file" in haystack:
             user_msg = _classify_exception(FileNotFoundError(str(exc)))
 
@@ -211,6 +213,20 @@ def _classify_exception(exc: BaseException) -> str:
             "Access denied — the app couldn't read or write a file.\n"
             "Check that you have permission to access the source and output folders."
         )
+    # WinError 3 / ENOENT on a drive root means the removable / network drive
+    # was disconnected.  Give a targeted message rather than the generic one.
+    _raw_msg = str(exc)
+    if isinstance(exc, (FileNotFoundError, OSError)):
+        import re as _re
+        _drive_m = _re.search(r"'([A-Za-z]:\\)'", _raw_msg)
+        if _drive_m or "cannot find the path" in msg or "winerror 3" in msg:
+            _drive_label = _drive_m.group(1) if _drive_m else "the drive"
+            return (
+                f"Drive {_drive_label} is not available.\n"
+                "Reconnect the drive and try again.\n\n"
+                "If the folder has moved to a different drive letter, update the\n"
+                "Source / Output folder paths in Settings."
+            )
     if isinstance(exc, FileNotFoundError) or "no such file" in msg:
         return (
             "A required file or folder could not be found.\n"

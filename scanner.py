@@ -419,11 +419,19 @@ def collect_images(
         if library_cache is not None:
             cached = library_cache.get(resolved_strs[i])
             if cached is not None:
-                if trust_library or not cached.is_stale(path):
-                    try:
-                        return i, path, cached.to_image_record(), None, True
-                    except Exception:
-                        pass  # corrupted cache entry → fall through to fresh hash
+                # For RAW files, invalidate cache entries that were hashed with
+                # a different raw_use_embedded_thumb setting to prevent stale
+                # hashes after the user toggles the fast-path option.
+                _ext = path.suffix.lower()
+                if _ext in RAW_EXTENSIONS:
+                    _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
+                    if cached.hash_mode != _expected_mode:
+                        cached = None
+            if cached is not None and (trust_library or not cached.is_stale(path)):
+                try:
+                    return i, path, cached.to_image_record(), None, True
+                except Exception:
+                    pass  # corrupted cache entry → fall through to fresh hash
 
         # Check again after cache lookup — the stat() in is_stale() can be slow
         if (stop_flag and stop_flag[0]) or (pause_flag and pause_flag[0]):
@@ -540,12 +548,17 @@ def collect_images(
                 if library_cache is not None:
                     cached = library_cache.get(resolved_strs[i])
                     if cached is not None:
-                        if trust_library or not cached.is_stale(path):
-                            try:
-                                rec = cached.to_image_record()
-                                was_cache_hit = True
-                            except Exception:
-                                rec = None  # fall through to fresh hash
+                        _ext = path.suffix.lower()
+                        if _ext in RAW_EXTENSIONS:
+                            _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
+                            if cached.hash_mode != _expected_mode:
+                                cached = None
+                    if cached is not None and (trust_library or not cached.is_stale(path)):
+                        try:
+                            rec = cached.to_image_record()
+                            was_cache_hit = True
+                        except Exception:
+                            rec = None  # fall through to fresh hash
 
                 # ── fresh hash ────────────────────────────────────────────
                 if rec is None:
@@ -588,8 +601,12 @@ def collect_images(
             for fh_resolved, fh_rec in _freshly_hashed:
                 try:
                     st_mtime = Path(fh_resolved).stat().st_mtime
+                    _fh_ext = Path(fh_resolved).suffix.lower()
+                    _fh_mode = ""
+                    if _fh_ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
+                        _fh_mode = "embedded" if getattr(settings, "raw_use_embedded_thumb", False) else ""
                     library_cache[fh_resolved] = _FileRecord.from_image_record(
-                        fh_rec, st_mtime=st_mtime
+                        fh_rec, st_mtime=st_mtime, hash_mode=_fh_mode
                     )
                 except Exception:
                     pass  # best-effort; don't let a stat failure abort the scan

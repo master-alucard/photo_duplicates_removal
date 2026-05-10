@@ -86,6 +86,10 @@ class FileRecord:
     phash_r180:     str = ""
     phash_r270:     str = ""
     exif_date:      str = ""   # ISO-8601 DateTimeOriginal string, or "" if unavailable
+    # "" = standard full decode (raw_use_embedded_thumb=False, the default)
+    # "embedded" = rawpy.extract_thumb() fast path (raw_use_embedded_thumb=True)
+    # Entries whose hash_mode doesn't match the current setting are re-hashed.
+    hash_mode:      str = ""
 
     # ── Construction helpers ───────────────────────────────────────────────
 
@@ -106,19 +110,23 @@ class FileRecord:
             phash_r180     = d.get("phash_r180", ""),
             phash_r270     = d.get("phash_r270", ""),
             exif_date      = d.get("exif_date", ""),
+            hash_mode      = d.get("hash_mode", ""),
         )
 
     @classmethod
-    def from_image_record(cls, rec, st_mtime: Optional[float] = None) -> "FileRecord":
+    def from_image_record(cls, rec, st_mtime: Optional[float] = None, hash_mode: str = "") -> "FileRecord":
         """Convert a scanner.ImageRecord to a serialisable FileRecord.
 
         Args:
-            rec:      The ImageRecord produced by the scanner.
-            st_mtime: The raw ``stat.st_mtime`` of the file.  Pass this
-                      explicitly so the library uses the actual modification
-                      time for cache-invalidation rather than the scanner's
-                      ``min(st_mtime, st_ctime)`` formula, which on Windows
-                      returns the creation time and never changes on overwrite.
+            rec:       The ImageRecord produced by the scanner.
+            st_mtime:  The raw ``stat.st_mtime`` of the file.  Pass this
+                       explicitly so the library uses the actual modification
+                       time for cache-invalidation rather than the scanner's
+                       ``min(st_mtime, st_ctime)`` formula, which on Windows
+                       returns the creation time and never changes on overwrite.
+            hash_mode: ``""`` for standard full decode; ``"embedded"`` when
+                       rawpy.extract_thumb() was used (raw_use_embedded_thumb).
+                       Mismatches cause re-hashing on the next scan.
         """
         _exif_date = getattr(rec, "exif_date", None)
         return cls(
@@ -136,6 +144,7 @@ class FileRecord:
             phash_r180     = str(rec.phash_r180) if rec.phash_r180 is not None else "",
             phash_r270     = str(rec.phash_r270) if rec.phash_r270 is not None else "",
             exif_date      = _exif_date.isoformat() if _exif_date is not None else "",
+            hash_mode      = hash_mode,
         )
 
     # ── Conversion back to scanner type ───────────────────────────────────
