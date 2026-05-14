@@ -66,9 +66,15 @@ class PhaseTracker:
         self._phases: list[_PhaseInfo] = []
         self._current_idx: int = -1
         self._total_weight: int = 0
-        self._speed_samples: deque[tuple[float, int]] = deque(maxlen=30)  # (timestamp, cumulative_done)
+        # Wider window than the previous 30: BK-tree iterations in the
+        # Comparing phase have very non-uniform cost (uniform-image clusters
+        # blow up candidate lists by 100×), so a longer window smooths the
+        # rate estimate and keeps the displayed ETA from ricocheting.
+        self._speed_samples: deque[tuple[float, int]] = deque(maxlen=60)  # (timestamp, cumulative_done)
         # Track completed phase durations for better cross-phase projection
         self._completed_time_per_weight: list[float] = []
+        # Asymmetric damping state for the displayed ETA — see eta_seconds.
+        self._last_eta: Optional[float] = None
 
         for name in phases:
             w = PHASE_WEIGHTS.get(name, _DEFAULT_WEIGHT)
@@ -94,6 +100,9 @@ class PhaseTracker:
         phase.status = "active"
         self._current_idx = idx
         self._speed_samples.clear()
+        # A new phase means the previous ETA shape is no longer relevant —
+        # let the next eta_seconds() pick up the raw value without damping.
+        self._last_eta = None
 
     def update(self, done_units: int) -> None:
         """Update progress in the current phase."""
@@ -118,6 +127,9 @@ class PhaseTracker:
         if phase.start_time > 0:
             phase.start_time += gap_seconds
         self._speed_samples.clear()
+        # A long sleep gap makes the previously displayed ETA meaningless —
+        # discard it so the next reading is fresh.
+        self._last_eta = None
 
     def finish_phase(self) -> None:
         """Mark the current phase as finished."""
@@ -220,7 +232,24 @@ class PhaseTracker:
             avg_tpw = max(avg_tpw, _MIN_SECS_PER_WEIGHT)
             eta_future = remaining_weight * avg_tpw
 
-        return max(0.0, eta_current + eta_future)
+        raw_eta = max(0.0, eta_current + eta_future)
+
+        # Asymmetric damping.  Without this, the displayed ETA jumps from
+        # "1m 30s" to "12m" when the Comparing phase hits a uniform cluster
+        # whose BK-tree candidate list is 100× the median.  We accept *good*
+        # news (faster than expected) almost in full but smooth *bad* news
+        # over several updates, so the number drifts up instead of jumping.
+        if self._last_eta is None:
+            self._last_eta = raw_eta
+            return raw_eta
+        if raw_eta > self._last_eta:
+            # ETA rising — weight strongly toward the previous value.
+            smoothed = 0.8 * self._last_eta + 0.2 * raw_eta
+        else:
+            # ETA falling — accept the improvement more readily.
+            smoothed = 0.5 * self._last_eta + 0.5 * raw_eta
+        self._last_eta = smoothed
+        return smoothed
 
     @property
     def phase_summaries(self) -> list[dict]:

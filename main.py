@@ -4765,6 +4765,7 @@ class App:
                 _lib_cache = None
                 try:
                     from library import Library, get_library_dir
+                    cb("Loading cached hashes…", 0, 1, "Discovery")
                     _lib = Library.load(get_library_dir())
                     _lib_cache = _lib.load_cache_merged(str(src.resolve()))
                 except Exception:
@@ -4804,6 +4805,7 @@ class App:
                 _lib_cache = None
                 try:
                     from library import Library, get_library_dir
+                    cb("Loading cached hashes…", 0, 1, "Discovery")
                     _lib = Library.load(get_library_dir())
                     _lib_cache = _lib.load_cache_merged(str(src.resolve()))
                 except Exception:

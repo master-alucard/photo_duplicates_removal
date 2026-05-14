@@ -427,6 +427,19 @@ def collect_images(
                     _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
                     if cached.hash_mode != _expected_mode:
                         cached = None
+                # Rotation hashes are unconditional in the current hasher; an
+                # empty phash_r90 means the entry was written by a pre-rotation
+                # code version.  Treat as stale so rotated duplicates aren't
+                # silently missed after the user upgrades.  Respects
+                # trust_library: when the user has explicitly said "trust this
+                # cache, skip freshness checks", we honor it.  ``getattr`` keeps
+                # us safe against fake cache stubs used in tests.
+                if (
+                    cached is not None
+                    and not trust_library
+                    and not getattr(cached, "phash_r90", None)
+                ):
+                    cached = None
             if cached is not None and (trust_library or not cached.is_stale(path)):
                 try:
                     return i, path, cached.to_image_record(), None, True
@@ -553,6 +566,12 @@ def collect_images(
                             _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
                             if cached.hash_mode != _expected_mode:
                                 cached = None
+                        if (
+                            cached is not None
+                            and not trust_library
+                            and not getattr(cached, "phash_r90", None)
+                        ):
+                            cached = None
                     if cached is not None and (trust_library or not cached.is_stale(path)):
                         try:
                             rec = cached.to_image_record()
@@ -988,6 +1007,7 @@ def _split_oversized_bucket(
     records: list[ImageRecord],
     settings: Settings,
     cap: int,
+    stop_flag: Optional[list[bool]] = None,
 ) -> list[list[int]]:
     """Break a runaway union-find bucket into tight sub-groups by requiring
     every member to pair-match the bucket's medoid.
@@ -1021,6 +1041,12 @@ def _split_oversized_bucket(
     pending: list[list[int]] = [list(indices)]   # work queue
 
     while pending:
+        # Honor Stop between rounds — a giant bucket can need many splits
+        # and would otherwise ignore the Stop button for tens of seconds.
+        if stop_flag and stop_flag[0]:
+            # Return what we have so far so the caller can still surface
+            # the partial result if it wants to.  find_groups discards it.
+            return result + pending
         bucket = pending.pop()
 
         # Small enough — keep transitive closure as-is (genuine dup group).
@@ -1266,12 +1292,18 @@ def find_groups(
     _cap = max(0, int(getattr(settings, "max_group_size", 0)))
 
     for indices in buckets.values():
+        # Stop is honored between buckets so giant clusters don't tie up the
+        # Stop button while their split + classify is in flight.
+        if stop_flag and stop_flag[0]:
+            return [], None
         if len(indices) < 2:
             continue
 
         # Split oversized buckets; otherwise pass the bucket through as-is.
         if _cap > 0 and len(indices) > _cap:
-            sub_buckets = _split_oversized_bucket(indices, records, settings, _cap)
+            sub_buckets = _split_oversized_bucket(
+                indices, records, settings, _cap, stop_flag=stop_flag,
+            )
         else:
             sub_buckets = [indices]
 
@@ -1280,7 +1312,9 @@ def find_groups(
                 continue
             group_counter += 1
             members = [records[i] for i in sub]
-            result_group = _classify_group(members, settings, f"g{group_counter:04d}")
+            result_group = _classify_group(
+                members, settings, f"g{group_counter:04d}", stop_flag=stop_flag,
+            )
             if result_group is not None:
                 groups.append(result_group)
                 grouped_indices.update(sub)
@@ -1362,6 +1396,7 @@ def _classify_group(
     members: list[ImageRecord],
     settings: Settings,
     group_id: str,
+    stop_flag: Optional[list[bool]] = None,
 ) -> Optional[DuplicateGroup]:
     """
     Given a set of similar images, classify each as original or preview.
@@ -1384,6 +1419,11 @@ def _classify_group(
     members_sorted = sorted(members, key=lambda r: _sort_key(r, settings))
     global_best = members_sorted[0]
 
+    # Precompute once per record so the O(n²) same-dimension loop below
+    # doesn't repeat ``path.suffix.lower()`` ~n² times for large series
+    # buckets (500-member burst → ~250k lower() calls saved).
+    is_raw_flags = [r.path.suffix.lower() in RAW_EXTENSIONS for r in members_sorted]
+
     # ── series / exact-dup detection ─────────────────────────────────────
     series_indices:   set[int] = set()   # genuine burst shots — keep all
     exact_dup_indices: set[int] = set()  # exact same-image copies — trash extras
@@ -1392,7 +1432,9 @@ def _classify_group(
     if not getattr(settings, "disable_series_detection", False):
         tol = settings.series_tolerance_pct / 100.0
 
-        def _same_dim(a: ImageRecord, b: ImageRecord) -> bool:
+        def _same_dim(i: int, j: int) -> bool:
+            a = members_sorted[i]
+            b = members_sorted[j]
             if a.width == 0 or a.height == 0 or b.width == 0 or b.height == 0:
                 return False
             w_ratio = abs(a.width - b.width) / max(a.width, b.width)
@@ -1400,11 +1442,9 @@ def _classify_group(
             # For cross-format pairs (RAW vs JPEG), use a wider tolerance:
             # rawpy decodes the full sensor area, adding a few border pixels
             # vs the camera JPEG crop (e.g. 6024×4020 vs 6000×4000 = 0.4%).
-            a_is_raw = a.path.suffix.lower() in RAW_EXTENSIONS
-            b_is_raw = b.path.suffix.lower() in RAW_EXTENSIONS
             effective_tol = (
                 max(tol, _CROSS_FORMAT_DIM_TOL)
-                if a_is_raw != b_is_raw else tol
+                if is_raw_flags[i] != is_raw_flags[j] else tol
             )
             if w_ratio <= effective_tol and h_ratio <= effective_tol:
                 return True
@@ -1431,8 +1471,12 @@ def _classify_group(
                 dim_parent[px] = py
 
         for i in range(len(members_sorted)):
+            # Cheap periodic stop check for very large groups (5000+ members
+            # would otherwise tie up the Stop button for several seconds).
+            if stop_flag and stop_flag[0] and (i & 0x3F) == 0:
+                return None
             for j in range(i + 1, len(members_sorted)):
-                if _same_dim(members_sorted[i], members_sorted[j]):
+                if _same_dim(i, j):
                     dim_union(i, j)
 
         dim_buckets: dict[int, list[int]] = defaultdict(list)
@@ -1455,15 +1499,24 @@ def _classify_group(
             # they would incorrectly be classified as series shots.  Instead we
             # treat all-cross-format buckets as exact duplicates so the best copy
             # (RAW when keep_all_formats=False) is kept and the rest are trashed.
-            max_pdist = max(
-                recs[a].phash - recs[b].phash
-                for a in range(len(recs))
-                for b in range(a + 1, len(recs))
-            )
+            #
+            # We only need the boolean "any pair exceeds _EXACT_DUP_PHASH",
+            # not the exact maximum — short-circuit on the first such pair so
+            # large genuine-series buckets (e.g. 500-shot bursts) don't pay the
+            # full O(n²) cost just to learn they are not exact duplicates.
+            exceeds_exact = False
+            for a in range(len(recs)):
+                if exceeds_exact:
+                    break
+                ph_a = recs[a].phash
+                for b in range(a + 1, len(recs)):
+                    if int(ph_a - recs[b].phash) > _EXACT_DUP_PHASH:
+                        exceeds_exact = True
+                        break
 
             # A bucket is "all cross-format" when it contains both RAW and
             # non-RAW files — i.e. the same shot in two different file formats.
-            raw_flags = {r.path.suffix.lower() in RAW_EXTENSIONS for r in recs}
+            raw_flags = {is_raw_flags[bi] for bi in bucket_indices}
             all_cross_format = (True in raw_flags and False in raw_flags)
 
             if all_cross_format:
@@ -1488,7 +1541,7 @@ def _classify_group(
                         else:
                             exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
                 is_series = True
-            elif max_pdist <= _EXACT_DUP_PHASH:
+            elif not exceeds_exact:
                 # True exact duplicates: same format, same content.
                 # Keep the best (bucket_indices[0]); trash the rest.
                 for dup_idx in bucket_indices[1:]:
