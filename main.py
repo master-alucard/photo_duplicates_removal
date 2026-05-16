@@ -5249,12 +5249,21 @@ class App:
 
         def _apply_cb(_paths_trashed: list) -> None:
             if out:
-                report = generate_report(
-                    self.scan_groups, Path(out),
-                    Path(self.settings.src_folder),
-                    len(self.scan_records), self.settings,
-                )
-                self.report_path = report
+                try:
+                    report = generate_report(
+                        self.scan_groups, Path(out),
+                        Path(self.settings.src_folder),
+                        len(self.scan_records), self.settings,
+                    )
+                    self.report_path = report
+                except Exception as _e:
+                    import traceback as _tb
+                    self.root.after(0, lambda e=_e, d=_tb.format_exc(): error_handler.show_error(
+                        self.root, "Report Update Failed",
+                        "The HTML report could not be regenerated after moving files.\n"
+                        "Your files were moved successfully — the report is just not updated.",
+                        detail=d,
+                    ))
                 from scan_state import delete_results
                 delete_results(Path(out))
 

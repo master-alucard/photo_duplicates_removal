@@ -40,18 +40,6 @@ def _thumb_b64(path: Path, max_px: int = 400) -> str:
         return ""
 
 
-def _img_tag(path: Path, max_w: int, max_h: int) -> str:
-    src = _thumb_b64(path, max(max_w, max_h))
-    name = html.escape(path.name)
-    if not src:
-        return f'<div class="no-img">! {name}</div>'
-    return (
-        f'<img src="{src}" '
-        f'style="max-width:{max_w}px;max-height:{max_h}px;object-fit:contain;" '
-        f'title="{html.escape(str(path))}" />'
-    )
-
-
 def _exif_section_html(path: Path) -> str:
     """Return a collapsible HTML block showing all EXIF fields."""
     try:
@@ -78,45 +66,6 @@ def _exif_section_html(path: Path) -> str:
         <tbody>{rows}</tbody>
       </table>
     </details>"""
-
-
-def _orig_card(rec, extended: bool = False) -> str:
-    ext_badge = f'<span class="ext-badge">{rec.path.suffix.upper().lstrip(".")}</span>'
-    companions_html = ""
-    if rec.companions:
-        names = ", ".join(c.name for c in rec.companions[:3])
-        companions_html = f'<span class="companions">+ RAW: {html.escape(names)}</span>'
-    exif_html = _exif_section_html(rec.path) if extended else ""
-    return f"""
-      <div class="orig-item">
-        <div class="orig-thumb">{_img_tag(rec.path, 280, 240)}</div>
-        <div class="ometa">
-          {ext_badge}
-          <span class="fname" title="{html.escape(str(rec.path))}">{html.escape(rec.path.name)}</span>
-          <span class="dim">{rec.dim_label()}</span>
-          <span class="sz">{rec.size_label()}</span>
-          <span class="dt">{rec.date_label()}</span>
-          {companions_html}
-          {exif_html}
-        </div>
-      </div>"""
-
-
-def _preview_card(rec, extended: bool = False) -> str:
-    ext_badge = f'<span class="ext-badge trash-ext">{rec.path.suffix.upper().lstrip(".")}</span>'
-    exif_html = _exif_section_html(rec.path) if extended else ""
-    return f"""
-            <div class="preview-card">
-              <div class="thumb">{_img_tag(rec.path, 160, 140)}</div>
-              <div class="pmeta">
-                {ext_badge}
-                <span class="fname" title="{html.escape(str(rec.path))}">{html.escape(rec.path.name)}</span>
-                <span class="dim">{rec.dim_label()}</span>
-                <span class="sz">{rec.size_label()}</span>
-                <span class="dt">{rec.date_label()}</span>
-                {exif_html}
-              </div>
-            </div>"""
 
 
 # ── main entry ────────────────────────────────────────────────────────────────
@@ -160,7 +109,7 @@ def generate_report(
     # ── Pre-generate all thumbnails in parallel ───────────────────────────────
     # Build a (path, max_px) → data-URI cache before assembling any HTML so that
     # the card-building loop is pure string concatenation with no I/O.
-    # _orig_card uses max_px=280, _preview_card uses max_px=160.
+    # Originals use max_px=280, previews use max_px=160.
     _b64: dict[tuple, str] = {}
     if embed_thumbs:
         _orig_jobs = [(r.path, 280) for g in groups for r in g.originals]
