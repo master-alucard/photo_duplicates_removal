@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 # ── App metadata ─────────────────────────────────────────────────────────────
 
 APP_NAME      = "Image Deduper"
-APP_VERSION   = "1.1.0"
+APP_VERSION   = "1.1.27"
 APP_COPYRIGHT = "© 2026 Katador.net  ·  All rights reserved."
 APP_EMAIL     = "office@katador.net"
 GITHUB_URL    = "https://github.com/master-alucard/photo_duplicates_removal"
@@ -32,7 +32,7 @@ RELEASES_API  = "https://api.github.com/repos/master-alucard/photo_duplicates_re
 
 # ── Material Design 3 colour palette (light defaults, overwritten by _apply_theme) ──
 
-_BG          = "#F2F4F7"
+_BG          = "#F4F4F5"
 _SURFACE     = "#FFFFFF"
 _PRIMARY     = "#1565C0"
 _PRIMARY_TINT= "#E8EFF9"
@@ -51,7 +51,7 @@ _HERO_NAME   = "#FFFFFF"
 _HERO_VER    = "#BBDEFB"
 _HERO_SUB    = "#90CAF9"
 _HERO_BTN    = "#0D47A1"
-_PRIVACY_BG  = "#FAFAFA"
+_PRIVACY_BG  = "#F4F4F5"
 _BTN_PRIMARY = "#1565C0"
 
 
@@ -154,9 +154,11 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw):
         except Exception:
             return c
     btn = tk.Button(parent, text=text, command=command,
-                    bg=bg, fg=fg, activebackground=_darken(bg), activeforeground=fg,
-                    relief=tk.FLAT, bd=0, padx=12, pady=5,
+                    relief=tk.FLAT, bd=0,
                     font=("Segoe UI", font_size, "bold"), cursor="hand2", **kw)
+    # Apply colors after creation (ttkbootstrap patches tk.Button constructor)
+    btn.configure(bg=bg, fg=fg, activebackground=_darken(bg),
+                  activeforeground=fg, padx=12, pady=5)
     btn.bind("<Enter>", lambda _: btn.configure(bg=_darken(bg)))
     btn.bind("<Leave>", lambda _: btn.configure(bg=bg))
     return btn
@@ -167,8 +169,7 @@ def _section(parent, title: str) -> tk.Frame:
     outer = tk.Frame(parent, bg=_BG)
     outer.pack(fill=tk.X, padx=20, pady=(0, 12))
 
-    card = tk.Frame(outer, bg=_SURFACE,
-                    highlightbackground=_DIVIDER, highlightthickness=1)
+    card = tk.Frame(outer, bg=_SURFACE, highlightthickness=0)
     card.pack(fill=tk.X)
 
     tk.Frame(card, width=4, bg=_PRIMARY).pack(side=tk.LEFT, fill=tk.Y)
@@ -266,8 +267,7 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
     id_outer = tk.Frame(inner, bg=_BG)
     id_outer.pack(fill=tk.X, padx=20, pady=(0, 12))
 
-    id_card = tk.Frame(id_outer, bg=_HERO_BG,
-                       highlightbackground=_HERO_BG, highlightthickness=1)
+    id_card = tk.Frame(id_outer, bg=_HERO_BG, highlightthickness=0)
     id_card.pack(fill=tk.X)
 
     id_body = tk.Frame(id_card, bg=_HERO_BG, padx=24, pady=18)
@@ -363,12 +363,25 @@ def build_about_tab(frame: ttk.Frame, app: "App") -> None:
     check_btn = _mat_btn(upd_inner, "Check Now", _do_check, _BTN_PRIMARY, font_size=9)
     check_btn.pack(anchor=tk.W)
 
-    # Run auto-check in background if enabled
+    # Run auto-check in background if enabled.  The `inner.after()` call
+    # can fail in two cases:
+    #   1. The widget was destroyed while we were sleeping (tests, app
+    #      closed during the 2-second delay).
+    #   2. We are running under a pytest session where no Tk mainloop is
+    #      actually serving — ``after()`` tries to register a Tcl command
+    #      and raises ``RuntimeError: main thread is not in main loop``.
+    # Swallow both so the app / test session stays clean.
+    def _auto_check_bg() -> None:
+        import time as _time
+        _time.sleep(2)
+        try:
+            if inner.winfo_exists():
+                inner.after(0, _do_check)
+        except Exception:
+            pass
+
     if app.auto_update_var.get():
-        threading.Thread(target=lambda: (
-            __import__("time").sleep(2),   # small delay so UI is fully loaded first
-            inner.after(0, _do_check),
-        ), daemon=True).start()
+        threading.Thread(target=_auto_check_bg, daemon=True).start()
 
     # ── 3. Privacy Policy card ────────────────────────────────────────────
     priv_inner = _section(inner, "Privacy Policy")

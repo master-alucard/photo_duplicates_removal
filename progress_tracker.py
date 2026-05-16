@@ -13,6 +13,7 @@ ETA strategy:
 from __future__ import annotations
 
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -65,9 +66,15 @@ class PhaseTracker:
         self._phases: list[_PhaseInfo] = []
         self._current_idx: int = -1
         self._total_weight: int = 0
-        self._speed_samples: list[tuple[float, int]] = []  # (timestamp, cumulative_done)
+        # Wider window than the previous 30: BK-tree iterations in the
+        # Comparing phase have very non-uniform cost (uniform-image clusters
+        # blow up candidate lists by 100×), so a longer window smooths the
+        # rate estimate and keeps the displayed ETA from ricocheting.
+        self._speed_samples: deque[tuple[float, int]] = deque(maxlen=60)  # (timestamp, cumulative_done)
         # Track completed phase durations for better cross-phase projection
         self._completed_time_per_weight: list[float] = []
+        # Asymmetric damping state for the displayed ETA — see eta_seconds.
+        self._last_eta: Optional[float] = None
 
         for name in phases:
             w = PHASE_WEIGHTS.get(name, _DEFAULT_WEIGHT)
@@ -93,6 +100,9 @@ class PhaseTracker:
         phase.status = "active"
         self._current_idx = idx
         self._speed_samples.clear()
+        # A new phase means the previous ETA shape is no longer relevant —
+        # let the next eta_seconds() pick up the raw value without damping.
+        self._last_eta = None
 
     def update(self, done_units: int) -> None:
         """Update progress in the current phase."""
@@ -102,9 +112,7 @@ class PhaseTracker:
         phase.done_units = min(done_units, phase.total_units)
         now = time.monotonic()
         self._speed_samples.append((now, done_units))
-        # Keep only the last 30 samples for speed estimation
-        if len(self._speed_samples) > 30:
-            self._speed_samples.pop(0)
+        # deque(maxlen=30) auto-evicts oldest — no pop(0) O(n) needed
 
     def notify_gap(self, gap_seconds: float) -> None:
         """Compensate for a detected time gap (e.g., system sleep/hibernate).
@@ -119,6 +127,9 @@ class PhaseTracker:
         if phase.start_time > 0:
             phase.start_time += gap_seconds
         self._speed_samples.clear()
+        # A long sleep gap makes the previously displayed ETA meaningless —
+        # discard it so the next reading is fresh.
+        self._last_eta = None
 
     def finish_phase(self) -> None:
         """Mark the current phase as finished."""
@@ -221,7 +232,24 @@ class PhaseTracker:
             avg_tpw = max(avg_tpw, _MIN_SECS_PER_WEIGHT)
             eta_future = remaining_weight * avg_tpw
 
-        return max(0.0, eta_current + eta_future)
+        raw_eta = max(0.0, eta_current + eta_future)
+
+        # Asymmetric damping.  Without this, the displayed ETA jumps from
+        # "1m 30s" to "12m" when the Comparing phase hits a uniform cluster
+        # whose BK-tree candidate list is 100× the median.  We accept *good*
+        # news (faster than expected) almost in full but smooth *bad* news
+        # over several updates, so the number drifts up instead of jumping.
+        if self._last_eta is None:
+            self._last_eta = raw_eta
+            return raw_eta
+        if raw_eta > self._last_eta:
+            # ETA rising — weight strongly toward the previous value.
+            smoothed = 0.8 * self._last_eta + 0.2 * raw_eta
+        else:
+            # ETA falling — accept the improvement more readily.
+            smoothed = 0.5 * self._last_eta + 0.5 * raw_eta
+        self._last_eta = smoothed
+        return smoothed
 
     @property
     def phase_summaries(self) -> list[dict]:
@@ -267,6 +295,22 @@ class PhaseTracker:
             mins = minutes % 60
             return f"~{hours}h {mins}m"
         return f"~{minutes}m {seconds}s"
+
+    @property
+    def current_speed(self) -> float:
+        """Estimated current processing speed in units/sec (sliding window).
+
+        Returns 0.0 if there are not enough samples yet.
+        """
+        if len(self._speed_samples) < 2:
+            return 0.0
+        t0, u0 = self._speed_samples[0]
+        t1, u1 = self._speed_samples[-1]
+        dt = t1 - t0
+        du = u1 - u0
+        if dt < 0.1 or du <= 0:
+            return 0.0
+        return du / dt
 
     @property
     def current_phase_name(self) -> str:

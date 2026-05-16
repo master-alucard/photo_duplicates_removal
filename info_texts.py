@@ -278,21 +278,6 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "Files remain in their original locations until you click 'Accept & Move'.\n\n"
         "Recommended: ON for first-time use of a new source folder."
     ),
-    "organize_by_date": (
-        "Organize Output by Date",
-        "When enabled, moved files are placed into date-named subfolders inside "
-        "results/ and trash/ instead of a flat folder.\n\n"
-        "The date is taken from (in order of preference):\n"
-        "  1. EXIF DateTimeOriginal (actual capture time)\n"
-        "  2. Date embedded in the filename (e.g. IMG_20240315_...)\n"
-        "  3. File modification time (fallback)\n\n"
-        "Example with format '%Y-%m':\n"
-        "  results/2024-03/IMG_1234.jpg\n"
-        "  results/2024-05/IMG_5678.jpg\n"
-        "  trash/2024-03/IMG_1234_thumb.jpg\n\n"
-        "Useful for building a date-organized photo library from a messy folder.\n\n"
-        "Recommended: OFF unless you want to reorganize by date."
-    ),
     "date_folder_format": (
         "Date Folder Format",
         "strftime format string used to name the date subfolders.\n\n"
@@ -301,7 +286,7 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "  %Y/%m      → 2024/03  (nested year/month folders)\n"
         "  %Y-%m-%d   → 2024-03-15  (one folder per day)\n"
         "  %Y         → 2024  (one folder per year)\n\n"
-        "Only used when 'Organize Output by Date' is enabled."
+        "Used by the Organize-by-Date tab to name each subfolder."
     ),
     "ambiguous_detection": (
         "Ambiguous Match Detection",
@@ -334,5 +319,150 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "Advanced mode exposes all detection parameters, keep strategy, metadata "
         "options, and filter settings.\n\n"
         "Your settings are preserved when switching between modes."
+    ),
+
+    # ── Organize by Date tab ──────────────────────────────────────────────
+    "date_org_op": (
+        "Move vs Copy",
+        "Choose how files are placed into date subfolders:\n\n"
+        "  • Move — relocates the file (source folder is changed). "
+        "Faster on the same drive, but the original layout is lost.\n"
+        "  • Copy — duplicates the file into the destination, leaving the "
+        "source untouched. Twice the disk space, but completely non-destructive.\n\n"
+        "Tip: Use 'Copy' the first time you organize a folder, verify the result, "
+        "then run again with 'Move' if you're happy."
+    ),
+    "date_org_in_place": (
+        "Organize in Place vs to Output",
+        "  • Organize in original folder — date subfolders are created inside "
+        "the source folder itself. Best for libraries already in place that "
+        "you want to tidy without moving them anywhere.\n"
+        "  • Use a separate destination — files are placed in a clean output "
+        "folder. The source folder is left as a flat list (when copying) or "
+        "emptied (when moving).\n\n"
+        "When 'Copy' is selected, the source folder is never modified."
+    ),
+    "date_org_use_exif": (
+        "Use EXIF DateTimeOriginal",
+        "Highest-priority date source — actual capture time stored by the camera. "
+        "Available for JPEG, TIFF, and most RAW formats from real cameras.\n\n"
+        "Falls back to 'Filename date' or 'File modified time' if the EXIF tag is "
+        "missing or unreadable.\n\n"
+        "Recommended: ON for camera/phone photo libraries."
+    ),
+    "date_org_use_filename": (
+        "Use Filename Date",
+        "Second-priority date source — extracts dates embedded in filenames such as "
+        "IMG_20240315_120000.jpg, Screenshot_2024-03-15.png, or VID_20240315.mov.\n\n"
+        "Useful for screenshots, scanned photos, and downloaded files where EXIF "
+        "is missing but the filename contains a date.\n\n"
+        "Recommended: ON."
+    ),
+    "date_org_use_mtime": (
+        "Use File Modified Time",
+        "Last-resort date source — uses the file's last modification timestamp "
+        "from the filesystem. Always available but unreliable: copying or "
+        "transferring files often resets mtime to the date of the copy.\n\n"
+        "Disable this if you prefer files with no detectable date to land in "
+        "the 'unknown date' folder rather than under the wrong year.\n\n"
+        "Recommended: ON as a fallback, OFF if you only trust EXIF."
+    ),
+    "date_org_unknown_folder": (
+        "Unknown Date Folder Name",
+        "Subfolder name used for files where every enabled date source returned "
+        "nothing (no EXIF, no filename date, mtime disabled or unreadable).\n\n"
+        "Default: 'unknown_date'.\n\n"
+        "Use a name that's easy to spot afterwards so you can manually sort "
+        "those files later if needed."
+    ),
+    "date_org_conflict": (
+        "Conflict Policy",
+        "What to do when a file with the same name already exists in the target "
+        "date subfolder:\n\n"
+        "  • Rename — append _1, _2, … to the new file's stem (default, safe).\n"
+        "  • Skip — leave the existing file in place; the source file is NOT moved.\n"
+        "  • Overwrite — delete the existing file and replace it.\n\n"
+        "Recommended: Rename for safety. Use Overwrite only when re-running on "
+        "the same source folder where you trust the source is authoritative."
+    ),
+    "date_org_recursive": (
+        "Recursive Subfolder Scan",
+        "When enabled, every subfolder under the source folder is scanned and "
+        "all matching files get organized into the destination.\n\n"
+        "When disabled, only the top-level directory is scanned.\n\n"
+        "Recommended: ON for messy collections, OFF for one-folder cleanup."
+    ),
+    "date_org_include_raw": (
+        "Include RAW Files",
+        "When enabled, RAW formats (CR2, CR3, NEF, ARW, DNG, RAF, ORF, RW2, "
+        "PEF, SRW, X3F, 3FR) are organized alongside JPEG/PNG.\n\n"
+        "When disabled, RAW files are left exactly where they are.\n\n"
+        "Tip: Keep this ON together with 'Move sidecars (.xmp/.aae)' so RAW "
+        "edits stay attached to their RAW files."
+    ),
+    "date_org_move_sidecars": (
+        "Move/Copy Sidecars (.xmp / .aae)",
+        "When enabled, .xmp (RAW edit metadata) and .aae (iPhone Live Photo / "
+        "edit metadata) files that share an image's stem are relocated alongside "
+        "the image file.\n\n"
+        "Without this, your RAW edits and Live Photo metadata would be left "
+        "behind in the source folder when you organize.\n\n"
+        "Recommended: ON."
+    ),
+    "date_org_dry_run": (
+        "Dry Run (Preview Only)",
+        "When enabled, NO files are moved or copied. The operation runs to "
+        "completion and reports exactly what would happen, so you can verify "
+        "the date detection and target folders before committing.\n\n"
+        "Disable this checkbox to actually perform the operation.\n\n"
+        "The first time you organize a folder, leave Dry Run ON, scan, then "
+        "review the per-folder counts before turning it OFF."
+    ),
+    "include_videos": (
+        "Find Video Duplicates",
+        "When enabled, the scan also looks for duplicate video files in the "
+        "source folder.\n\n"
+        "Video duplicates are detected by exact file size — two videos with an "
+        "identical byte count are almost certainly the same file.  Optionally, "
+        "a thumbnail frame is also compared to improve confidence (see "
+        "\"Compare thumbnail frames\" below).\n\n"
+        "Supported formats: MP4, MOV, AVI, MKV, WMV, M4V, WebM, FLV, 3GP, "
+        "TS/MTS/M2TS, MPG/MPEG, and more.\n\n"
+        "Tip: frame comparison requires ffmpeg on PATH or OpenCV installed.  "
+        "Without either, size-only comparison is used automatically."
+    ),
+    "video_match_format": (
+        "Match Same Video Format",
+        "Two videos must share the same file extension (e.g. both .mp4) to be "
+        "flagged as duplicates.\n\n"
+        "Disabling this allows cross-format matches (e.g. an .mp4 and an .mov of "
+        "the same byte length) but is rarely useful in personal libraries — videos "
+        "in different containers almost always differ in encoded byte count.\n\n"
+        "Default: ON.  At least one of \"Match format\" or \"Match file size\" must "
+        "be enabled."
+    ),
+    "video_match_size": (
+        "Match Exact File Size",
+        "Two videos must have an identical byte count to be flagged as duplicates.\n\n"
+        "This is the strongest signal of duplication for video files in a personal "
+        "library — re-encoding a video almost always changes its size, so two clips "
+        "with the same byte count are nearly always the same file.\n\n"
+        "Default: ON.  At least one of \"Match format\" or \"Match file size\" must "
+        "be enabled."
+    ),
+    "video_use_thumb": (
+        "Compare Thumbnail Frames",
+        "When enabled and \"Find video duplicates\" is on, the scanner extracts "
+        "a short frame from each same-size video and computes its perceptual hash "
+        "(pHash).\n\n"
+        "Videos with identical size but visually different thumbnails (e.g. two "
+        "different videos that happen to be the same number of bytes) are NOT "
+        "grouped together — only size-identical videos with similar frames are "
+        "reported as duplicates.\n\n"
+        "Frame extraction uses ffmpeg (if available on PATH) or OpenCV (if "
+        "installed).  If neither is found, size-only comparison is used "
+        "automatically and this option has no effect.\n\n"
+        "Disable this if you trust exact file size as sufficient evidence, or if "
+        "frame extraction is slow on your machine."
     ),
 }

@@ -5,18 +5,41 @@ series detection, RAW companion matching, and pause/resume support.
 """
 from __future__ import annotations
 
+import datetime
 import os
+import sys as _sys
+import time as _time
 from collections import defaultdict
 import numpy as _np
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Literal, Optional
 
+# ── Recursion-depth safety net ───────────────────────────────────────────────
+# Raise Python's default 1 000-frame recursion limit when scanning very large
+# image collections.  Most code paths in this module are iterative (BK-tree
+# query/insert, _split_oversized_bucket work-queue, union-find with path
+# compression), but defensive numerics inside dependencies (numpy / Pillow
+# format plugins) and any future contributor mistakes still benefit from a
+# bigger headroom on a 64-bit Python.  The chosen value is well below the
+# native C-stack limit on Windows / Linux / macOS so we won't blow the stack.
+_MIN_RECURSION_LIMIT = 5000
+try:
+    if _sys.getrecursionlimit() < _MIN_RECURSION_LIMIT:
+        _sys.setrecursionlimit(_MIN_RECURSION_LIMIT)
+except Exception:
+    # setrecursionlimit can fail on exotic interpreters — keep the default.
+    pass
+
 from PIL import Image, ImageOps
 import imagehash
 
 from config import Settings
-from metadata import extract_date_from_filename, extract_date_from_exif
+from metadata import (
+    extract_date_from_filename,
+    extract_date_from_exif,
+    extract_date_from_exif_from_img,
+)
 
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tiff", ".tif", ".gif", ".heic", ".heif",
@@ -25,6 +48,12 @@ IMAGE_EXTENSIONS = {
 RAW_EXTENSIONS = {
     ".cr2", ".cr3", ".nef", ".arw", ".dng", ".raf", ".orf",
     ".rw2", ".pef", ".srw", ".x3f", ".3fr",
+}
+
+VIDEO_EXTENSIONS = {
+    ".mp4", ".mov", ".avi", ".mkv", ".wmv", ".m4v", ".webm",
+    ".flv", ".3gp", ".ts", ".mts", ".m2ts", ".mpg", ".mpeg",
+    ".rm", ".rmvb", ".vob", ".divx", ".asf", ".f4v",
 }
 
 KeepStrategy = Literal["pixels", "oldest"]
@@ -38,8 +67,10 @@ ProgressCb = Callable[[str, int, int, str], None]
 _EXACT_DUP_PHASH = 2
 
 # Use BK-tree candidate filtering when the collection exceeds this size.
-# Below this threshold the O(n²) brute-force is fast enough.
-_BKTREE_THRESHOLD = 200
+# Lowered from 200: BK-tree is O(n log n) vs brute-force O(n²), and 50 images
+# is already enough to see a speedup. 200 was leaving medium-sized scans on the
+# slow path unnecessarily.
+_BKTREE_THRESHOLD = 50
 
 # When comparing RAW vs JPEG file dimensions, allow up to this relative
 # difference before declaring them "different resolutions".  rawpy decodes
@@ -48,20 +79,51 @@ _BKTREE_THRESHOLD = 200
 # 2 % is a safe upper bound that still distinguishes full-res from downscaled.
 _CROSS_FORMAT_DIM_TOL = 0.02
 
-# Relaxed histogram-intersection floor for cross-format pairs (RAW vs JPEG).
-# Same-shot RAW vs camera JPEG typically achieves hist_sim ≥ 0.40 despite
-# different colour rendering / tone curves.  Genuinely different images
-# (different subjects, scenes) fall well below 0.25.  Without this floor,
-# the lenient cross-format pHash threshold (10 bits) can group unrelated
-# images that happen to share similar spatial-frequency structure.
-_CROSS_FORMAT_HIST_FLOOR = 0.25
+# Cross-format histogram floor — DISABLED (set to 0.0).
+#
+# Rationale: rawpy's default postprocess(use_camera_wb=True, output_bps=8)
+# maps sensor data linearly to 8-bit without the camera's tone curve / S-curve,
+# producing images ~2× brighter (brightness ≈ 196/255) compared to the
+# camera-generated JPEG (brightness ≈ 92/255).  This brightness difference
+# collapses histogram intersection to 0.000–0.243 for true same-shot RAW+JPEG
+# pairs — all below the former floor of 0.25 — causing every cross-format
+# duplicate to be missed.
+#
+# The pHash + cross_format_threshold_factor guards already handle false-positive
+# discrimination (different scenes always have pHash distance > 10 bits).
+_CROSS_FORMAT_HIST_FLOOR = 0.0
+
+# ── Hashing performance constants ────────────────────────────────────────────
+#
+# Pre-downscale every image to at most _HASH_WORKING_SIZE pixels on its longest
+# side before hashing.  imagehash.phash internally resizes to 32×32 (LANCZOS)
+# anyway; starting from 1024-max is ~40× faster than starting from 24 MP and
+# produces numerically-equivalent hashes (≤ 1-bit drift, well below detection
+# thresholds).  Memory per thread drops from ~300 MB to ~6 MB for RAW/24MP JPEG.
+_HASH_WORKING_SIZE = 1024
+
+# When the scan folder lives on an HDD (seek-sensitive), cap parallel readers to
+# this value to prevent seek-thrash and reduce disk overheating.  Purely CPU-bound
+# work (pHash on a pre-downscaled image) is light enough that 4 threads saturate
+# a modern SSD / NVMe without thrashing an HDD (2 sequential decoders + 2 CPU-only
+# workers is a good balance for mixed drives).  Users with slow spinning disks can
+# override via Settings → scan_threads = 1.
+_HDD_THREAD_CAP = 4
 
 
 # ── BK-tree for fast nearest-neighbour hash lookup ────────────────────────────
 
 def _hamming(a: int, b: int) -> int:
-    """Popcount of XOR — counts differing bits between two integers."""
-    return bin(a ^ b).count('1')
+    """Popcount of XOR — counts differing bits between two integers.
+
+    Uses int.bit_count() (Python 3.11+) which is implemented in C and
+    ~3× faster than the equivalent ``bin(a ^ b).count('1')`` string path.
+    Falls back to the string path on older interpreters so tests pass on 3.10.
+    """
+    try:
+        return (a ^ b).bit_count()
+    except AttributeError:  # Python < 3.11
+        return bin(a ^ b).count('1')
 
 
 class _BKTree:
@@ -126,6 +188,14 @@ class ImageRecord:
     phash_r90:  "Optional[imagehash.ImageHash]" = None
     phash_r180: "Optional[imagehash.ImageHash]" = None
     phash_r270: "Optional[imagehash.ImageHash]" = None
+    # Video flag — True for records created by collect_videos().  width/height=0,
+    # phash holds the thumbnail frame hash (or zero-hash if extraction failed).
+    is_video: bool = False
+    # EXIF capture date/time (DateTimeOriginal).  None when unavailable (RAW postprocess
+    # path, PNG, non-EXIF formats, old library cache entries).  Used by the cross-format
+    # date guard in _can_be_similar to prevent same-subject photos from different days
+    # from being chained into one group via the lenient cross-format pHash threshold.
+    exif_date: "Optional[datetime.datetime]" = None
 
     @property
     def pixels(self) -> int:
@@ -136,12 +206,17 @@ class ImageRecord:
         return f"{mb:.2f} MB" if mb >= 1 else f"{self.file_size // 1024} KB"
 
     def dim_label(self) -> str:
+        if self.is_video:
+            return "Video"
         mp = self.pixels / 1_000_000
         return f"{self.width}x{self.height}  ({mp:.1f} MP)"
 
     def date_label(self) -> str:
         import datetime
-        return datetime.datetime.fromtimestamp(self.mtime).strftime("%Y-%m-%d %H:%M")
+        try:
+            return datetime.datetime.fromtimestamp(self.mtime).strftime("%Y-%m-%d %H:%M")
+        except (OSError, OverflowError, ValueError):
+            return "Unknown date"
 
 
 @dataclass
@@ -159,29 +234,77 @@ def _compute_histogram(img: Image.Image) -> list[float]:
     """
     Compute a 96-value normalized histogram (32 bins x 3 RGB channels).
     Returns values in [0.0, 1.0] range (per-channel sum = 1.0).
+
+    Vectorized via numpy: ~6× faster than the equivalent pure-Python loop for
+    the 768-element input that PIL.Image.histogram() produces.
     """
     if img.mode != "RGB":
         img = img.convert("RGB")
 
-    raw = img.histogram()   # 256 values per channel = 768 total
-    result: list[float] = []
-
-    for channel in range(3):
-        channel_data = raw[channel * 256: (channel + 1) * 256]
-        total = sum(channel_data) or 1
-        # Downsample 256 bins -> 32 bins (merge 8 adjacent bins)
-        for bin_start in range(0, 256, 8):
-            bin_val = sum(channel_data[bin_start: bin_start + 8]) / total
-            result.append(bin_val)
-
-    return result
+    raw = img.histogram()   # 768 values: 256 per channel
+    # Reshape to (3, 256), normalize each channel to sum=1, then bin 256→32
+    arr = _np.array(raw, dtype=_np.float32).reshape(3, 256)
+    totals = arr.sum(axis=1, keepdims=True).clip(min=1)
+    arr /= totals
+    # Downsample 256 bins → 32 bins (sum 8 adjacent bins per bucket)
+    binned = arr.reshape(3, 32, 8).sum(axis=2)
+    return binned.ravel().tolist()
 
 
 def _compute_brightness(img: Image.Image) -> float:
     """Return mean pixel brightness 0.0-255.0."""
-    import numpy as np
-    gray = img.convert("L")
-    return float(np.asarray(gray, dtype=np.float32).mean())
+    gray = img if img.mode == "L" else img.convert("L")
+    return float(_np.asarray(gray, dtype=_np.float32).mean())
+
+
+# ── thread-count resolution ──────────────────────────────────────────────────
+
+def _resolve_thread_count(settings: Settings, folder: Path) -> int:
+    """Determine hashing thread count from settings + drive type of *folder*.
+
+    Priority:
+      1. ``settings.scan_threads > 0`` → user's explicit override (respected as-is).
+      2. ``settings.io_parallelism == "ssd"`` → full CPU parallelism (for NVMe / SATA SSD).
+      3. ``settings.io_parallelism == "hdd"`` → single reader (for HDD / network drives).
+      4. ``settings.io_parallelism == "auto"`` (default) → probe the drive type
+         and cap at ``settings.hdd_thread_cap`` (default 2) when the drive is
+         ``fixed`` / ``removable`` / ``network`` / ``unknown``.
+
+    Why ``fixed`` is treated as possibly-HDD: on Windows, both HDDs and SSDs
+    report as ``fixed`` via ``GetDriveTypeW`` — there is no reliable cheap
+    detection.  The cap of 2 threads still saturates an SSD for pHash work
+    (which is CPU-bound after pre-downscaling) while completely eliminating
+    HDD seek-thrash and thermal load.  Users with SSD can override by setting
+    ``io_parallelism="ssd"`` in Settings or by setting ``scan_threads`` to
+    their preferred value.
+    """
+    import os as _os
+    cpu_n = max(1, (_os.cpu_count() or 1))
+
+    explicit = getattr(settings, "scan_threads", 0) or 0
+    if explicit > 0:
+        return min(explicit, cpu_n * 2)  # cap against insane values
+
+    mode = getattr(settings, "io_parallelism", "auto")
+    hdd_cap = max(1, int(getattr(settings, "hdd_thread_cap", _HDD_THREAD_CAP)))
+
+    if mode == "ssd":
+        return cpu_n
+    if mode == "hdd":
+        return 1
+
+    # "auto" — probe drive type
+    try:
+        from library import get_drive_info
+        dt = get_drive_info(folder).drive_type
+    except Exception:
+        dt = "unknown"
+
+    # Spinning / networked / unknown → conservative cap.
+    # NVMe/SATA SSDs still return "fixed" on Windows; we prefer the safe default.
+    if dt in ("fixed", "removable", "network", "unknown", "cdrom"):
+        return min(cpu_n, hdd_cap)
+    return cpu_n
 
 
 # ── collection ───────────────────────────────────────────────────────────────
@@ -262,28 +385,70 @@ def collect_images(
     # Build stem -> record map for RAW companion matching
     stem_to_record: dict[tuple[Path, str], ImageRecord] = {}
 
-    n_threads = getattr(settings, "scan_threads", 1)
-    if n_threads == 0:
-        import os as _os
-        n_threads = max(1, (_os.cpu_count() or 1))
+    n_threads = _resolve_thread_count(settings, folder)
 
-    # Tracks (path, ImageRecord) pairs that were freshly hashed (not from cache)
-    # so we can write them back into library_cache after collection.
-    _freshly_hashed: "list[tuple[Path, ImageRecord]]" = []
+    # Pre-resolve every path once in the main thread so worker threads never call
+    # path.resolve() (which on Windows invokes GetFinalPathNameByHandleW — a
+    # syscall per file) under thread-pool contention.  For N=10,000 files this
+    # saves several seconds of cumulative syscall overhead; for N=100k it can
+    # save 30–60 s.
+    resolved_strs: "list[str]" = [str(p.resolve()) for p in all_image_paths]
+    # Derive parent Paths from resolved strings — string slicing, no syscall.
+    parent_resolved: "list[Path]" = [Path(s).parent for s in resolved_strs]
+
+    # Tracks (resolved_str, ImageRecord) pairs that were freshly hashed (not from
+    # cache) so we can write them back into library_cache after collection.
+    _freshly_hashed: "list[tuple[str, ImageRecord]]" = []
 
     def _hash_one(args: tuple) -> "tuple[int, Path, Optional[ImageRecord], Optional[Exception], bool]":
-        """Returns (index, path, record, exception, was_cache_hit)."""
+        """Hash worker.
+
+        Checks stop_flag at entry so cancelled-but-queued futures exit almost
+        immediately without touching the disk.  In-flight tasks already past
+        the check finish their current file (at most ``n_threads`` files).
+        """
         i, path = args
 
+        # ── early-exit on stop/pause (fast path — don't even stat the file) ──
+        if (stop_flag and stop_flag[0]) or (pause_flag and pause_flag[0]):
+            return i, path, None, None, False
+
         # ── cache lookup ──────────────────────────────────────────────────
+        # Use the pre-resolved string (computed once in the main thread) instead
+        # of calling path.resolve() here — eliminates a syscall per worker call.
         if library_cache is not None:
-            cached = library_cache.get(str(path.resolve()))
+            cached = library_cache.get(resolved_strs[i])
             if cached is not None:
-                if trust_library or not cached.is_stale(path):
-                    try:
-                        return i, path, cached.to_image_record(), None, True
-                    except Exception:
-                        pass  # corrupted cache entry → fall through to fresh hash
+                # For RAW files, invalidate cache entries that were hashed with
+                # a different raw_use_embedded_thumb setting to prevent stale
+                # hashes after the user toggles the fast-path option.
+                _ext = path.suffix.lower()
+                if _ext in RAW_EXTENSIONS:
+                    _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
+                    if cached.hash_mode != _expected_mode:
+                        cached = None
+                # Rotation hashes are unconditional in the current hasher; an
+                # empty phash_r90 means the entry was written by a pre-rotation
+                # code version.  Treat as stale so rotated duplicates aren't
+                # silently missed after the user upgrades.  Respects
+                # trust_library: when the user has explicitly said "trust this
+                # cache, skip freshness checks", we honor it.  ``getattr`` keeps
+                # us safe against fake cache stubs used in tests.
+                if (
+                    cached is not None
+                    and not trust_library
+                    and not getattr(cached, "phash_r90", None)
+                ):
+                    cached = None
+            if cached is not None and (trust_library or not cached.is_stale(path)):
+                try:
+                    return i, path, cached.to_image_record(), None, True
+                except Exception:
+                    pass  # corrupted cache entry → fall through to fresh hash
+
+        # Check again after cache lookup — the stat() in is_stale() can be slow
+        if (stop_flag and stop_flag[0]) or (pause_flag and pause_flag[0]):
+            return i, path, None, None, False
 
         # ── fresh hash (with single retry for stale handles after sleep) ──
         try:
@@ -311,7 +476,8 @@ def collect_images(
         from concurrent.futures import ThreadPoolExecutor, as_completed
         futures = {}
         completed = 0
-        with ThreadPoolExecutor(max_workers=n_threads) as pool:
+        pool = ThreadPoolExecutor(max_workers=n_threads)
+        try:
             for i, path in enumerate(all_image_paths):
                 if stop_flag and stop_flag[0]:
                     break
@@ -321,10 +487,20 @@ def collect_images(
 
             ordered: dict[int, Optional[ImageRecord]] = {}
             ordered_cache_hit: dict[int, bool] = {}
+            _interrupted = False
+            # Rate-limit progress callbacks: emit at most 20 updates/sec.
+            # Without this, a warm library cache can produce 10,000+ callbacks/sec
+            # which — in the old root.after(0, ...) pattern — hammered the Tcl
+            # lock.  Even with the new poll-ticker, limiting to 20/sec keeps the
+            # main thread free for UI events.
+            _last_cb: float = 0.0
+            _CB_INTERVAL: float = 0.05  # seconds between progress updates
             for fut in as_completed(futures):
                 if stop_flag and stop_flag[0]:
+                    _interrupted = True
                     break
                 if pause_flag and pause_flag[0]:
+                    _interrupted = True
                     break
                 try:
                     idx, path, rec, exc, was_cache_hit = fut.result()
@@ -333,24 +509,38 @@ def collect_images(
                     continue
                 completed += 1
                 if progress_cb:
-                    progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                    _now = _time.monotonic()
+                    if _now - _last_cb >= _CB_INTERVAL or completed == total:
+                        progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                        _last_cb = _now
                 if exc is not None:
                     if failed_paths is not None:
                         failed_paths.append(path)
-                else:
+                elif rec is not None:
                     ordered[idx] = rec
                     ordered_cache_hit[idx] = was_cache_hit
+
+            if _interrupted:
+                # Cancel queued futures immediately — do NOT wait for in-flight
+                # to drain (in-flight tasks check the flag at entry and return
+                # quickly anyway, so wait=True below is near-instant).
+                pool.shutdown(wait=False, cancel_futures=True)
+        finally:
+            # Idempotent — drains the (now empty or fast-exiting) queue.
+            pool.shutdown(wait=True)
 
         for idx in sorted(ordered):
             rec = ordered[idx]
             if rec is None:
                 continue
             records.append(rec)
-            stem_key = (all_image_paths[idx].parent.resolve(), all_image_paths[idx].stem.lower())
+            stem_key = (parent_resolved[idx], all_image_paths[idx].stem.lower())
             stem_to_record[stem_key] = rec
             if not ordered_cache_hit.get(idx, True):
-                _freshly_hashed.append((all_image_paths[idx], rec))
+                _freshly_hashed.append((resolved_strs[idx], rec))
     else:
+        _last_cb_seq: float = 0.0
+        _CB_INTERVAL_SEQ: float = 0.05
         for i, path in enumerate(all_image_paths):
             if stop_flag and stop_flag[0]:
                 break
@@ -358,7 +548,10 @@ def collect_images(
                 break
 
             if progress_cb:
-                progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
+                _now_seq = _time.monotonic()
+                if _now_seq - _last_cb_seq >= _CB_INTERVAL_SEQ or i + 1 == total:
+                    progress_cb(f"Hashing {path.name}", i + 1, total, "Hashing")
+                    _last_cb_seq = _now_seq
 
             try:
                 rec = None
@@ -366,14 +559,25 @@ def collect_images(
 
                 # ── cache lookup (sequential) ─────────────────────────────
                 if library_cache is not None:
-                    cached = library_cache.get(str(path.resolve()))
+                    cached = library_cache.get(resolved_strs[i])
                     if cached is not None:
-                        if trust_library or not cached.is_stale(path):
-                            try:
-                                rec = cached.to_image_record()
-                                was_cache_hit = True
-                            except Exception:
-                                rec = None  # fall through to fresh hash
+                        _ext = path.suffix.lower()
+                        if _ext in RAW_EXTENSIONS:
+                            _expected_mode = "embedded" if (settings.use_rawpy and rawpy_available and getattr(settings, "raw_use_embedded_thumb", False)) else ""
+                            if cached.hash_mode != _expected_mode:
+                                cached = None
+                        if (
+                            cached is not None
+                            and not trust_library
+                            and not getattr(cached, "phash_r90", None)
+                        ):
+                            cached = None
+                    if cached is not None and (trust_library or not cached.is_stale(path)):
+                        try:
+                            rec = cached.to_image_record()
+                            was_cache_hit = True
+                        except Exception:
+                            rec = None  # fall through to fresh hash
 
                 # ── fresh hash ────────────────────────────────────────────
                 if rec is None:
@@ -387,10 +591,10 @@ def collect_images(
                     continue
 
                 records.append(rec)
-                stem_key = (path.parent.resolve(), path.stem.lower())
+                stem_key = (parent_resolved[i], path.stem.lower())
                 stem_to_record[stem_key] = rec
                 if not was_cache_hit:
-                    _freshly_hashed.append((path, rec))
+                    _freshly_hashed.append((resolved_strs[i], rec))
 
             except Exception as exc:
                 if progress_cb:
@@ -413,11 +617,15 @@ def collect_images(
     if library_cache is not None and _freshly_hashed:
         try:
             from library import FileRecord as _FileRecord
-            for fh_path, fh_rec in _freshly_hashed:
+            for fh_resolved, fh_rec in _freshly_hashed:
                 try:
-                    st_mtime = fh_path.stat().st_mtime
-                    library_cache[str(fh_path.resolve())] = _FileRecord.from_image_record(
-                        fh_rec, st_mtime=st_mtime
+                    st_mtime = Path(fh_resolved).stat().st_mtime
+                    _fh_ext = Path(fh_resolved).suffix.lower()
+                    _fh_mode = ""
+                    if _fh_ext in RAW_EXTENSIONS and settings.use_rawpy and rawpy_available:
+                        _fh_mode = "embedded" if getattr(settings, "raw_use_embedded_thumb", False) else ""
+                    library_cache[fh_resolved] = _FileRecord.from_image_record(
+                        fh_rec, st_mtime=st_mtime, hash_mode=_fh_mode
                     )
                 except Exception:
                     pass  # best-effort; don't let a stat failure abort the scan
@@ -427,9 +635,71 @@ def collect_images(
     return records
 
 
+def _downscaled_for_hashing(img: "Image.Image") -> "Image.Image":
+    """Return *img* downscaled in-place to at most ``_HASH_WORKING_SIZE`` pixels
+    on its longest side (preserving aspect ratio), or the original unchanged if
+    it already fits within that size.
+
+    imagehash.phash will further downscale this to 32×32 via LANCZOS.  Starting
+    from 1024-max instead of the full-res image saves ~40× on rotation hashes
+    with ≤ 1-bit drift on the final 64-bit pHash (well below any threshold).
+
+    IMPORTANT: this mutates *img* when a resize is needed.  Callers must capture
+    width/height and any other data from *img* BEFORE calling this function and
+    must not use the original image object for anything else afterwards.  Both
+    ``_hash_image`` and ``_hash_raw`` already follow this contract.
+    """
+    w, h = img.size
+    if max(w, h) <= _HASH_WORKING_SIZE:
+        return img
+    # thumbnail() operates in-place — no copy needed; saves ~6 MB per thread
+    # on 24 MP images and eliminates one full decompressed-buffer allocation.
+    img.thumbnail((_HASH_WORKING_SIZE, _HASH_WORKING_SIZE), Image.LANCZOS)
+    return img
+
+
 def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
-    """Open a regular image and compute all hash/feature data."""
+    """Open a regular image and compute all hash/feature data.
+
+    Performance notes:
+      • JPEG draft mode: ``img.draft("RGB", (W, H))`` is called immediately
+        after ``Image.open()`` (before any pixel access).  For a 24 MP JPEG
+        libjpeg will decode at 1/8 scale, reducing decode time by ~4-8× and
+        memory by ~64×.  The downscaled image is visually identical to the
+        full-res source for pHash purposes.
+      • The image is pre-downscaled to ``_HASH_WORKING_SIZE`` before any hash
+        computation — full-res 24 MP buffers are never held in RAM, and the
+        three rotation hashes cost ~40× less CPU than before.
+      • EXIF metadata count is read from the already-open PIL image (no second
+        file open via count_metadata_fields(path) as in earlier versions).
+    """
     with Image.open(path) as img:
+        # Capture the declared file dimensions BEFORE draft mode is applied.
+        # img.size after Image.open() but before img.load() reads from the
+        # file header and gives the *true* source dimensions.  After draft()
+        # and load() img.size returns the smaller decoded dimensions (e.g.
+        # 3000×2000 for a 6000×4000 JPEG decoded at 1/2 scale), which would
+        # make the JPEG appear as a preview-sized copy of its NEF companion.
+        file_w, file_h = img.size
+
+        # JPEG draft mode — must be set BEFORE the first pixel access.
+        # exif_transpose() triggers img.load() internally, so draft must
+        # come first.  Only effective for JPEG; silently ignored by other formats.
+        if getattr(img, "format", None) == "JPEG":
+            img.draft("RGB", (_HASH_WORKING_SIZE, _HASH_WORKING_SIZE))
+
+        # EXIF metadata count and capture date — read BEFORE exif_transpose, which
+        # strips the orientation tag.  EXIF is parsed from the file header during
+        # open() without triggering pixel load, so this is safe after draft().
+        metadata_count = 0
+        if settings.collect_metadata:
+            from metadata import count_metadata_fields_from_img
+            metadata_count = count_metadata_fields_from_img(img)
+
+        # Always extract EXIF date (needed for cross-format date guard regardless
+        # of collect_metadata setting).  Falls back to None for non-EXIF formats.
+        exif_date = extract_date_from_exif_from_img(img)
+
         img = ImageOps.exif_transpose(img)
         img.load()
 
@@ -438,28 +708,42 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         if img.mode in ("RGBA", "P"):
             img = img.convert("RGB")
 
-        w, h = img.size
+        draft_w, draft_h = img.size
+
+        # Recover original dimensions from the pre-draft file size, correcting
+        # for any EXIF rotation that exif_transpose() may have applied.
+        # Strategy: compare aspect ratios to detect whether w and h were swapped.
+        #   • If scale_x ≈ scale_y  → no rotation (or 180°) — use file_w, file_h.
+        #   • If scale_x ≈ draft_w/file_h → 90°/270° rotation — swap file dims.
+        if file_w > 0 and file_h > 0 and draft_w > 0 and draft_h > 0:
+            err_normal  = abs(draft_h / file_h  - draft_w / file_w)
+            err_rotated = abs(draft_h / file_w  - draft_w / file_h)
+            if err_rotated < err_normal:
+                w, h = file_h, file_w   # exif_transpose swapped width↔height
+            else:
+                w, h = file_w, file_h   # no swap (0° or 180°)
+        else:
+            w, h = draft_w, draft_h     # fallback for zero-dimension edge cases
 
         if settings.min_dimension > 0 and max(w, h) < settings.min_dimension:
             return None
 
         rgb = img if img.mode == "RGB" else img.convert("RGB")
-        ph = imagehash.phash(rgb)
-        dh = imagehash.dhash(rgb) if settings.use_dual_hash else imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
-        hist = _compute_histogram(rgb) if settings.use_histogram else []
-        brightness = _compute_brightness(rgb) if settings.dark_protection else 128.0
-        # Rotation hashes for rotation-aware duplicate detection
-        ph_r90  = imagehash.phash(rgb.rotate(90,  expand=True))
-        ph_r180 = imagehash.phash(rgb.rotate(180, expand=True))
-        ph_r270 = imagehash.phash(rgb.rotate(270, expand=True))
+        # Pre-downscale once; reuse for all pHash/dHash/histogram/brightness/rotation work.
+        work = _downscaled_for_hashing(rgb)
+
+        ph = imagehash.phash(work)
+        dh = imagehash.dhash(work) if settings.use_dual_hash else imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
+        hist = _compute_histogram(work) if settings.use_histogram else []
+        brightness = _compute_brightness(work) if settings.dark_protection else 128.0
+        # Rotation hashes — rotate the downscaled working image (90°/180°/270°
+        # are exact axis flips, no interpolation needed).
+        ph_r90  = imagehash.phash(work.rotate(90,  expand=True))
+        ph_r180 = imagehash.phash(work.rotate(180, expand=True))
+        ph_r270 = imagehash.phash(work.rotate(270, expand=True))
 
     stat = path.stat()
     mtime = min(stat.st_mtime, stat.st_ctime)
-
-    metadata_count = 0
-    if settings.collect_metadata:
-        from metadata import count_metadata_fields
-        metadata_count = count_metadata_fields(path)
 
     return ImageRecord(
         path=path, width=w, height=h,
@@ -470,37 +754,95 @@ def _hash_image(path: Path, settings: Settings) -> Optional[ImageRecord]:
         histogram=hist,
         metadata_count=metadata_count,
         phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
+        exif_date=exif_date,
     )
 
 
 def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
-    """Decode a RAW file with rawpy and compute hashes."""
+    """Decode a RAW file with rawpy and compute hashes.
+
+    Fast path: try ``raw.extract_thumb()`` to get the camera's embedded JPEG
+    preview — typically ~1620×1080 and decodes in a few ms.  This is ~30-80×
+    faster than ``raw.postprocess()`` (which demosaics the full sensor).
+
+    The reported width/height always come from ``raw.sizes`` (full sensor
+    dimensions) so cross-format RAW+JPEG dimension bucketing continues to
+    work regardless of which decode path was used.
+
+    Fallback: if the RAW has no embedded thumb (rare for Canon/Nikon/Sony,
+    more common for older cameras) or extract_thumb() errors, we fall back
+    to ``raw.postprocess()`` as before.
+    """
     import rawpy  # type: ignore
-    with rawpy.imread(str(path)) as raw:
-        rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8)
-
+    import io
     from PIL import Image as PILImage
-    import numpy as np
 
-    img = PILImage.fromarray(rgb_array)
-    w, h = img.size
+    img: "Optional[Image.Image]" = None
+    full_w = 0
+    full_h = 0
 
-    if settings.min_dimension > 0 and max(w, h) < settings.min_dimension:
+    with rawpy.imread(str(path)) as raw:
+        # Full-sensor dimensions — reported regardless of thumb vs postprocess path
+        try:
+            sizes = raw.sizes
+            full_w, full_h = int(sizes.width), int(sizes.height)
+        except Exception:
+            full_w, full_h = 0, 0
+
+        if getattr(settings, "raw_use_embedded_thumb", True):
+            try:
+                thumb = raw.extract_thumb()
+                if thumb.format == rawpy.ThumbFormat.JPEG:
+                    img = PILImage.open(io.BytesIO(thumb.data))
+                    img.load()
+                elif thumb.format == rawpy.ThumbFormat.BITMAP:
+                    img = PILImage.fromarray(thumb.data)
+            except Exception:
+                img = None  # fall through to postprocess
+
+        if img is None:
+            rgb_array = raw.postprocess(use_camera_wb=True, output_bps=8)
+            img = PILImage.fromarray(rgb_array)
+            if full_w == 0 or full_h == 0:
+                full_w, full_h = img.size
+
+    # If sizes were unavailable, fall back to the decoded image's own dims
+    if full_w == 0 or full_h == 0:
+        full_w, full_h = img.size
+
+    # Extract EXIF date BEFORE mode conversion: .convert("RGB") strips metadata.
+    # For the embedded-JPEG-thumb path, img is a PIL JPEG with a full EXIF block
+    # including DateTimeOriginal.  For the postprocess path, img comes from a
+    # numpy array (no EXIF) so attempt 1 returns None and we fall back to a
+    # direct PIL open of the RAW file which may expose EXIF via a TIFF reader.
+    raw_exif_date = extract_date_from_exif_from_img(img)
+    if raw_exif_date is None:
+        raw_exif_date = extract_date_from_exif(path)
+
+    if img.mode not in ("RGB", "RGBA", "L"):
+        img = img.convert("RGB")
+    if img.mode == "RGBA":
+        img = img.convert("RGB")
+
+    if settings.min_dimension > 0 and max(full_w, full_h) < settings.min_dimension:
         return None
 
-    ph = imagehash.phash(img)
-    dh = imagehash.dhash(img)
-    hist = _compute_histogram(img)
-    brightness = _compute_brightness(img)
-    ph_r90  = imagehash.phash(img.rotate(90,  expand=True))
-    ph_r180 = imagehash.phash(img.rotate(180, expand=True))
-    ph_r270 = imagehash.phash(img.rotate(270, expand=True))
+    # Pre-downscale once for all hash/feature work.
+    work = _downscaled_for_hashing(img)
+
+    ph = imagehash.phash(work)
+    dh = imagehash.dhash(work)
+    hist = _compute_histogram(work)
+    brightness = _compute_brightness(work)
+    ph_r90  = imagehash.phash(work.rotate(90,  expand=True))
+    ph_r180 = imagehash.phash(work.rotate(180, expand=True))
+    ph_r270 = imagehash.phash(work.rotate(270, expand=True))
 
     stat = path.stat()
     mtime = min(stat.st_mtime, stat.st_ctime)
 
     return ImageRecord(
-        path=path, width=w, height=h,
+        path=path, width=full_w, height=full_h,
         file_size=stat.st_size,
         phash=ph, dhash=dh,
         mtime=mtime,
@@ -508,6 +850,7 @@ def _hash_raw(path: Path, settings: Settings) -> Optional[ImageRecord]:
         histogram=hist,
         metadata_count=0,
         phash_r90=ph_r90, phash_r180=ph_r180, phash_r270=ph_r270,
+        exif_date=raw_exif_date,
     )
 
 
@@ -556,6 +899,21 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         getattr(settings, "cross_format_threshold_factor", 2.0)
         if cross_format else 1.0
     )
+
+    # Cross-format EXIF date guard.
+    # Same-shot RAW+JPEG pairs share identical DateTimeOriginal timestamps.
+    # Photos of the same scene taken on different days (or different sessions)
+    # can still pass the lenient cross-format pHash threshold (12 bits) even
+    # though they are genuinely different images — e.g., a recurring landscape
+    # shot at the same location.  Reject any cross-format pair whose EXIF dates
+    # differ by more than 5 minutes: a genuine RAW+JPEG pair shot by the same
+    # camera will always have timestamps within a few seconds of each other.
+    if cross_format:
+        a_date = getattr(a, "exif_date", None)
+        b_date = getattr(b, "exif_date", None)
+        if a_date is not None and b_date is not None:
+            if abs((a_date - b_date).total_seconds()) > 300:
+                return False
 
     # 2. Brightness guard — relax for cross-format: RAW white balance differs from JPEG
     if abs(a.brightness - b.brightness) > settings.brightness_max_diff * cf_factor:
@@ -644,6 +1002,105 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
 
 # ── grouping ──────────────────────────────────────────────────────────────────
 
+def _split_oversized_bucket(
+    indices: list[int],
+    records: list[ImageRecord],
+    settings: Settings,
+    cap: int,
+    stop_flag: Optional[list[bool]] = None,
+) -> list[list[int]]:
+    """Break a runaway union-find bucket into tight sub-groups by requiring
+    every member to pair-match the bucket's medoid.
+
+    Union-find is *single-linkage* — A joins B's component if *any* existing
+    member is pHash-similar enough.  With many near-uniform images (blank
+    screenshots, near-black photos, document scans) this chains unrelated
+    photos into one mega-group via 1-bit pHash intermediates.  The chain
+    breaker: pick the medoid (index with minimum total pHash distance to
+    sampled peers) and demand every member pass the full ``_can_be_similar``
+    guard against that medoid directly.  Rejected members are processed
+    iteratively so a bucket that contains several distinct duplicate clusters
+    still surfaces all of them.
+
+    Called only for buckets whose size exceeds ``settings.max_group_size``.
+    Small buckets keep their original transitive closure, which is the
+    correct semantics for genuine dup groups.
+
+    ``cap <= 0`` is treated as "feature disabled" — the bucket is returned
+    unchanged regardless of its size.
+
+    Implemented iteratively (work-queue) rather than recursively to avoid
+    Python's call-stack limit.  In the worst case (every medoid matches only
+    itself) the old recursive version needed O(n) stack frames — fatal for
+    buckets > ~1 000 images.  The iterative version has O(1) stack depth.
+    """
+    if cap <= 0 or len(indices) <= cap:
+        return [list(indices)]
+
+    result:  list[list[int]] = []
+    pending: list[list[int]] = [list(indices)]   # work queue
+
+    while pending:
+        # Honor Stop between rounds — a giant bucket can need many splits
+        # and would otherwise ignore the Stop button for tens of seconds.
+        if stop_flag and stop_flag[0]:
+            # Return what we have so far so the caller can still surface
+            # the partial result if it wants to.  find_groups discards it.
+            return result + pending
+        bucket = pending.pop()
+
+        # Small enough — keep transitive closure as-is (genuine dup group).
+        if len(bucket) <= cap:
+            result.append(bucket)
+            continue
+
+        # Sample if huge — O(k) medoid computation for k=200 is plenty.
+        if len(bucket) <= 200:
+            sample: list[int] = bucket
+        else:
+            # Deterministic stride sample so the split is reproducible
+            # across re-runs (pytest, cache replays, etc.).
+            step = max(1, len(bucket) // 200)
+            sample = [bucket[i] for i in range(0, len(bucket), step)][:200]
+
+        def _total_dist(idx: int, _sample: list[int] = sample) -> int:
+            h_i = records[idx].phash
+            total = 0
+            for j in _sample:
+                if j != idx:
+                    total += h_i - records[j].phash   # Hamming via ImageHash.__sub__
+            return total
+
+        medoid = min(sample, key=_total_dist)
+
+        # Members that pass the FULL similarity guard against the medoid are
+        # kept together; others are queued for another split round.
+        kept:     list[int] = [medoid]
+        rejected: list[int] = []
+        med_rec = records[medoid]
+        for idx in bucket:
+            if idx == medoid:
+                continue
+            if _can_be_similar(med_rec, records[idx], settings):
+                kept.append(idx)
+            else:
+                rejected.append(idx)
+
+        # Publish the kept cluster if meaningful.
+        if len(kept) >= 2:
+            result.append(kept)
+
+        # Queue the rejected remainder for another split round.
+        # Termination guarantee: len(rejected) < len(bucket) always because
+        # the medoid is always consumed into `kept`.  The work queue strictly
+        # shrinks every iteration, so the loop terminates in ≤ n rounds.
+        if len(rejected) >= 2:
+            pending.append(rejected)
+        # Single rejected items have no pair — silently drop (no group).
+
+    return result
+
+
 def _sort_key(r: ImageRecord, settings: Settings):
     """Return sort key so the *best* image sorts first (ascending).
 
@@ -722,7 +1179,7 @@ def find_groups(
     # the exact per-pair logic.
     _max_query_thr = max(
         settings.threshold,
-        int(settings.threshold * getattr(settings, "series_threshold_factor",    2.0)),
+        int(settings.threshold * getattr(settings, "series_threshold_factor",    1.0)),
         int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
         int(2 * getattr(settings, "rotation_threshold_factor",  3.0)),  # fixed floor, not scaled
     )
@@ -827,16 +1284,40 @@ def find_groups(
     group_counter = 0
     grouped_indices: set[int] = set()
 
+    # Runaway-group safety net: when ``max_group_size`` is set, any bucket
+    # that grew beyond that cap via union-find chaining is split by the
+    # medoid rule.  Prevents a single mega-group of hundreds of unrelated
+    # near-uniform images (blank docs, dark photos) from appearing in the
+    # results.  Disabled when ``max_group_size`` <= 0.
+    _cap = max(0, int(getattr(settings, "max_group_size", 0)))
+
     for indices in buckets.values():
+        # Stop is honored between buckets so giant clusters don't tie up the
+        # Stop button while their split + classify is in flight.
+        if stop_flag and stop_flag[0]:
+            return [], None
         if len(indices) < 2:
             continue
 
-        group_counter += 1
-        members = [records[i] for i in indices]
-        result_group = _classify_group(members, settings, f"g{group_counter:04d}")
-        if result_group is not None:
-            groups.append(result_group)
-            grouped_indices.update(indices)
+        # Split oversized buckets; otherwise pass the bucket through as-is.
+        if _cap > 0 and len(indices) > _cap:
+            sub_buckets = _split_oversized_bucket(
+                indices, records, settings, _cap, stop_flag=stop_flag,
+            )
+        else:
+            sub_buckets = [indices]
+
+        for sub in sub_buckets:
+            if len(sub) < 2:
+                continue
+            group_counter += 1
+            members = [records[i] for i in sub]
+            result_group = _classify_group(
+                members, settings, f"g{group_counter:04d}", stop_flag=stop_flag,
+            )
+            if result_group is not None:
+                groups.append(result_group)
+                grouped_indices.update(sub)
 
     # ── Ambiguous detection ───────────────────────────────────────────────
     # Find image pairs whose pHash distance is within (threshold, threshold*factor].
@@ -915,6 +1396,7 @@ def _classify_group(
     members: list[ImageRecord],
     settings: Settings,
     group_id: str,
+    stop_flag: Optional[list[bool]] = None,
 ) -> Optional[DuplicateGroup]:
     """
     Given a set of similar images, classify each as original or preview.
@@ -922,9 +1404,11 @@ def _classify_group(
     Same-dimension handling distinguishes three cases:
       - Exact duplicates (pHash ≤ _EXACT_DUP_PHASH within the bucket): same image
         saved/exported twice.  Keep the best copy; trash the rest as duplicates.
-      - Cross-format pairs (RAW vs JPEG of the same shot): pHash 3-8 bits apart
-        due to different colour rendering.  keep_all_formats=True → keep both as
-        originals; keep_all_formats=False → keep RAW, trash JPEG.
+      - Cross-format pairs (RAW vs JPEG of the same shot): behaviour depends on
+        keep_all_formats.  When True (default), ALL members are kept as originals
+        so the group disappears from the review list — nothing is trashable.
+        When False, the RAW is the authoritative master (kept) and every non-RAW
+        (JPEG/PNG) is marked as a duplicate (preview/trash).
       - Genuine series / burst (pHash > _EXACT_DUP_PHASH, same format): different
         shots at the same resolution.  Keep all; none are previews.
 
@@ -935,6 +1419,11 @@ def _classify_group(
     members_sorted = sorted(members, key=lambda r: _sort_key(r, settings))
     global_best = members_sorted[0]
 
+    # Precompute once per record so the O(n²) same-dimension loop below
+    # doesn't repeat ``path.suffix.lower()`` ~n² times for large series
+    # buckets (500-member burst → ~250k lower() calls saved).
+    is_raw_flags = [r.path.suffix.lower() in RAW_EXTENSIONS for r in members_sorted]
+
     # ── series / exact-dup detection ─────────────────────────────────────
     series_indices:   set[int] = set()   # genuine burst shots — keep all
     exact_dup_indices: set[int] = set()  # exact same-image copies — trash extras
@@ -943,7 +1432,9 @@ def _classify_group(
     if not getattr(settings, "disable_series_detection", False):
         tol = settings.series_tolerance_pct / 100.0
 
-        def _same_dim(a: ImageRecord, b: ImageRecord) -> bool:
+        def _same_dim(i: int, j: int) -> bool:
+            a = members_sorted[i]
+            b = members_sorted[j]
             if a.width == 0 or a.height == 0 or b.width == 0 or b.height == 0:
                 return False
             w_ratio = abs(a.width - b.width) / max(a.width, b.width)
@@ -951,13 +1442,19 @@ def _classify_group(
             # For cross-format pairs (RAW vs JPEG), use a wider tolerance:
             # rawpy decodes the full sensor area, adding a few border pixels
             # vs the camera JPEG crop (e.g. 6024×4020 vs 6000×4000 = 0.4%).
-            a_is_raw = a.path.suffix.lower() in RAW_EXTENSIONS
-            b_is_raw = b.path.suffix.lower() in RAW_EXTENSIONS
             effective_tol = (
                 max(tol, _CROSS_FORMAT_DIM_TOL)
-                if a_is_raw != b_is_raw else tol
+                if is_raw_flags[i] != is_raw_flags[j] else tol
             )
-            return w_ratio <= effective_tol and h_ratio <= effective_tol
+            if w_ratio <= effective_tol and h_ratio <= effective_tol:
+                return True
+            # Also check swapped (portrait RAW vs landscape JPEG or vice versa):
+            # rawpy may decode a CR2 in portrait orientation (height > width) while
+            # the matching camera JPEG is stored as landscape (width > height).
+            # e.g. CR2 4020×6024 vs JPEG 6000×4000 — same sensor, axes transposed.
+            w_ratio_rot = abs(a.width - b.height) / max(a.width, b.height)
+            h_ratio_rot = abs(a.height - b.width) / max(a.height, b.width)
+            return w_ratio_rot <= effective_tol and h_ratio_rot <= effective_tol
 
         # Build dimension buckets (union-find for transitivity)
         dim_parent = list(range(len(members_sorted)))
@@ -974,8 +1471,12 @@ def _classify_group(
                 dim_parent[px] = py
 
         for i in range(len(members_sorted)):
+            # Cheap periodic stop check for very large groups (5000+ members
+            # would otherwise tie up the Stop button for several seconds).
+            if stop_flag and stop_flag[0] and (i & 0x3F) == 0:
+                return None
             for j in range(i + 1, len(members_sorted)):
-                if _same_dim(members_sorted[i], members_sorted[j]):
+                if _same_dim(i, j):
                     dim_union(i, j)
 
         dim_buckets: dict[int, list[int]] = defaultdict(list)
@@ -998,46 +1499,49 @@ def _classify_group(
             # they would incorrectly be classified as series shots.  Instead we
             # treat all-cross-format buckets as exact duplicates so the best copy
             # (RAW when keep_all_formats=False) is kept and the rest are trashed.
-            max_pdist = max(
-                recs[a].phash - recs[b].phash
-                for a in range(len(recs))
-                for b in range(a + 1, len(recs))
-            )
+            #
+            # We only need the boolean "any pair exceeds _EXACT_DUP_PHASH",
+            # not the exact maximum — short-circuit on the first such pair so
+            # large genuine-series buckets (e.g. 500-shot bursts) don't pay the
+            # full O(n²) cost just to learn they are not exact duplicates.
+            exceeds_exact = False
+            for a in range(len(recs)):
+                if exceeds_exact:
+                    break
+                ph_a = recs[a].phash
+                for b in range(a + 1, len(recs)):
+                    if int(ph_a - recs[b].phash) > _EXACT_DUP_PHASH:
+                        exceeds_exact = True
+                        break
 
             # A bucket is "all cross-format" when it contains both RAW and
             # non-RAW files — i.e. the same shot in two different file formats.
-            raw_flags = {r.path.suffix.lower() in RAW_EXTENSIONS for r in recs}
+            raw_flags = {is_raw_flags[bi] for bi in bucket_indices}
             all_cross_format = (True in raw_flags and False in raw_flags)
 
             if all_cross_format:
-                # Cross-format pair: same shot captured as both RAW and JPEG.
-                # The elevated pHash distance (3-8 bits) is due to different
-                # colour rendering, NOT different image content.
-                if settings.keep_all_formats:
-                    # Keep the best representative of each format; trash same-
-                    # format extras.  members_sorted is already sorted best-first
-                    # so the first RAW and first non-RAW in the bucket are keepers.
-                    # We do NOT add these to series_indices — _split_by_format()
-                    # will keep the best-of-format using _same_size_as_best().
-                    raw_in_bucket = [
-                        bi for bi in bucket_indices
-                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS
-                    ]
-                    nonraw_in_bucket = [
-                        bi for bi in bucket_indices
-                        if members_sorted[bi].path.suffix.lower() not in RAW_EXTENSIONS
-                    ]
-                    # Keep only the first (best-sorted) of each format; trash extras.
-                    for dup_idx in raw_in_bucket[1:]:
-                        exact_dup_indices.add(dup_idx)
-                    for dup_idx in nonraw_in_bucket[1:]:
-                        exact_dup_indices.add(dup_idx)
+                # Cross-format bucket: same shot captured as both RAW and JPEG.
+                #
+                # keep_all_formats=True  → user explicitly wants every format
+                #   preserved.  Mark ALL members as series originals; this leaves
+                #   previews empty so _classify_group returns None and the group
+                #   never appears in the review list — nothing can be trashed.
+                #
+                # keep_all_formats=False → RAW is the authoritative master; the
+                #   camera-generated JPEG is a derivative that can be trashed.
+                #   • Every RAW file in the bucket → series_indices (always kept).
+                #   • Every non-RAW (JPEG/PNG) file → exact_dup_indices (preview).
+                if getattr(settings, "keep_all_formats", True):
+                    # All formats preserved — hide the group entirely.
+                    series_indices.update(bucket_indices)
                 else:
-                    # Keep only the single best copy (RAW preferred via _sort_key);
-                    # treat all other-format copies as duplicates to trash.
-                    for dup_idx in bucket_indices[1:]:
-                        exact_dup_indices.add(dup_idx)
-            elif max_pdist <= _EXACT_DUP_PHASH:
+                    for bi in bucket_indices:
+                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS:
+                            series_indices.add(bi)      # RAW: always keep as original
+                        else:
+                            exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
+                is_series = True
+            elif not exceeds_exact:
                 # True exact duplicates: same format, same content.
                 # Keep the best (bucket_indices[0]); trash the rest.
                 for dup_idx in bucket_indices[1:]:
@@ -1074,9 +1578,41 @@ def _classify_group(
                     for dup_idx in bucket_indices[1:]:
                         exact_dup_indices.add(dup_idx)
                 else:
-                    # Genuine series / burst: keep every member.
-                    is_series = True
-                    series_indices.update(bucket_indices)
+                    # Possible series / burst.  Union-find is single-linkage, so a
+                    # chain A→B→C (each pair ≤ threshold) can end up in the same
+                    # bucket even when A and C are visually unrelated.  Guard against
+                    # this by requiring every confirmed series member to be within
+                    # series_threshold of the bucket medoid — not just of its nearest
+                    # neighbour.  Outliers are excluded from series_indices and fall
+                    # through to the normal _is_preview check below.
+                    series_thr = int(settings.threshold * settings.series_threshold_factor)
+
+                    # Medoid: the member with the smallest total pHash distance to
+                    # all others in the bucket (most "central" image).
+                    medoid_local = min(
+                        range(len(recs)),
+                        key=lambda li: sum(
+                            int(recs[li].phash - recs[lj].phash)
+                            for lj in range(len(recs)) if lj != li
+                        ),
+                    )
+                    med_rec = recs[medoid_local]
+
+                    confirmed_series: list[int] = []
+                    for k_local, (bi, rec_bi) in enumerate(zip(bucket_indices, recs)):
+                        # Use rotation-aware distance so rotated copies aren't evicted.
+                        d = int(med_rec.phash - rec_bi.phash)
+                        for rh in (rec_bi.phash_r90, rec_bi.phash_r180, rec_bi.phash_r270):
+                            if rh is not None:
+                                d = min(d, int(med_rec.phash - rh))
+                        if d <= series_thr:
+                            confirmed_series.append(bi)
+
+                    if len(confirmed_series) >= 2:
+                        is_series = True
+                        series_indices.update(confirmed_series)
+                    # Members not in confirmed_series are not added to series_indices;
+                    # they fall through to _is_preview at the classify stage below.
 
     # ── classify originals vs previews ───────────────────────────────────
     preview_ratio_gap = 1.0 - settings.preview_ratio
@@ -1205,15 +1741,284 @@ def _split_by_format(
         # For non-series, non-exact-dup members: keep the best if full-resolution
         if non_series_in_ext:
             ns_best_idx, ns_best = non_series_in_ext[0]
-            if _same_size_as_best(ns_best):
+            # A format's best copy is kept as an original when it is either:
+            #   (a) same-size as the global best (within cross-format tolerance), OR
+            #   (b) not small enough to count as a preview under the preview_ratio rule.
+            # Case (b) handles cross-format pairs like a 5 700×3 800 camera JPEG matched
+            # with a 6 036×4 020 RAW — they differ by ~5 % which exceeds the strict
+            # 2 % cross-format dim tolerance but are clearly not preview-sized thumbnails
+            # (94 % of full size).  Without this fallback those near-full-res JPEGs were
+            # incorrectly trashed even when keep_all_formats=True.
+            if _same_size_as_best(ns_best) or not _is_preview(ns_best, global_best, preview_ratio_gap):
                 originals.append(ns_best)
             else:
                 previews.append(ns_best)
-            # Remaining: preview-size check only — near-same-size kept as originals
+            # Remaining: preview-size check — near-same-size kept as originals.
+            # Extra guard for same-dimension files: only trash if pHash is close
+            # enough to confirm an exact duplicate.  Different photos taken with
+            # the same camera model share identical width×height but have distinct
+            # content and must not be trashed as previews.
             for _, m in non_series_in_ext[1:]:
                 if _is_preview(m, global_best, preview_ratio_gap):
-                    previews.append(m)
+                    if m.width == global_best.width and m.height == global_best.height:
+                        # Same dimensions as best: only trash genuine exact duplicates.
+                        if (m.phash - ns_best.phash) <= _EXACT_DUP_PHASH:
+                            previews.append(m)   # exact duplicate → trash
+                        else:
+                            originals.append(m)  # different shot, same camera → keep
+                    else:
+                        previews.append(m)   # rotation-equivalent or smaller → trash
                 else:
                     originals.append(m)
 
     return originals, previews
+
+
+# ── Video duplicate detection ─────────────────────────────────────────────────
+
+def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
+    """Try to extract a representative frame from a video file.
+
+    Tries ffmpeg subprocess first (widely available), then OpenCV.
+    Returns a PIL Image (RGB) or None if neither method is available / succeeds.
+    The frame is taken at 1 second into the video (safe for most clips; falls back
+    to the very first frame if the video is shorter than 1 s).
+    """
+    # 1. Try ffmpeg (most reliable; no Python dependency)
+    try:
+        import subprocess
+        import io as _io
+        result = subprocess.run(
+            [
+                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                "-ss", "00:00:01", "-i", str(path),
+                "-frames:v", "1", "-f", "image2pipe",
+                "-vcodec", "png", "-",
+            ],
+            capture_output=True, timeout=15,
+        )
+        if result.returncode == 0 and result.stdout:
+            img = Image.open(_io.BytesIO(result.stdout))
+            img.load()
+            return img.convert("RGB") if img.mode != "RGB" else img
+    except Exception:
+        pass
+
+    # 2. Try OpenCV (cv2) — only available if user installed it
+    try:
+        import cv2  # type: ignore
+        cap = cv2.VideoCapture(str(path))
+        # Seek to 1000 ms
+        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        ret, frame = cap.read()
+        cap.release()
+        if ret and frame is not None:
+            return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except Exception:
+        pass
+
+    return None
+
+
+def collect_videos(
+    folder: Path,
+    skip_paths: set[Path],
+    settings: Settings,
+    progress_cb: Optional[ProgressCb] = None,
+    stop_flag: Optional[list[bool]] = None,
+) -> List[ImageRecord]:
+    """Walk *folder* and return one :class:`ImageRecord` per video file found.
+
+    Records have ``is_video=True``, ``width=0``, ``height=0``.
+    ``phash`` holds a thumbnail pHash when ``settings.video_use_thumb`` is True
+    and a frame could be extracted via ffmpeg or OpenCV; otherwise a zero hash.
+
+    The function is intentionally sequential (no thread pool) because thumbnail
+    extraction already involves spawning ffmpeg subprocesses — parallel spawning
+    would overload the system for large collections.  Size-stat (stat.st_size) is
+    the primary duplicate signal anyway and is nearly free per file.
+    """
+    skip_names_set = {s.strip() for s in settings.skip_names.split(",") if s.strip()}
+    video_paths: list[Path] = []
+
+    if settings.recursive:
+        for root, dirs, files in os.walk(folder):
+            root_path = Path(root).resolve()
+            dirs[:] = [
+                d for d in dirs
+                if (root_path / d).resolve() not in skip_paths
+                and d not in skip_names_set
+            ]
+            for fname in files:
+                fpath = Path(root) / fname
+                if fpath.suffix.lower() in VIDEO_EXTENSIONS:
+                    video_paths.append(fpath)
+    else:
+        for fname in os.listdir(folder):
+            fpath = folder / fname
+            if fpath.is_file() and fpath.suffix.lower() in VIDEO_EXTENSIONS:
+                video_paths.append(fpath)
+
+    total = len(video_paths)
+    _zero = imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
+    use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    records: list[ImageRecord] = []
+
+    for i, path in enumerate(video_paths):
+        if stop_flag and stop_flag[0]:
+            break
+        if progress_cb and (i == 0 or i % 5 == 0 or i == total - 1):
+            progress_cb(
+                f"Indexing video {i + 1}/{total}: {path.name}",
+                i + 1, total, "Videos",
+            )
+        try:
+            stat = path.stat()
+            ph = _zero
+            if use_thumb:
+                try:
+                    thumb = _extract_video_thumb(path)
+                    if thumb is not None:
+                        work = _downscaled_for_hashing(
+                            thumb if thumb.mode == "RGB" else thumb.convert("RGB")
+                        )
+                        ph = imagehash.phash(work)
+                except Exception:
+                    ph = _zero
+
+            records.append(ImageRecord(
+                path=path,
+                width=0, height=0,
+                file_size=stat.st_size,
+                phash=ph,
+                dhash=_zero,
+                mtime=min(stat.st_mtime, stat.st_ctime),
+                brightness=128.0,
+                histogram=[],
+                is_video=True,
+            ))
+        except Exception:
+            pass
+
+    return records
+
+
+def find_video_duplicates(
+    video_records: List[ImageRecord],
+    settings: Settings,
+) -> List[DuplicateGroup]:
+    """Group video files that are likely duplicates.
+
+    Primary criterion: **exact file size**.  Two videos with an identical byte
+    count are almost certainly the same file in a personal photo library.
+
+    Secondary criterion (optional): **thumbnail pHash similarity** within each
+    same-size bucket.  When ``settings.video_use_thumb`` is True and at least one
+    record in a bucket has a non-zero thumbnail hash, the bucket is sub-divided by
+    pHash distance (threshold = 8 bits).  Pairs whose thumbnails differ by more
+    than 8 bits are treated as coincidentally same-size but visually different
+    videos and are *not* grouped together.
+
+    Strategy: keep the file with the earliest mtime (oldest copy) as the original;
+    mark the rest as previews (candidates for trash).
+
+    Returns a list of :class:`DuplicateGroup` objects (group_id prefix ``"v"``).
+    """
+    if not video_records:
+        return []
+
+    _zero_hash_int = 0
+    use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    match_format = bool(getattr(settings, "video_match_format", True))
+    match_size = bool(getattr(settings, "video_match_size", True))
+    _THUMB_THR = 8  # Hamming bits — allows minor encode differences in thumbnails
+
+    # If neither format nor size matching is enabled, do not group anything.
+    # (Without at least one criterion every pair would be a "duplicate" — useless
+    # and dangerous.  Issue #300: the UI guarantees at least one is ON, but this
+    # belt-and-braces check protects programmatic callers.)
+    if not match_format and not match_size:
+        return []
+
+    # Phase 1: bucket by (ext if format-match enabled, size if size-match enabled).
+    # An empty string / zero acts as a wildcard for the disabled dimension.
+    by_key: dict[tuple[str, int], list[ImageRecord]] = defaultdict(list)
+    for rec in video_records:
+        ext_key = rec.path.suffix.lower() if match_format else ""
+        size_key = rec.file_size if match_size else 0
+        by_key[(ext_key, size_key)].append(rec)
+    # Local alias so the rest of the function reads naturally.
+    by_size = by_key
+
+    groups: list[DuplicateGroup] = []
+    group_counter = 0
+
+    for _key, members in by_size.items():
+        if len(members) < 2:
+            continue
+
+        # Check whether any thumbnails were successfully extracted
+        has_thumbs = use_thumb and any(
+            int(str(r.phash), 16) != _zero_hash_int for r in members
+        )
+
+        if has_thumbs:
+            # Phase 2: sub-group within same-size bucket by thumbnail pHash.
+            # Videos whose thumbnail extraction failed (zero hash) are treated
+            # as size-only matches and grouped with every other member in the
+            # bucket — their content is unknown but exact-size match is already
+            # strong evidence of duplication in a personal library.
+            n = len(members)
+            parent = list(range(n))
+
+            def _find(x: int) -> int:
+                while parent[x] != x:
+                    parent[x] = parent[parent[x]]
+                    x = parent[x]
+                return x
+
+            def _union(x: int, y: int) -> None:
+                px, py = _find(x), _find(y)
+                if px != py:
+                    parent[px] = py
+
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
+                    pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
+                    # If either thumbnail is missing, group by size alone.
+                    if (pi_zero or pj_zero or
+                            members[i].phash - members[j].phash <= _THUMB_THR):
+                        _union(i, j)
+
+            buckets: dict[int, list[int]] = defaultdict(list)
+            for i in range(n):
+                buckets[_find(i)].append(i)
+
+            for bucket_indices in buckets.values():
+                if len(bucket_indices) < 2:
+                    continue
+                bucket_members = [members[i] for i in bucket_indices]
+                # Keep oldest (smallest mtime); use file_size desc as tiebreaker
+                bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
+                group_counter += 1
+                groups.append(DuplicateGroup(
+                    originals=[bucket_members[0]],
+                    previews=bucket_members[1:],
+                    is_series=False,
+                    is_ambiguous=False,
+                    group_id=f"v{group_counter:04d}",
+                ))
+        else:
+            # Size-only: all same-size members are duplicates — keep the oldest
+            members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
+            group_counter += 1
+            groups.append(DuplicateGroup(
+                originals=[members_sorted[0]],
+                previews=members_sorted[1:],
+                is_series=False,
+                is_ambiguous=False,
+                group_id=f"v{group_counter:04d}",
+            ))
+
+    return groups

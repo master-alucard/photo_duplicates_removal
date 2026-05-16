@@ -4,7 +4,7 @@
 ; ─────────────────────────────────────────────────────────────────────────────
 
 #define AppName      "Image Deduper"
-#define AppVersion   "1.1.0"
+#define AppVersion   "1.1.26"
 #define AppPublisher "Katador.net"
 #define AppURL       "https://github.com/master-alucard/photo_duplicates_removal"
 #define AppEmail     "office@katador.net"
@@ -48,11 +48,15 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 ; All bundled files from PyInstaller
 Source: "..\dist\ImageDeduper\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+; App icon at install root — shortcuts reference this directly so Windows Start menu
+; and taskbar always display the full multi-resolution .ico instead of extracting
+; from the EXE (which can silently fall back to a generic icon on some Windows builds)
+Source: "..\assets\app.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\{#AppExeName}"; IconIndex: 0
+Name: "{group}\{#AppName}";           Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\app.ico"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#AppName}";   Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; IconFilename: "{app}\{#AppExeName}"; IconIndex: 0
+Name: "{commondesktop}\{#AppName}";   Filename: "{app}\{#AppExeName}"; Tasks: desktopicon; IconFilename: "{app}\app.ico"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; \

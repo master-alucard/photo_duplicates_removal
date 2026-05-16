@@ -40,6 +40,10 @@ jobs:
           python -c "import rawpy; print('rawpy OK —', rawpy.__version__)"
           python -c "from PIL import Image; import imagehash, piexif, pywt; print('Core deps OK')"
 
+      # ── 4b. Run test suite ────────────────────────────────────────────────────
+      - name: Run tests
+        run: python -m pytest tests/ -q --tb=short
+
       # ── 5. Bundle with PyInstaller ───────────────────────────────────────────
       - name: Build EXE with PyInstaller
         run: pyinstaller image_deduper.spec
@@ -74,6 +78,15 @@ jobs:
             Set-Content installer\installer.iss
           Write-Host "installer.iss patched to version $ver"
 
+      # ── 9b. Patch the in-app version string in about_tab.py ──────────────────
+      - name: Patch version in about_tab.py
+        run: |
+          $ver = "${{ steps.version.outputs.VERSION }}"
+          (Get-Content about_tab.py) `
+            -replace 'APP_VERSION\s*=\s*"[^"]+"', "APP_VERSION   = `"$ver`"" |
+            Set-Content about_tab.py
+          Write-Host "about_tab.py patched to version $ver"
+
       # ── 10. Build the installer ───────────────────────────────────────────────
       - name: Build installer with Inno Setup
         run: |
@@ -106,25 +119,92 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🌙 Night Mode
-            - **Dark theme** — full Material Design 3 dark palette with live toggle in Settings. No restart required — theme switches instantly.
+            ### 🛡️ Clean Shutdown & No More Ghost Windows
+            - **Window X button now ends *all* background work** — closing the main window signals every scan / library-update worker to stop, cancels pending Tk timers, destroys the UI, then hard-exits the process. Previously `ThreadPoolExecutor`'s non-daemon workers could keep the process (and the HDD) running for seconds after the window disappeared; now the app is truly gone when you close it.
+            - **No more taskbar lingering after close** — daemon-thread assumptions hid a race where a scan in flight would survive window destroy. The new `_on_window_close` handler (plus a `request_stop()` hook on the Library tab) stops this cleanly across all tabs.
 
-            ### 🖥️ User Experience
-            - **Material Design 3 styling** — unified colour tokens, clam ttk theme, comprehensive styling across all tabs and dialogs.
-            - **Same Image / Wrong Group buttons** — proper toggle with status badges, button state feedback, border colours, and scroll-position preservation.
-            - **Groups per page** — your preferred page size (default 100) is now saved and restored on next launch.
-            - **Improved pause/resume** — multi-threaded pause fix, Compare Scan pause/resume, sleep/hibernate handling.
+            ### 🔬 False-Positive Mega-Group Fix
+            - **"Runaway" groups on large collections** — union-find clustering is single-linkage, so if many near-uniform images are scanned (blank screenshots, near-black photos, document scans with uniform backgrounds), 1-bit pHash chains could merge hundreds of unrelated images into one huge duplicate group. Fixed with a post-grouping **medoid split**: whenever a raw union-find bucket exceeds `max_group_size` (default 50), the scanner picks the bucket's medoid and demands every member pass the full `_can_be_similar` guard directly against it. Chains that don't satisfy this direct match are demoted out, and the rejected members are re-split recursively so genuine sub-clusters are still surfaced. Configurable via new setting `max_group_size` (default 50, set to 0 to disable).
+            - **New end-to-end calibration test** — `tests/test_calibration_e2e.py` spins up a synthetic calibration folder (2 positive groups, 1 negative pair, 2 singletons), runs `run_calibration`, and asserts ground-truth parsing, folder validation, result-list shape, score > 0 detection, and Stop-flag responsiveness.
 
-            ### ⚡ Performance
-            - **Scan speed slider** — quick-mode quality/speed trade-off (1–10).
-            - **ETA improvements** — blended estimates, phase details, and future phase floor for more accurate remaining time.
+            ### 🧪 Test Infrastructure
+            - **Tests no longer flash windows on screen** — new `tests/conftest.py` creates a single session-wide withdrawn Tk root and redirects any further `tk.Tk()` / `Toplevel()` calls through it. ttkbootstrap's image cache stays valid across test modules (previously caused `TclError: image "pyimageNN" doesn't exist` in `test_report_viewer`), and `deiconify` / `grab_set` become silent no-ops during the test session.
+            - **All 213 tests pass** — up from 203 passed + 3 failed + 11 errors. Three new test files: `test_group_split.py` (5 tests for the medoid-split safety net), `test_calibration_e2e.py` (5 end-to-end calibration tests), plus reusable fixtures in `conftest.py`.
+            - **Outdated slider test fixed** — `test_threshold_slider_rec_lo_is_2_in_custom_tab` was asserting on the old Custom-Scan tab layout; the Compare tab now reads the shared `calibrated_threshold` directly, so the test was rewritten to assert that.
 
-            ### 🐛 Bug fixes
-            - Fixed button text becoming unreadable after disable/enable cycles.
-            - Fixed slider recommended band too bright in dark mode.
-            - Fixed About hero card and report viewer header too bright in dark mode.
-            - Fixed Prev/Next button contrast in both themes.
-            - Synced installer version with app version.
+            ### ⚡ Performance & Responsiveness Overhaul (from v1.1.10)
+            - **Pause & Stop are now instant** — `ThreadPoolExecutor.shutdown(wait=False, cancel_futures=True)` cancels queued hash tasks immediately and each worker checks the stop/pause flag at entry, so at most *n_threads* files finish before the disk goes quiet (previously all pending files in a batch had to complete).
+            - **HDD overheating fix** — default concurrency now caps at 2 parallel readers on fixed / removable / network drives (`io_parallelism="auto"`, `hdd_thread_cap=2`). Windows reports both HDDs and SSDs as "fixed" and cannot cheaply distinguish them, so the safe default protects spinning drives from seek-thrash. SSD users can opt into full parallelism via Settings: `io_parallelism="ssd"` or explicit `scan_threads`.
+            - **Hashing ~4-10× faster on large JPEGs** — every image is pre-downscaled once to 1024 px (longest side) and reused for pHash, dHash, histogram, brightness, and all three rotation hashes. Peak memory drops from ~300 MB to ~6 MB per thread on 24 MP images. Validated numerically: 0.225-bit average pHash drift (max 2 bits) across 80 hash comparisons on 20 real photos — well within the 2-bit exact-duplicate threshold, so existing library caches stay compatible.
+            - **No more double file-opens** — EXIF metadata count (for `collect_metadata=True`, default) is now read from the already-open PIL image handle instead of re-opening the file via `count_metadata_fields()`. Halves the open() syscall count per scanned file.
+            - **Library updates parallelised** — `Library → Update` / `Update All` now uses the same drive-aware thread pool as the main scan, with proper Stop support.
+
+            ### 📷 RAW (opt-in)
+            - **Fast RAW mode (~6× warm speedup)** — new setting `raw_use_embedded_thumb` (default **off** for backward compatibility) uses `rawpy.extract_thumb()` (the camera's embedded JPEG preview) instead of full sensor demosaic. Default off because the embedded-JPEG pHash differs from the postprocess pHash by ~30 bits, which would invalidate cached RAW entries from earlier versions. Users who have no RAW library cache, or who don't mind re-hashing, can enable it for a big speedup.
+
+            ### 🔧 New Settings
+            - `io_parallelism`: `"auto"` (default) | `"ssd"` | `"hdd"` — controls per-drive read concurrency.
+            - `hdd_thread_cap`: `2` (default) — max parallel readers on HDDs in auto mode.
+            - `raw_use_embedded_thumb`: `False` (default) — opt-in RAW fast path.
+
+            ### 🔧 Library & Path Improvements (from v1.1.9)
+            - **Re-link broken library paths** — when a tracked folder is missing or has moved without being auto-detected, the "📌 Re-link Path…" button in the Library tab opens a folder browser so you can point the entry to its new location. The library index and cached hashes are moved automatically; no re-hashing required.
+            - **Paste path normalization** — pasting a folder path into any scan-mode field (Scan, Custom, Library mode, Calibration) now automatically normalizes backslashes and forward slashes to the OS separator and strips surrounding quotes and `file:///` prefixes, preventing "path not found" errors caused by mixed separators.
+
+            ### 🐛 RAW Duplicate Detection Fixes (from v1.1.8)
+            - **All CR2+JPEG pairs now visible regardless of "Keep all formats" setting** — two bugs in `_classify_group` caused most RAW+JPEG groups to be silently hidden: (1) `keep_all_formats=True` classified both RAW and JPEG as originals → no preview → group not returned; (2) rawpy decodes some CR2s in portrait orientation (`4020×6024`) while the matching camera JPEG is landscape (`6000×4000`) — the dimension bucket check saw ratio 0.33 >> 0.02 tolerance and never formed a cross-format bucket. Fixed: cross-format buckets always mark RAW as original and JPEG as preview regardless of keep_all_formats; `_same_dim` now also checks transposed width/height.
+            - **Histogram guard disabled for cross-format pairs** — `rawpy` decodes RAW files ~2× brighter than the camera's own JPEG engine; histogram intersection collapsed to 0.00–0.24 for true same-shot pairs (well below the former 0.25 floor), causing every RAW+JPEG duplicate to be silently missed even when "RAW files" was enabled. The histogram guard is now disabled for cross-format pairs; pHash similarity is already sufficient to distinguish real duplicates from different images.
+            - **Cross-format threshold factor raised 5.0 → 6.0** — calibration on 35 Canon M100 CR2+JPEG pairs revealed two borderline pairs at pHash distance 12 (just above the old effective threshold of 10). New effective threshold = 2 × 6 = **12 bits**, covering all confirmed same-shot pairs with an 8-bit safety gap to the nearest false positive.
+            - **Calibration tool accepts RAW files in group folders** — `load_ground_truth()` previously filtered calibration group/negative/single folders using only JPEG/PNG extensions, silently dropping all `.cr2`/`.nef`/`.arw` etc. files and producing "No valid groups" even with correctly structured RAW+JPEG calibration data. Now accepts the full set of supported RAW extensions.
+
+            > **How to detect RAW+JPEG duplicates:** enable **RAW files (rawpy)** in Settings. RAW+JPEG pairs from the same shot are now shown regardless of the "Keep all formats" setting — no additional settings change required.
+
+            ### 🎨 Start Menu / Taskbar Icon Fix
+            - **Correct app icon in Windows Start menu and taskbar** — installer now copies `app.ico` directly to the install folder and shortcuts reference it explicitly, preventing Windows from falling back to a generic icon when extracting from the EXE.
+
+            ### 🐛 Bug Fixes (from v1.1.6)
+            - **Scan crash on recovered/corrupt files** — `OSError: [Errno 22] Invalid argument` when generating date labels for files with invalid `mtime` values (e.g. recovered images from film scanners); now shows "Unknown date" instead of crashing
+            - **Copy to Clipboard on error dialogs** — error dialogs now have a 📋 Copy to Clipboard button so users can easily share error details; button text changes to ✓ Copied! for 2 seconds after copying
+
+            ### 🐛 Bug Fixes (from v1.1.5)
+            - **Missing groups on large result sets** — fixed groups rendering as blank white areas when pages contained many groups; root causes: premature `update_idletasks()` zeroing the scroll region, single geometry pass insufficient for thousands of widgets, canvas window width not pre-set before build
+            - **Scroll region now uses `after_idle`** — scrollregion is calculated only after all pending geometry events drain, with double `update_idletasks()` pass for large pages, plus 300ms and 1000ms safety-net recalculations
+            - **ttkbootstrap bg override fully resolved** — all remaining `tk.Frame`/`tk.Label`/`tk.Checkbutton` throughout group cards, manual sections, header, nav bar, dividers, and canvas frame now use `.configure(bg=)` after creation
+            - **Error placeholder for failed groups** — if a group card throws an exception it now shows a visible red warning instead of an invisible white gap
+            - **Canvas width pre-set** — inner frame gets correct canvas width before content builds so cards lay out at the right size from the start
+
+            ### ⚙️ Performance
+            - **Default page size lowered to 20** — was 100; each group card creates ~80 widgets, 100 groups = ~8,100 widgets which exceeds tkinter's reliable limit (~3,000–4,000)
+            - **Page size options: 5 / 10 / 20 / 50** — removed 100 from the dropdown to prevent users hitting the rendering limit
+
+            ### 🎨 UI Overhaul
+            - **ttkbootstrap styling** — beautiful Material Design 3 UI with ttkbootstrap theme engine.
+            - **Tab sizing** — 1.5x tab height with bold 14pt titles.
+            - **Dark mode** — seamless dark theme with no visible card blocks; blended backgrounds.
+            - **Theme switching** — fully updates all UI elements with deferred style re-application.
+            - **Slider green band** — 30% opacity for recommended range indicator.
+            - **Round info/reset buttons** — accent-stroke circular buttons in settings.
+            - **LabelFrame borders** — visible groove borders in both light and dark modes.
+            - **Treeview rows** — 1.5x row height (42px) for history and library; dark deep grey selection (light mode) / light grey + dark text selection (dark mode).
+            - **Background colour** — slightly off-white (#F4F4F5) instead of pure white.
+
+            ### 📋 Results Viewer
+            - **Coloured columns** — light green originals, light red duplicates (ttkbootstrap-safe via configure).
+            - **First/Last page buttons** — new ◀◀ and ▶▶ buttons for quick pagination.
+            - **Unique toggle** — ★ Unique button saves page + scroll position, navigates to unique images, changes to ◀ Groups; pressing again restores saved position.
+            - **Selection persistence** — checkbox states are remembered when closing and reopening the in-app report viewer within the same scan; cleared on new scan.
+            - **Instant page info** — page number and group info update immediately on page change, before content loads.
+            - **Results divider** — double-line separator between nav bar and scroll area.
+
+            ### 📚 Library
+            - **Update confirmation** — dialog with time estimate before updating folders.
+            - **Batch scheduling** — Update All with folder overlap detection.
+            - **Threading fix** — buttons no longer get permanently disabled (cross-thread polling).
+
+            ### ⚙️ Settings & Features
+            - **Organize-by-date** — radio group for organizing in place vs moving to output folder.
+            - **Phase details** — panel initially visible when enabled in settings.
+            - **Progress padding** — improved padding for scan progress panel.
 
             ---
 

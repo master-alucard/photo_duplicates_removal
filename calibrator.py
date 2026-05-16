@@ -81,7 +81,8 @@ _ROUND4_IMPACT_THR = 0.005
 _NEG_WEIGHT = 3
 
 # Relaxed histogram floor for cross-format pairs — must match scanner constant.
-_CF_HIST_FLOOR = 0.25
+# Set to 0.0: histogram guard disabled for cross-format (rawpy brightness mismatch).
+_CF_HIST_FLOOR = 0.0
 
 
 # ── ground truth ──────────────────────────────────────────────────────────────
@@ -114,6 +115,9 @@ def load_ground_truth(calibration_root: Path) -> GroundTruth:
     negatives_dir = calibration_root / "negatives"
     singles_dir   = calibration_root / "singles"
 
+    # Accept both standard image formats and RAW files in calibration data
+    _ALL_IMAGE_EXTS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
+
     groups:    list[ExpectedGroup] = []
     negatives: list[NegativePair]  = []
     singles:   list[Path]          = []
@@ -124,7 +128,7 @@ def load_ground_truth(calibration_root: Path) -> GroundTruth:
                 continue
             files = [
                 f for f in sorted(gf.iterdir())
-                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+                if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS
             ]
             if len(files) < 2:
                 continue
@@ -142,7 +146,7 @@ def load_ground_truth(calibration_root: Path) -> GroundTruth:
                 continue
             files = [
                 f for f in sorted(nf.iterdir())
-                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+                if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS
             ]
             if len(files) < 2:
                 continue
@@ -150,7 +154,7 @@ def load_ground_truth(calibration_root: Path) -> GroundTruth:
 
     if singles_dir.exists():
         for f in sorted(singles_dir.iterdir()):
-            if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS:
+            if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS:
                 singles.append(f)
 
     return GroundTruth(groups=groups, negatives=negatives, singles=singles)
@@ -164,11 +168,12 @@ def validate_calibration_folder(calibration_root: Path) -> tuple[bool, str]:
     if not groups_dir.exists():
         return False, "Missing 'groups/' sub-folder."
 
+    _ALL_IMAGE_EXTS = IMAGE_EXTENSIONS | RAW_EXTENSIONS
     valid_groups = sum(
         1 for gf in groups_dir.iterdir()
         if gf.is_dir()
         and sum(1 for f in gf.iterdir()
-                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS) >= 2
+                if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS) >= 2
     )
     if valid_groups == 0:
         return False, "No valid groups found (each sub-folder needs ≥ 2 images)."
@@ -178,13 +183,13 @@ def validate_calibration_folder(calibration_root: Path) -> tuple[bool, str]:
         1 for nf in neg_dir.iterdir()
         if nf.is_dir()
         and sum(1 for f in nf.iterdir()
-                if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS) >= 2
+                if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS) >= 2
     ) if neg_dir.exists() else 0
 
     singles_dir = calibration_root / "singles"
     singles_count = sum(
         1 for f in singles_dir.iterdir()
-        if f.is_file() and f.suffix.lower() in IMAGE_EXTENSIONS
+        if f.is_file() and f.suffix.lower() in _ALL_IMAGE_EXTS
     ) if singles_dir.exists() else 0
 
     parts = [f"{valid_groups} group(s)"]
