@@ -43,6 +43,9 @@ jobs:
           python -c "from PIL import Image; import imagehash, piexif, pywt; print('Core deps OK')"
 
       # ── 4b. Run test suite ────────────────────────────────────────────────────
+      - name: Install test extras
+        run: pip install pytest pytest-github-actions-annotate-failures
+
       - name: Run tests
         run: python -m pytest tests/ -q --tb=short
 
