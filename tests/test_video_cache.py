@@ -377,3 +377,36 @@ def test_collect_videos_progress_every_file_for_small_collections(tmp_path):
 
     # We expect one "Indexing" call per file
     assert len(calls) == n
+
+
+# ── parallel extraction (bounded workers) ────────────────────────────────────
+
+def test_collect_videos_parallel_extraction_no_shared_state_corruption(tmp_path):
+    """Multiple cache-miss files must produce one record each with no state mixing."""
+    import threading
+    from config import Settings
+    from scanner import collect_videos
+
+    n = 6
+    for k in range(n):
+        _make_fake_video(tmp_path, f"clip{k}.mp4", size=100 + k)
+
+    # Each call to _extract_video_thumb returns a distinct 1-pixel image
+    # whose hash we can track.  Use a lock to track call count from threads.
+    call_count = {"n": 0}
+    lock = threading.Lock()
+
+    def _fake_extract(path):
+        with lock:
+            call_count["n"] += 1
+        from PIL import Image as _PIL
+        return _PIL.new("RGB", (8, 8), (call_count["n"] * 10, 0, 0))
+
+    settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
+    with patch("scanner._extract_video_thumb", side_effect=_fake_extract):
+        records = collect_videos(tmp_path, set(), settings)
+
+    # All files produced a record
+    assert len(records) == n
+    # Extractor was called once per file
+    assert call_count["n"] == n

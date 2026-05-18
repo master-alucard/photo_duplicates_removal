@@ -1776,7 +1776,8 @@ def _split_by_format(
 
 # ── Video duplicate detection ─────────────────────────────────────────────────
 
-_FFMPEG_TIMEOUT = 10   # seconds — prevents hangs on malformed/truncated videos
+_FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/truncated videos
+_VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
 
 
 def _probe_video_duration(path: Path) -> "Optional[float]":
@@ -1897,10 +1898,10 @@ def collect_videos(
                  unrecoverable exception during stat/hashing is appended here
                  so callers can report failures without crashing the scan.
 
-    The function is intentionally sequential (no thread pool) because thumbnail
-    extraction already involves spawning ffmpeg subprocesses — parallel spawning
-    would overload the system for large collections.  Size-stat (stat.st_size) is
-    the primary duplicate signal anyway and is nearly free per file.
+    Parallelism: up to ``_VIDEO_EXTRACT_WORKERS`` ffmpeg/OpenCV subprocesses run
+    concurrently for cache-miss files.  Files that hit the cache are never sent
+    to the pool.  The cap is intentionally low (2) to avoid overwhelming a HDD
+    or spinning fans on a large video collection.
     """
     skip_names_set = {s.strip() for s in settings.skip_names.split(",") if s.strip()}
     video_paths: list[Path] = []
@@ -1926,7 +1927,6 @@ def collect_videos(
     total = len(video_paths)
     _zero = imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
-    records: list[ImageRecord] = []
 
     # Load per-folder video pHash cache when a library is available.
     from library import VideoRecord as _VideoRecord
@@ -1940,6 +1940,22 @@ def collect_videos(
     _progress_step = 1 if total <= 20 else 5
     failed_paths: list[Path] = []
 
+    # ── Phase 1: stat + cache check (fast, sequential) ─────────────────────
+    # Produces two buckets: `ready` (cache hits, no ffmpeg needed) and
+    # `to_extract` (cache misses that need frame extraction).
+    # Both share the same slot in the final `ordered_phashes` list, keyed by
+    # path string so Phase 3 can assemble records in original walk order.
+
+    @dataclass
+    class _VideoSlot:
+        path: Path
+        stat_result: "os.stat_result"
+        ph: "imagehash.ImageHash"           # filled by cache hit or extraction
+        done: bool = False                  # True once ph is final
+
+    slots: list[_VideoSlot] = []
+    extract_indices: list[int] = []         # indices into slots[] needing extraction
+
     for i, path in enumerate(video_paths):
         if stop_flag and stop_flag[0]:
             break
@@ -1950,8 +1966,7 @@ def collect_videos(
             )
         try:
             stat = path.stat()
-            # Skip zero-byte files — they cannot be valid videos and would
-            # cause ffmpeg/OpenCV to emit errors.  Log as skipped, not failed.
+            # Skip zero-byte files — they cannot be valid videos.
             if stat.st_size == 0:
                 if progress_cb:
                     progress_cb(
@@ -1960,36 +1975,24 @@ def collect_videos(
                     )
                 continue
             file_key = str(path)
-            ph = _zero
 
             if use_thumb:
-                # Check cache first: skip ffmpeg if mtime + size unchanged.
                 cached = _vcache_old.get(file_key)
                 if (
                     cached is not None
                     and cached.mtime == stat.st_mtime
                     and cached.size == stat.st_size
                 ):
+                    # Cache hit — resolve pHash immediately, no extraction needed.
                     ph = imagehash.hex_to_hash(cached.phash) if cached.phash else _zero
+                    slots.append(_VideoSlot(path=path, stat_result=stat, ph=ph, done=True))
                 else:
-                    try:
-                        thumb = _extract_video_thumb(path)
-                        if thumb is not None:
-                            work = _downscaled_for_hashing(
-                                thumb if thumb.mode == "RGB" else thumb.convert("RGB")
-                            )
-                            ph = imagehash.phash(work)
-                    except Exception:
-                        ph = _zero
-                    # Store result in new cache (empty string = extraction failed)
-                    _vcache_new[file_key] = _VideoRecord(
-                        path=file_key,
-                        mtime=stat.st_mtime,
-                        size=stat.st_size,
-                        phash=str(ph) if ph is not _zero else "",
-                    )
+                    # Cache miss — mark slot for parallel extraction.
+                    slot_idx = len(slots)
+                    slots.append(_VideoSlot(path=path, stat_result=stat, ph=_zero, done=False))
+                    extract_indices.append(slot_idx)
             else:
-                # Carry forward any existing cache entry so it survives the save.
+                # No thumb requested — carry forward existing cache entry.
                 cached = _vcache_old.get(file_key)
                 if (
                     cached is not None
@@ -1997,18 +2000,8 @@ def collect_videos(
                     and cached.size == stat.st_size
                 ):
                     _vcache_new[file_key] = cached
+                slots.append(_VideoSlot(path=path, stat_result=stat, ph=_zero, done=True))
 
-            records.append(ImageRecord(
-                path=path,
-                width=0, height=0,
-                file_size=stat.st_size,
-                phash=ph,
-                dhash=_zero,
-                mtime=min(stat.st_mtime, stat.st_ctime),
-                brightness=128.0,
-                histogram=[],
-                is_video=True,
-            ))
         except Exception as _exc:
             failed_paths.append(path)
             if failed_paths_out is not None:
@@ -2018,6 +2011,51 @@ def collect_videos(
                     f"Failed (skipped): {path.name} — {_exc}",
                     i + 1, total, "Videos",
                 )
+
+    # ── Phase 2: bounded parallel extraction for cache-miss files ──────────
+    if extract_indices and not (stop_flag and stop_flag[0]):
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        def _extract_one(slot_idx: int):
+            """Extract thumbnail for one slot; safe to run in a thread."""
+            slot = slots[slot_idx]
+            ph = _zero
+            try:
+                thumb = _extract_video_thumb(slot.path)
+                if thumb is not None:
+                    work = _downscaled_for_hashing(
+                        thumb if thumb.mode == "RGB" else thumb.convert("RGB")
+                    )
+                    ph = imagehash.phash(work)
+            except Exception:
+                ph = _zero
+            slot.ph = ph
+            slot.done = True
+            file_key = str(slot.path)
+            _vcache_new[file_key] = _VideoRecord(
+                path=file_key,
+                mtime=slot.stat_result.st_mtime,
+                size=slot.stat_result.st_size,
+                phash=str(ph) if ph is not _zero else "",
+            )
+
+        with _TPE(max_workers=_VIDEO_EXTRACT_WORKERS) as _pool:
+            list(_pool.map(_extract_one, extract_indices))
+
+    # ── Phase 3: assemble ImageRecord list in original walk order ──────────
+    records: list[ImageRecord] = []
+    for slot in slots:
+        records.append(ImageRecord(
+            path=slot.path,
+            width=0, height=0,
+            file_size=slot.stat_result.st_size,
+            phash=slot.ph,
+            dhash=_zero,
+            mtime=min(slot.stat_result.st_mtime, slot.stat_result.st_ctime),
+            brightness=128.0,
+            histogram=[],
+            is_video=True,
+        ))
 
     # Persist the updated video cache (new + untouched carry-forwards from old).
     if library is not None and _vcache_new:
