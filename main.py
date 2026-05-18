@@ -1419,6 +1419,11 @@ class App:
         self._results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._results_divider.pack(fill=tk.X, padx=16, pady=14)
         self._results_new_frame.pack(pady=10)
+        # Slide-down reveal animation on the results card
+        try:
+            _anim.SlideDownReveal(self._results_info_card, duration_ms=350).play()
+        except Exception:
+            pass
 
     # ── Organize by Date tab ──────────────────────────────────────────────
 
@@ -2637,6 +2642,11 @@ class App:
         self._custom_results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._custom_results_divider.pack(fill=tk.X, padx=16, pady=14)
         self._custom_results_new_frame.pack(pady=10)
+        # Slide-down reveal animation on the results card
+        try:
+            _anim.SlideDownReveal(self._custom_results_info_card, duration_ms=350).play()
+        except Exception:
+            pass
 
         # Enable appropriate buttons
         _mat_enable(self._cr_inapp_btn)

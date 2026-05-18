@@ -202,3 +202,97 @@ def bind_press_feedback(btn, darken_factor=0.82):
             pass
 
     btn.bind("<ButtonPress-1>", _on_press)
+
+
+# -- SlideDownReveal -------------------------------------------------------------------
+
+class SlideDownReveal:
+    """
+    Animate a tk.Frame sliding down into view from zero height to full height
+    over *duration_ms* milliseconds.  Uses place() for the measurement pass and
+    pack() for the final state, so it works inside normal pack-managed layouts.
+
+    Because Tk widgets report winfo_reqheight() only after they have been placed
+    once, this class uses a two-phase approach:
+      1. Briefly place the frame with relwidth=1 but height=1 to trigger geometry.
+      2. Animate height from 1 to the measured height.
+      3. Restore pack() layout at full height.
+
+    Usage:
+        reveal = SlideDownReveal(card_frame, duration_ms=350)
+        reveal.play()   # call after the frame has been packed (content already built)
+    """
+
+    TICK_MS = 16   # ~60 fps
+
+    def __init__(self, frame: tk.Frame, duration_ms: int = 350) -> None:
+        self._frame       = frame
+        self._duration_ms = duration_ms
+        self._after_id    = None
+        self._steps       = max(1, duration_ms // self.TICK_MS)
+        self._current     = 0
+        self._target_h    = 0
+
+    def play(self) -> None:
+        """Start the reveal animation.  The frame must already be packed."""
+        if self._after_id is not None:
+            try:
+                self._frame.after_cancel(self._after_id)
+            except Exception:
+                pass
+        # Force geometry calculation
+        try:
+            self._frame.update_idletasks()
+            self._target_h = self._frame.winfo_reqheight()
+        except Exception:
+            return  # no geometry yet; skip animation gracefully
+        if self._target_h <= 1:
+            return  # nothing to animate
+
+        self._current = 0
+        # Start from zero height using place() overlay; pack stays in place
+        # for layout but we temporarily suppress visibility by setting height
+        # via the internal geometry (not easily done with pack alone).
+        # Instead: we use an overlay frame that collapses from full to zero,
+        # giving the appearance of the card sliding into view.
+        # We create a fresh overlay each play() call to avoid stale refs.
+        try:
+            self._overlay = tk.Frame(
+                self._frame.master,
+                bg=self._frame.master.cget("bg"),
+                height=self._target_h,
+            )
+            self._overlay.place_configure(
+                in_=self._frame, relx=0, y=0, relwidth=1, height=self._target_h
+            )
+            self._overlay.lift()
+        except Exception:
+            return
+
+        self._tick()
+
+    def _tick(self) -> None:
+        self._current += 1
+        t = self._current / self._steps
+        # ease-out: t' = 1 - (1-t)^2
+        t_eased = 1.0 - (1.0 - t) ** 2
+        # Overlay shrinks from full height to 0 as t_eased goes 0 -> 1
+        remaining_h = int(self._target_h * (1.0 - t_eased))
+        try:
+            self._overlay.place_configure(height=remaining_h)
+        except Exception:
+            pass
+
+        if self._current >= self._steps:
+            try:
+                self._overlay.place_forget()
+                self._overlay.destroy()
+            except Exception:
+                pass
+            self._after_id = None
+            return
+
+        try:
+            self._after_id = self._frame.after(self.TICK_MS, self._tick)
+        except Exception:
+            self._after_id = None
