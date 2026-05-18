@@ -56,6 +56,7 @@ except ImportError:
 from config import Settings, DEFAULTS, load_settings, save_settings
 from info_texts import INFO_TEXTS
 import theme as _theme_mod
+import ui_animations as _anim
 from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates)
@@ -1109,8 +1110,16 @@ class App:
         self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
         self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
-        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        # Phase label row: pulsing dot + label side by side
+        _phase_row = tk.Frame(self._prog_frame, bg=_CARD_BG)
+        _phase_row.pack(anchor=tk.W, fill=tk.X)
+        self._scan_pulse_dot = _anim.PulsingDot(
+            _phase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        # dot starts hidden; shown when scanning begins
+        self._scan_phase_lbl = ttk.Label(
+            _phase_row, textvariable=self._phase_label_var,
+            font=("Segoe UI", 9, "bold"))
+        self._scan_phase_lbl.pack(side=tk.LEFT, anchor=tk.W)
         self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
         self._progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._prog_frame, textvariable=self._eta_var,
@@ -2387,8 +2396,13 @@ class App:
         self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
         self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
-        ttk.Label(self._custom_prog_frame, textvariable=self._custom_phase_label,
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        # Phase label row: pulsing dot + label
+        _cphase_row = tk.Frame(self._custom_prog_frame, bg=_CARD_BG)
+        _cphase_row.pack(anchor=tk.W, fill=tk.X)
+        self._custom_pulse_dot = _anim.PulsingDot(
+            _cphase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        ttk.Label(_cphase_row, textvariable=self._custom_phase_label,
+                  font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, anchor=tk.W)
         self._custom_progress_bar = ttk.Progressbar(
             self._custom_prog_frame, mode="determinate", maximum=100)
         self._custom_progress_bar.pack(fill=tk.X, pady=(6, 3))
@@ -2749,6 +2763,12 @@ class App:
         self._custom_progress_bar.start(12)
         self._custom_tracker = PhaseTracker(_CUSTOM_PHASES)
         self._custom_tracker.start_phase(_CUSTOM_PHASES[0], 1)
+
+        # Show pulsing dot during custom scan
+        try:
+            self._custom_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
 
         _set_sleep_prevention(True)
         self._custom_scan_start_time = time.perf_counter()
@@ -3289,6 +3309,11 @@ class App:
         self._custom_progress_bar["mode"]  = "determinate"
         self._custom_progress_bar["value"] = 100 if (success and not paused) else self._custom_progress_bar["value"]
         self._scanning = False
+        # Stop pulsing dot
+        try:
+            self._custom_pulse_dot.hide()
+        except Exception:
+            pass
 
         if paused:
             # Keep the active frame visible; flip Pause → Resume
@@ -4517,6 +4542,12 @@ class App:
         self._progress_bar["mode"]  = "indeterminate"
         self._progress_bar.start(12)
 
+        # Show pulsing dot during scan
+        try:
+            self._scan_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
+
         _set_sleep_prevention(True)
         self._scan_start_time = time.perf_counter()
 
@@ -5071,6 +5102,11 @@ class App:
         self._progress_bar["mode"]  = "determinate"
         self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
         self._scanning = False
+        # Stop pulsing dot
+        try:
+            self._scan_pulse_dot.hide()
+        except Exception:
+            pass
 
         if paused:
             # Keep the active frame visible; flip Pause → Resume
