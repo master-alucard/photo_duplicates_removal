@@ -204,6 +204,129 @@ def bind_press_feedback(btn, darken_factor=0.82):
     btn.bind("<ButtonPress-1>", _on_press)
 
 
+# -- TabIndicator -----------------------------------------------------------------------
+
+class TabIndicator:
+    """
+    An animated sliding underline indicator for a ttk.Notebook.
+
+    Places a thin coloured bar (height=3px) at the bottom of the notebook's
+    tab strip using place() and animates it sliding to the newly selected tab
+    when <<NotebookTabChanged>> fires.
+
+    Usage:
+        indicator = TabIndicator(notebook, accent_color="#1565C0")
+        indicator.bind()   # attaches the event listener and draws initial state
+    """
+
+    TICK_MS      = 12    # ~83 fps -- fast enough to look smooth
+    DURATION_MS  = 180   # total slide duration
+    BAR_HEIGHT   = 3     # pixels
+
+    def __init__(self, notebook, accent_color: str = "#1565C0") -> None:
+        self._nb       = notebook
+        self._accent   = accent_color
+        self._after_id = None
+
+        # The indicator bar -- created on first bind so the notebook exists
+        self._bar = tk.Frame(notebook, bg=accent_color, height=self.BAR_HEIGHT,
+                             bd=0, highlightthickness=0)
+
+        self._current_x  = 0
+        self._current_w  = 0
+        self._target_x   = 0
+        self._target_w   = 0
+        self._steps      = max(1, self.DURATION_MS // self.TICK_MS)
+        self._step       = 0
+
+    def bind(self) -> None:
+        self._nb.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        # Draw at startup after geometry is available
+        self._nb.after(100, self._jump_to_current)
+
+    def update_color(self, accent_color: str) -> None:
+        self._accent = accent_color
+        try:
+            self._bar.configure(bg=accent_color)
+        except Exception:
+            pass
+
+    def _on_tab_changed(self, _event=None) -> None:
+        target = self._get_tab_rect()
+        if target is None:
+            return
+        tx, ty, tw, th = target
+        # Bar sits at the bottom of the tab header area
+        bar_y = ty + th - self.BAR_HEIGHT
+        self._target_x = tx
+        self._target_w = tw
+        # Start animation from current position
+        if self._after_id is None:
+            self._step = 0
+            self._tick(bar_y)
+
+    def _jump_to_current(self) -> None:
+        """Instantly position the bar on the current tab (no animation)."""
+        target = self._get_tab_rect()
+        if target is None:
+            try:
+                self._nb.after(200, self._jump_to_current)
+            except Exception:
+                pass
+            return
+        tx, ty, tw, th = target
+        bar_y = ty + th - self.BAR_HEIGHT
+        self._current_x = tx
+        self._current_w = tw
+        self._target_x  = tx
+        self._target_w  = tw
+        try:
+            self._bar.place(x=tx, y=bar_y, width=tw, height=self.BAR_HEIGHT)
+            self._bar.lift()
+        except Exception:
+            pass
+
+    def _get_tab_rect(self):
+        """Return (x, y, width, height) of the currently selected tab, or None."""
+        try:
+            idx = self._nb.index(self._nb.select())
+            bbox = self._nb.bbox(idx)
+            if bbox and len(bbox) == 4:
+                return bbox
+        except Exception:
+            pass
+        return None
+
+    def _tick(self, bar_y: int) -> None:
+        self._step += 1
+        t = self._step / self._steps
+        # ease-out
+        t_e = 1.0 - (1.0 - t) ** 2
+        self._current_x = int(self._current_x + (self._target_x - self._current_x) * t_e)
+        self._current_w = int(self._current_w + (self._target_w - self._current_w) * t_e)
+        try:
+            self._bar.place(x=self._current_x, y=bar_y,
+                            width=self._current_w, height=self.BAR_HEIGHT)
+            self._bar.lift()
+        except Exception:
+            pass
+
+        if self._step >= self._steps:
+            self._after_id = None
+            # Snap to exact target
+            try:
+                self._bar.place(x=self._target_x, y=bar_y,
+                                width=self._target_w, height=self.BAR_HEIGHT)
+            except Exception:
+                pass
+            return
+
+        try:
+            self._after_id = self._nb.after(self.TICK_MS, lambda: self._tick(bar_y))
+        except Exception:
+            self._after_id = None
+
+
 # -- SlideDownReveal -------------------------------------------------------------------
 
 class SlideDownReveal:

@@ -750,6 +750,8 @@ class App:
 
         self._nb = ttk.Notebook(self.root, style="App.TNotebook")
         self._nb.pack(fill=tk.BOTH, expand=True)
+        # Animated tab indicator — slides to selected tab on switch
+        self._tab_indicator = _anim.TabIndicator(self._nb, accent_color=_ACCENT)
 
         self._tab_scan     = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_custom   = ttk.Frame(self._nb, style="Page.TFrame")
@@ -778,6 +780,12 @@ class App:
         self._build_library_tab()
         self._build_settings_tab()
         self._build_about_tab()
+
+        # Bind tab indicator after all tabs are added so bbox() works correctly
+        try:
+            self._tab_indicator.bind()
+        except Exception:
+            pass
 
     def _init_setting_vars(self) -> None:
         """Create all tkinter data vars from current settings. Called once before building tabs."""
