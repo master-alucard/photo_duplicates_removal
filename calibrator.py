@@ -52,6 +52,7 @@ from scanner import (
     ImageRecord,
     collect_images,
     _classify_group,   # private but accessible; used by the fast calibration path
+    _CF_BASE_THRESHOLD,  # fixed base for cross-format pHash threshold computation
 )
 
 
@@ -815,6 +816,10 @@ def _find_groups_fast(
     threshold  = settings.threshold
     s_factor   = settings.series_threshold_factor
     cf_factor  = getattr(settings, "cross_format_threshold_factor", 5.0)
+    # Fixed absolute CF threshold — same logic as scanner._can_be_similar:
+    # the inter-group pHash gap (20 bits) must not be crossed at any sweep value.
+    # Uses _CF_BASE_THRESHOLD (=2) instead of the current sweep ``threshold``.
+    cf_abs_thr = int(_CF_BASE_THRESHOLD * cf_factor)
     dark_on    = settings.dark_protection
     dark_thr   = settings.dark_threshold
     dark_tight = settings.dark_tighten_factor
@@ -831,7 +836,7 @@ def _find_groups_fast(
     max_eff_thr = max(
         threshold,
         int(threshold * s_factor),
-        int(threshold * cf_factor),
+        cf_abs_thr,   # fixed; does not scale with sweep threshold
         rot_floor,
     )
 
@@ -858,7 +863,10 @@ def _find_groups_fast(
         # 5. Effective pHash threshold
         eff_thr = int(threshold * s_factor) if same_dims else threshold
         if pd.cross_format:
-            eff_thr = max(eff_thr, int(threshold * eff_cf))
+            # Fixed CF threshold: always uses _CF_BASE_THRESHOLD, not the sweep value.
+            # This prevents the threshold from scaling into the inter-group pHash gap
+            # when the calibration sweeps threshold > 2 (see _CF_BASE_THRESHOLD docs).
+            eff_thr = max(eff_thr, cf_abs_thr)
         if dark_on and (pd.brightness_a < dark_thr or pd.brightness_b < dark_thr):
             eff_thr = max(1, int(eff_thr * dark_tight))
 

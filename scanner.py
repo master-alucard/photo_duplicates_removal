@@ -93,6 +93,19 @@ _CROSS_FORMAT_DIM_TOL = 0.02
 # discrimination (different scenes always have pHash distance > 10 bits).
 _CROSS_FORMAT_HIST_FLOOR = 0.0
 
+# Base threshold used when computing the absolute cross-format pHash threshold.
+#
+# ``cross_format_threshold_factor`` (default 6.0) was calibrated at threshold=2:
+#   effective CF threshold = 2 * 6.0 = 12 bits
+# This covers all true RAW+JPEG pairs (max intra-group pHash=12) while staying
+# below the inter-group safety gap (min inter-group pHash=20).
+#
+# Using the user's current ``settings.threshold`` as the base would cause the CF
+# threshold to scale linearly with the sweep value during calibration (e.g.
+# threshold=4 → cf_thr=24, which overlaps the inter-group gap and chains unrelated
+# landscape shots together via single-linkage union-find).
+_CF_BASE_THRESHOLD: int = 2
+
 # ── Hashing performance constants ────────────────────────────────────────────
 #
 # Pre-downscale every image to at most _HASH_WORKING_SIZE pixels on its longest
@@ -928,9 +941,20 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     else:
         eff_threshold = settings.threshold
 
-    # Cross-format pairs get an additional threshold relaxation on top of series scaling
+    # Cross-format pairs get an additional threshold relaxation on top of series scaling.
+    #
+    # IMPORTANT: the effective cross-format threshold is a FIXED physical constant
+    # calibrated on Canon EOS M100 CR2 vs camera JPEG pairs (max intra-group pHash=12,
+    # min inter-group pHash=20 → 8-bit safety gap).  It must NOT scale with the user's
+    # current ``threshold`` setting, because at threshold=4 the naive ``threshold *
+    # cf_factor = 4 * 6 = 24`` would exceed the inter-group gap (20 bits) and cause
+    # unrelated landscape shots to chain together via single-linkage union-find.
+    #
+    # Formula: cf_abs_threshold = _CF_BASE_THRESHOLD * cf_factor  (always uses base=2)
+    # Default: 2 * 6.0 = 12 bits — covers all true RAW+JPEG pairs, stays below gap.
     if cross_format:
-        eff_threshold = max(eff_threshold, int(settings.threshold * cf_factor))
+        cf_abs_threshold = int(_CF_BASE_THRESHOLD * cf_factor)
+        eff_threshold = max(eff_threshold, cf_abs_threshold)
 
     if settings.dark_protection:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
