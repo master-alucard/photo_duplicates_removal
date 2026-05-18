@@ -152,7 +152,10 @@ def load_settings(path: Path) -> Settings:
         known = {f for f in Settings.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
         s = Settings(**filtered)
+        file_version = data.get("settings_version", 0)
         _migrate(s, data)
+        if file_version < _SETTINGS_VERSION:
+            save_settings(s, path)
         return s
     except Exception:
         return Settings()
