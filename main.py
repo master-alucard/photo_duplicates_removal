@@ -338,6 +338,8 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
 
     btn.bind("<Enter>", _enter)
     btn.bind("<Leave>", _leave)
+    # Brief pressed-state feedback (100 ms darker bg on click)
+    _anim.bind_press_feedback(btn)
     return btn
 
 
