@@ -1120,6 +1120,9 @@ class App:
             _phase_row, textvariable=self._phase_label_var,
             font=("Segoe UI", 9, "bold"))
         self._scan_phase_lbl.pack(side=tk.LEFT, anchor=tk.W)
+        # Phase transition flash (triggers on phase change)
+        self._scan_phase_flash = _anim.PhaseFlash(
+            self._scan_phase_lbl, accent_color=_ACCENT, normal_color=_M_TEXT1)
         self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
         self._progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._prog_frame, textvariable=self._eta_var,
@@ -2401,8 +2404,12 @@ class App:
         _cphase_row.pack(anchor=tk.W, fill=tk.X)
         self._custom_pulse_dot = _anim.PulsingDot(
             _cphase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
-        ttk.Label(_cphase_row, textvariable=self._custom_phase_label,
-                  font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, anchor=tk.W)
+        self._custom_phase_lbl_widget = ttk.Label(
+            _cphase_row, textvariable=self._custom_phase_label,
+            font=("Segoe UI", 9, "bold"))
+        self._custom_phase_lbl_widget.pack(side=tk.LEFT, anchor=tk.W)
+        self._custom_phase_flash = _anim.PhaseFlash(
+            self._custom_phase_lbl_widget, accent_color=_ACCENT, normal_color=_M_TEXT1)
         self._custom_progress_bar = ttk.Progressbar(
             self._custom_prog_frame, mode="determinate", maximum=100)
         self._custom_progress_bar.pack(fill=tk.X, pady=(6, 3))
@@ -3249,6 +3256,11 @@ class App:
         if tracker.current_phase_name != mapped:
             tracker.finish_phase()
             tracker.start_phase(mapped, max(total, 1))
+            # Brief accent flash on phase change
+            try:
+                self._custom_phase_flash.trigger()
+            except Exception:
+                pass
 
         if total > 0:
             tracker.update(done)
@@ -4703,6 +4715,11 @@ class App:
             self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}…")
             self._progress_bar.stop()
             self._progress_bar["mode"] = "determinate"
+            # Brief accent flash on phase change
+            try:
+                self._scan_phase_flash.trigger()
+            except Exception:
+                pass
 
         if total > 0:
             self._tracker.update(done)
