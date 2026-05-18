@@ -412,7 +412,12 @@ def _score(
 
         if len(ids) == 1 and ids:
             groups_found += 1
-            dg = path_to_dgroup.get(resolved_all[0])
+            # Use the first file that actually has a record (CR2 may be invisible
+            # when use_rawpy=False; don't let an invisible file cause dg=None).
+            dg = next(
+                (path_to_dgroup[p] for p in resolved_all if p in path_to_dgroup),
+                None,
+            )
             if dg:
                 orig_ok = any(r.path.resolve() == resolved_orig for r in dg.originals)
                 if not orig_ok:
@@ -520,7 +525,15 @@ def _score_verbose(
         orig_correct = False
         prev_correct_list: list[tuple[str, bool]] = []
 
-        dg = path_to_dgroup.get(resolved_all[0]) if detected_together else None
+        # Use the first file that actually has a record (CR2 may be invisible
+        # when use_rawpy=False; don't let an invisible file cause dg=None).
+        dg = (
+            next(
+                (path_to_dgroup[p] for p in resolved_all if p in path_to_dgroup),
+                None,
+            )
+            if detected_together else None
+        )
         if detected_together and dg:
             groups_found += 1
             orig_correct = any(r.path.resolve() == resolved_orig for r in dg.originals)
