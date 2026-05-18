@@ -38,20 +38,37 @@ def f1_from_result(r) -> float:
 def _make_settings_for_folder(folder_name: str) -> Settings:
     """Return Settings tuned for the given calibration folder.
 
-    RAW and CF folders:
-    - use_rawpy=True: CR2 files must be hashed; without this only JPEG halves are
-      seen and cross-format pairs can never form.
-    - keep_all_formats=False: calibration data expects CR2 to be the authoritative
-      master and the camera JPEG to be classified as a preview/duplicate.  With
-      keep_all_formats=True both formats would be kept as originals and the group
-      would not appear in the result at all, causing all expected groups to be
-      scored as missed.
+    RAW folder:
+    - use_rawpy=True: CR2 files must be hashed.
+    - keep_all_formats=False: calibration expects the CR2 as original and the
+      companion JPEG as the preview/duplicate.
+    - raw_use_embedded_thumb=True: the RAW calibration ground truth was built
+      with the camera-embedded JPEG thumbnail as the canonical rendering.  Canon
+      EOS M100 CR2 files embed a full-resolution (6000×4000) JPEG preview that is
+      pixel-identical to the companion camera JPEG — pHash distance = 0.  With
+      rawpy postprocess (demosaicing without the camera tone curve) the same pairs
+      produce pHash distances of 22–36 bits — far beyond the cf_abs_threshold of
+      12 — so those pairs are missed.  Embedded-thumb mode is the correct setting
+      for this folder.
+
+    CrossFmt folder:
+    - use_rawpy=True, keep_all_formats=False — same as RAW.
+    - raw_use_embedded_thumb=False (default): the CF calibration tests the
+      postprocess code path.  The CF/singles folder contains the same 4 CR2+JPEG
+      pairs that appear in RAW/groups; those files are listed as singles in CF
+      because with postprocess hashing they have dist=22–36 (correctly not grouped).
+      Switching to embedded-thumb mode here would cause false positives: each CR2
+      in CF/singles would hash identically to its JPEG companion (dist=0) and be
+      grouped with it, which the CF ground truth treats as a false positive.
+
     JPEG folder: pure JPEG pairs — default settings are fine.
     """
     s = Settings()
     if folder_name in ("RAW", "CrossFmt"):
         s.use_rawpy = True
         s.keep_all_formats = False
+    if folder_name == "RAW":
+        s.raw_use_embedded_thumb = True
     return s
 
 
