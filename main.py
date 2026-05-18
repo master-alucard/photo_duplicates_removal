@@ -5674,7 +5674,7 @@ class App:
         notes_text.configure(state=tk.DISABLED)
 
         # ── Action buttons ─────────────────────────────────────────────────
-        btn_row = tk.Frame(win, bg=_CARD_BG, padx=24, pady=(0, 18))
+        btn_row = tk.Frame(win, bg=_CARD_BG, padx=24, pady=18)
         btn_row.pack(fill=tk.X)
 
         def _do_download() -> None:
