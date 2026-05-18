@@ -112,6 +112,9 @@ _M_DETAIL_BG    = "#F5F5F5"
 _M_PURPLE       = "#7c3aed"
 _M_NOT_INST     = "#e03030"
 _M_DISABLED_FG  = "#838387"
+# Tint backgrounds for stat cells
+_M_ERROR_TINT   = "#FFCDD2"
+_M_SUCCESS_TINT = "#DCEDC8"
 # Button backgrounds — always saturated for white text
 _BTN_PRIMARY    = "#1565C0"
 _BTN_SUCCESS    = "#2E7D32"
@@ -140,6 +143,7 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
     global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
     global _SL_REC_BAND, _SL_TRACK, _SL_THUMB, _SL_THUMB_OL
+    global _M_ERROR_TINT, _M_SUCCESS_TINT
 
     p = _theme_mod.get_palette(dark)
     _ACCENT        = p["ACCENT"]
@@ -182,10 +186,12 @@ def _apply_theme(dark: bool = False) -> None:
     _BTN_ERROR     = p["BTN_ERROR"]
     _BTN_WARNING   = p["BTN_WARNING"]
     _BTN_SECONDARY = p["BTN_SECONDARY"]
-    _SL_REC_BAND   = p["SLIDER_REC_BAND"]
-    _SL_TRACK      = p["SLIDER_TRACK"]
-    _SL_THUMB      = p["SLIDER_THUMB"]
-    _SL_THUMB_OL   = p["SLIDER_THUMB_OL"]
+    _SL_REC_BAND    = p["SLIDER_REC_BAND"]
+    _SL_TRACK       = p["SLIDER_TRACK"]
+    _SL_THUMB       = p["SLIDER_THUMB"]
+    _SL_THUMB_OL    = p["SLIDER_THUMB_OL"]
+    _M_ERROR_TINT   = p["ERROR_TINT"]
+    _M_SUCCESS_TINT = p["SUCCESS_TINT"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -1392,21 +1398,28 @@ class App:
         stats_row = tk.Frame(self._results_info_card, bg=_CARD_BG)
         stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
 
-        def _stat_cell(parent, value, label, fg=_M_TEXT1):
-            cell = tk.Frame(parent, bg=_CARD_BG)
-            cell.pack(side=tk.LEFT, padx=(0, 28))
+        def _stat_cell(parent, value, label, fg=_M_TEXT1, tint=None):
+            """Render a stat cell; tint adds a soft background behind the number."""
+            cell_bg = tint if tint else _CARD_BG
+            cell = tk.Frame(parent, bg=cell_bg, padx=8 if tint else 0, pady=4 if tint else 0)
+            cell.pack(side=tk.LEFT, padx=(0, 16))
             vstr = f"{value:,}" if isinstance(value, int) else str(value)
             tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
-                     bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
+                     bg=cell_bg, fg=fg).pack(anchor=tk.W)
             tk.Label(cell, text=label, font=("Segoe UI", 8),
-                     bg=_CARD_BG, fg=_M_HINT5).pack(anchor=tk.W)
+                     bg=cell_bg, fg=_M_HINT5).pack(anchor=tk.W)
 
-        _stat_cell(stats_row, files,   "files scanned")
+        _stat_cell(stats_row, files, "files scanned")
+        _dup_tint = _M_ERROR_TINT if n_groups > 0 else None
         _stat_cell(stats_row, n_groups, "dup groups",
-                   _M_ERROR if n_groups > 0 else _M_TEXT1)
-        _stat_cell(stats_row, n_dupes,  "duplicates",
-                   _M_ERROR if n_dupes > 0 else _M_TEXT1)
-        _stat_cell(stats_row, space_lbl, "space to free", _M_SUCCESS if space_b > 0 else _M_TEXT1)
+                   _M_ERROR if n_groups > 0 else _M_TEXT1,
+                   tint=_dup_tint)
+        _stat_cell(stats_row, n_dupes, "duplicates",
+                   _M_ERROR if n_dupes > 0 else _M_TEXT1,
+                   tint=_dup_tint)
+        _stat_cell(stats_row, space_lbl, "space to free",
+                   _M_SUCCESS if space_b > 0 else _M_TEXT1,
+                   tint=_M_SUCCESS_TINT if space_b > 0 else None)
         if dur_s:
             _stat_cell(stats_row, _fmt_duration(dur_s), "scan time")
 
