@@ -40,6 +40,38 @@ def _thumb_b64(path: Path, max_px: int = 400) -> str:
         return ""
 
 
+def _video_thumb_b64(path: Path, max_px: int = 400) -> str:
+    """Extract a representative frame from a video and return a data-URI.
+
+    Uses ``scanner._extract_video_thumb`` (ffmpeg or OpenCV) to grab the frame,
+    then resizes and encodes it the same way :func:`_thumb_b64` does for images.
+    Returns ``''`` if the video cannot be decoded or if no extraction tool is
+    available — the caller will render a placeholder instead.
+    """
+    try:
+        from scanner import _extract_video_thumb
+        img = _extract_video_thumb(path)
+        if img is None:
+            return ""
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+        img.thumbnail((max_px, max_px), PILImage.LANCZOS)
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=82)
+        data = base64.b64encode(buf.getvalue()).decode()
+        return f"data:image/jpeg;base64,{data}"
+    except Exception:
+        return ""
+
+
+def _any_thumb_b64(path: Path, max_px: int = 400) -> str:
+    """Route to the correct thumbnail extractor based on file extension."""
+    from scanner import VIDEO_EXTENSIONS
+    if path.suffix.lower() in VIDEO_EXTENSIONS:
+        return _video_thumb_b64(path, max_px)
+    return _thumb_b64(path, max_px)
+
+
 def _exif_section_html(path: Path) -> str:
     """Return a collapsible HTML block showing all EXIF fields."""
     try:
@@ -117,7 +149,7 @@ def generate_report(
         _all_jobs: list[tuple[Path, int]] = _orig_jobs + _prev_jobs
 
         _pool = ThreadPoolExecutor(max_workers=4)
-        _futs = {_pool.submit(_thumb_b64, p, px): (p, px) for p, px in _all_jobs}
+        _futs = {_pool.submit(_any_thumb_b64, p, px): (p, px) for p, px in _all_jobs}
         for _fut, _key in _futs.items():
             try:
                 _b64[_key] = _fut.result(timeout=_THUMB_TIMEOUT_S)

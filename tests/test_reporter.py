@@ -299,3 +299,69 @@ class TestReportSettings:
         # Already read as UTF-8 in _run; just verify the file round-trips
         content = path.read_bytes()
         content.decode("utf-8")  # must not raise
+
+
+# ── video thumbnail routing ────────────────────────────────────────────────────
+
+class TestVideoThumbnails:
+    """_any_thumb_b64 must route to _video_thumb_b64 for video extensions."""
+
+    def test_any_thumb_b64_routes_image_to_thumb_b64(self, tmp_path):
+        """JPEG path must call _thumb_b64 (PIL path), not _video_thumb_b64."""
+        from reporter import _any_thumb_b64
+        from unittest.mock import patch
+
+        jpg = tmp_path / "photo.jpg"
+        jpg.write_bytes(b"fake")
+
+        with patch("reporter._thumb_b64", return_value="img-data") as mock_img:
+            with patch("reporter._video_thumb_b64", return_value="vid-data") as mock_vid:
+                result = _any_thumb_b64(jpg, 160)
+
+        mock_img.assert_called_once()
+        mock_vid.assert_not_called()
+        assert result == "img-data"
+
+    def test_any_thumb_b64_routes_video_to_video_thumb_b64(self, tmp_path):
+        """MP4 path must call _video_thumb_b64, not _thumb_b64."""
+        from reporter import _any_thumb_b64
+        from unittest.mock import patch
+
+        mp4 = tmp_path / "clip.mp4"
+        mp4.write_bytes(b"fake")
+
+        with patch("reporter._thumb_b64", return_value="img-data") as mock_img:
+            with patch("reporter._video_thumb_b64", return_value="vid-data") as mock_vid:
+                result = _any_thumb_b64(mp4, 160)
+
+        mock_vid.assert_called_once()
+        mock_img.assert_not_called()
+        assert result == "vid-data"
+
+    def test_video_thumb_b64_returns_empty_when_extraction_fails(self, tmp_path):
+        """_video_thumb_b64 must return '' when ffmpeg returns None (not crash)."""
+        from reporter import _video_thumb_b64
+        from unittest.mock import patch
+
+        mp4 = tmp_path / "bad.mp4"
+        mp4.write_bytes(b"not a video")
+
+        with patch("scanner._extract_video_thumb", return_value=None):
+            result = _video_thumb_b64(mp4, 160)
+
+        assert result == ""
+
+    def test_video_thumb_b64_encodes_frame_as_jpeg(self, tmp_path):
+        """When extraction returns an image, the result must be a JPEG data-URI."""
+        from reporter import _video_thumb_b64
+        from unittest.mock import patch
+        from PIL import Image as PILImage
+
+        mp4 = tmp_path / "ok.mp4"
+        mp4.write_bytes(b"not a video")
+        fake_frame = PILImage.new("RGB", (32, 32), (100, 200, 50))
+
+        with patch("scanner._extract_video_thumb", return_value=fake_frame):
+            result = _video_thumb_b64(mp4, 160)
+
+        assert result.startswith("data:image/jpeg;base64,")
