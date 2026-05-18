@@ -1826,12 +1826,20 @@ def collect_videos(
     settings: Settings,
     progress_cb: Optional[ProgressCb] = None,
     stop_flag: Optional[list[bool]] = None,
+    library=None,
 ) -> List[ImageRecord]:
     """Walk *folder* and return one :class:`ImageRecord` per video file found.
 
     Records have ``is_video=True``, ``width=0``, ``height=0``.
     ``phash`` holds a thumbnail pHash when ``settings.video_use_thumb`` is True
     and a frame could be extracted via ffmpeg or OpenCV; otherwise a zero hash.
+
+    Args:
+        library: Optional :class:`~library.Library` instance.  When supplied,
+                 previously extracted thumbnail pHashes are reused for files
+                 whose ``mtime`` and ``size`` are unchanged (cache hit), so
+                 repeated scans of a large video collection skip the costly
+                 ffmpeg subprocess for every file.
 
     The function is intentionally sequential (no thread pool) because thumbnail
     extraction already involves spawning ffmpeg subprocesses — parallel spawning
@@ -1864,6 +1872,13 @@ def collect_videos(
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
     records: list[ImageRecord] = []
 
+    # Load per-folder video pHash cache when a library is available.
+    from library import VideoRecord as _VideoRecord
+    _vcache_old: dict[str, _VideoRecord] = (
+        library.load_video_cache(str(folder)) if library is not None else {}
+    )
+    _vcache_new: dict[str, _VideoRecord] = {}
+
     for i, path in enumerate(video_paths):
         if stop_flag and stop_flag[0]:
             break
@@ -1874,17 +1889,44 @@ def collect_videos(
             )
         try:
             stat = path.stat()
+            file_key = str(path)
             ph = _zero
+
             if use_thumb:
-                try:
-                    thumb = _extract_video_thumb(path)
-                    if thumb is not None:
-                        work = _downscaled_for_hashing(
-                            thumb if thumb.mode == "RGB" else thumb.convert("RGB")
-                        )
-                        ph = imagehash.phash(work)
-                except Exception:
-                    ph = _zero
+                # Check cache first: skip ffmpeg if mtime + size unchanged.
+                cached = _vcache_old.get(file_key)
+                if (
+                    cached is not None
+                    and cached.mtime == stat.st_mtime
+                    and cached.size == stat.st_size
+                ):
+                    ph = imagehash.hex_to_hash(cached.phash) if cached.phash else _zero
+                else:
+                    try:
+                        thumb = _extract_video_thumb(path)
+                        if thumb is not None:
+                            work = _downscaled_for_hashing(
+                                thumb if thumb.mode == "RGB" else thumb.convert("RGB")
+                            )
+                            ph = imagehash.phash(work)
+                    except Exception:
+                        ph = _zero
+                    # Store result in new cache (empty string = extraction failed)
+                    _vcache_new[file_key] = _VideoRecord(
+                        path=file_key,
+                        mtime=stat.st_mtime,
+                        size=stat.st_size,
+                        phash=str(ph) if ph is not _zero else "",
+                    )
+            else:
+                # Carry forward any existing cache entry so it survives the save.
+                cached = _vcache_old.get(file_key)
+                if (
+                    cached is not None
+                    and cached.mtime == stat.st_mtime
+                    and cached.size == stat.st_size
+                ):
+                    _vcache_new[file_key] = cached
 
             records.append(ImageRecord(
                 path=path,
@@ -1899,6 +1941,16 @@ def collect_videos(
             ))
         except Exception:
             pass
+
+    # Persist the updated video cache (new + untouched carry-forwards from old).
+    if library is not None and _vcache_new:
+        # Merge: start from old cache, update with fresh extractions.
+        merged_vcache = dict(_vcache_old)
+        merged_vcache.update(_vcache_new)
+        # Drop entries for files that no longer exist in this scan.
+        seen = {str(p) for p in video_paths}
+        merged_vcache = {k: v for k, v in merged_vcache.items() if k in seen}
+        library.save_video_cache(str(folder), merged_vcache)
 
     return records
 
