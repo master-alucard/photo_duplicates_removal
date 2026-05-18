@@ -88,7 +88,9 @@ class Settings:
     scan_threads: int = 0                        # parallel hashing threads (0 = auto, drive-aware)
     io_parallelism: str = "auto"                 # "auto" | "ssd" | "hdd" — controls per-drive read concurrency
     hdd_thread_cap: int = 2                      # max parallel readers when drive is HDD (prevents seek-thrash & overheating)
-    raw_use_embedded_thumb: bool = False         # Opt-in: use rawpy.extract_thumb() (~6× faster, but invalidates v1.1.9 and earlier RAW cache — phash differs from postprocess by ~30 bits)
+    raw_use_embedded_thumb: bool = True          # Use rawpy.extract_thumb() for RAW hashing: 30-80x faster, and produces pHash that matches the camera-generated JPEG (same tone curve).
+                                                 # Note: changes pHash values vs the old postprocess default — existing RAW cache entries hashed before this change will be treated as stale
+                                                 # (mtime/size check in library.py detects the mismatch).  False = use rawpy.postprocess() demosaic (legacy behaviour, ~30 bit pHash offset).
     # ── Runaway-group safety net ─────────────────────────────────────────────
     # Single-linkage union-find can chain unrelated images together via 1-bit
     # pHash intermediates, which is common when a collection contains many
