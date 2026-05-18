@@ -106,6 +106,24 @@ _CROSS_FORMAT_HIST_FLOOR = 0.0
 # landscape shots together via single-linkage union-find).
 _CF_BASE_THRESHOLD: int = 2
 
+# Maximum pHash distance allowed for cross-format pairs in embedded-thumb mode.
+#
+# rawpy.extract_thumb() returns the camera-generated JPEG preview so the hash
+# closely matches the companion camera JPEG.  Measured across 31 Canon EOS M100
+# RAW+JPEG pairs in calibration_cf:
+#   max intra-pair pHash (same shot)  = 2 bits   (thumbnail compression drift)
+#   min inter-pair pHash (diff shot)  = 4 bits   (consecutive burst frames)
+#
+# Safety gap = 4 - 2 = 2 bits.  Threshold of 3 sits in the middle: covers every
+# true pair while rejecting consecutive-shot false positives at distance = 4.
+#
+# This is a fixed physical constant — intentionally NOT scaled by the user's
+# threshold slider.  Using settings.threshold (default 2, user-visible range
+# 1-20) would let the user accidentally widen the window past the inter-group
+# gap (≥ 4 bits) and chain consecutive burst shots into one group, exactly the
+# Group-19 bug that this constant was introduced to prevent.
+_CF_EMBEDDED_THUMB_MAX_PHASH: int = 3
+
 # ── Hashing performance constants ────────────────────────────────────────────
 #
 # Pre-downscale every image to at most _HASH_WORKING_SIZE pixels on its longest
@@ -957,15 +975,24 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     #   rawpy.extract_thumb() returns the camera's own JPEG preview — essentially the
     #   same rendering as the companion camera JPEG.  Measured max intra-pair pHash
     #   distance across 35 Canon EOS M100 pairs = 2 bits (thumbnail compression only).
-    #   The regular eff_threshold (= settings.threshold, default 2) is sufficient.
-    #   No extra CF relaxation needed: do not raise eff_threshold above its current value.
+    #   The regular eff_threshold would be sufficient at default threshold=2, but the
+    #   user can raise the threshold slider above the 4-bit inter-shot safety gap.
+    #   We therefore CAP eff_threshold at _CF_EMBEDDED_THUMB_MAX_PHASH (3 bits) so
+    #   consecutive burst shots (inter-shot pHash = 4) are always blocked.
     if cross_format:
         use_embedded = getattr(settings, "raw_use_embedded_thumb", True)
         if not use_embedded:
             # Postprocess path: use the large fixed CF threshold.
             cf_abs_threshold = int(_CF_BASE_THRESHOLD * cf_factor)
             eff_threshold = max(eff_threshold, cf_abs_threshold)
-        # Embedded-thumb path: eff_threshold stays as-is (already covers max dist=2).
+        else:
+            # Embedded-thumb path: the camera's own JPEG preview is nearly identical
+            # to the companion camera JPEG so true-pair pHash ≤ 2 bits.  Cap the
+            # threshold at _CF_EMBEDDED_THUMB_MAX_PHASH (3 bits) regardless of the
+            # user's threshold slider.  This prevents consecutive burst shots taken
+            # seconds apart (inter-shot pHash = 4 bits) from being chained into the
+            # same group as a different RAW+JPEG pair (the "Group-19 false chain" bug).
+            eff_threshold = min(eff_threshold, _CF_EMBEDDED_THUMB_MAX_PHASH)
 
     if settings.dark_protection:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
