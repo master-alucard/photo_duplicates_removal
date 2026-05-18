@@ -1776,44 +1776,96 @@ def _split_by_format(
 
 # ── Video duplicate detection ─────────────────────────────────────────────────
 
+_FFMPEG_TIMEOUT = 10   # seconds — prevents hangs on malformed/truncated videos
+
+
+def _probe_video_duration(path: Path) -> "Optional[float]":
+    """Return video duration in seconds via ffprobe, or None if unavailable.
+
+    Used by _extract_video_thumb to choose a safe seek position for very
+    short clips (duration < 1 s).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
     """Try to extract a representative frame from a video file.
 
-    Tries ffmpeg subprocess first (widely available), then OpenCV.
-    Returns a PIL Image (RGB) or None if neither method is available / succeeds.
-    The frame is taken at 1 second into the video (safe for most clips; falls back
-    to the very first frame if the video is shorter than 1 s).
+    Tries ffmpeg subprocess first (widely available), then OpenCV as fallback.
+    Returns a PIL Image (RGB), or None if neither tool is available or both fail.
+
+    Seek position:
+    - Query duration via ffprobe and seek to ``min(duration / 2, 1.0)`` so that
+      very short clips (< 1 s) get a frame at their midpoint rather than past EOF.
+    - Falls back to seeking at 1 s without a prior duration probe when ffprobe is
+      unavailable (behaviour is unchanged for normal-length videos).
+    - If the timed-out ffmpeg call fails (malformed file), returns None.
+
+    Both ffmpeg and ffprobe calls are bounded by timeouts to prevent hangs on
+    corrupt or truncated video files.
     """
-    # 1. Try ffmpeg (most reliable; no Python dependency)
+    import subprocess
+    import io as _io
+
+    # ── determine a safe seek offset ─────────────────────────────────────────
+    seek_s = 1.0
+    dur = _probe_video_duration(path)
+    if dur is not None and dur < 2.0:
+        # For clips shorter than 2 s, seek to the midpoint so we always land
+        # on a valid frame.  For normal videos this evaluates to >= 1.0.
+        seek_s = max(dur / 2.0, 0.0)
+
+    seek_str = f"{seek_s:.3f}"
+
+    # ── 1. ffmpeg path ─────────────────────────────────────────────────────
     try:
-        import subprocess
-        import io as _io
         result = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-ss", "00:00:01", "-i", str(path),
+                "-ss", seek_str, "-i", str(path),
                 "-frames:v", "1", "-f", "image2pipe",
                 "-vcodec", "png", "-",
             ],
-            capture_output=True, timeout=15,
+            capture_output=True, timeout=_FFMPEG_TIMEOUT,
         )
         if result.returncode == 0 and result.stdout:
             img = Image.open(_io.BytesIO(result.stdout))
             img.load()
             return img.convert("RGB") if img.mode != "RGB" else img
+    except FileNotFoundError:
+        # ffmpeg not installed — fall through to OpenCV silently.
+        pass
     except Exception:
         pass
 
-    # 2. Try OpenCV (cv2) — only available if user installed it
+    # ── 2. OpenCV fallback ────────────────────────────────────────────────
     try:
         import cv2  # type: ignore
         cap = cv2.VideoCapture(str(path))
-        # Seek to 1000 ms
-        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        seek_ms = seek_s * 1000.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_ms)
         ret, frame = cap.read()
         cap.release()
         if ret and frame is not None:
             return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except ImportError:
+        # cv2 not installed — that's fine, it's optional.
+        pass
     except Exception:
         pass
 
@@ -1889,6 +1941,15 @@ def collect_videos(
             )
         try:
             stat = path.stat()
+            # Skip zero-byte files — they cannot be valid videos and would
+            # cause ffmpeg/OpenCV to emit errors.  Log as skipped, not failed.
+            if stat.st_size == 0:
+                if progress_cb:
+                    progress_cb(
+                        f"Skipped (0-byte): {path.name}",
+                        i + 1, total, "Videos",
+                    )
+                continue
             file_key = str(path)
             ph = _zero
 

@@ -187,3 +187,112 @@ def test_collect_videos_cache_persisted_after_scan(tmp_path):
     # Load back and verify entry exists
     loaded = lib.load_video_cache(str(tmp_path))
     assert len(loaded) == 1
+
+
+# ── 0-byte video guard ────────────────────────────────────────────────────────
+
+def test_collect_videos_skips_zero_byte_files(tmp_path):
+    """0-byte video files must be silently skipped, not included in results."""
+    from config import Settings
+    from scanner import collect_videos
+
+    good = _make_fake_video(tmp_path, "good.mp4", size=100)
+    empty = tmp_path / "empty.mp4"
+    empty.write_bytes(b"")
+
+    settings = Settings(include_videos=True, video_use_thumb=False, recursive=False)
+    records = collect_videos(tmp_path, set(), settings)
+
+    paths = {r.path for r in records}
+    assert good in paths
+    assert empty not in paths
+
+
+def test_collect_videos_zero_byte_does_not_call_extractor(tmp_path):
+    """_extract_video_thumb must never be called for a 0-byte file."""
+    from config import Settings
+    from scanner import collect_videos
+
+    (tmp_path / "zero.mp4").write_bytes(b"")
+    settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
+
+    with patch("scanner._extract_video_thumb") as mock_ex:
+        collect_videos(tmp_path, set(), settings)
+
+    mock_ex.assert_not_called()
+
+
+# ── short video / seek position ──────────────────────────────────────────────
+
+def test_probe_video_duration_returns_none_when_ffprobe_missing():
+    """_probe_video_duration must return None gracefully when ffprobe is absent."""
+    from scanner import _probe_video_duration
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        dur = _probe_video_duration(Path("any.mp4"))
+    assert dur is None
+
+
+def test_probe_video_duration_returns_none_on_bad_output():
+    """_probe_video_duration must return None when ffprobe output is not a float."""
+    from scanner import _probe_video_duration
+    mock_result = MagicMock()
+    mock_result.returncode = 0
+    mock_result.stdout = b"N/A\n"
+    with patch("subprocess.run", return_value=mock_result):
+        dur = _probe_video_duration(Path("any.mp4"))
+    assert dur is None
+
+
+def test_extract_video_thumb_uses_midpoint_for_short_video():
+    """For a 0.5 s video, ffmpeg must be invoked with seek ~0.25 s."""
+    from scanner import _extract_video_thumb
+    import subprocess as _sp
+
+    captured_args = []
+
+    def _fake_run(args, **kwargs):
+        captured_args.append(args)
+        r = MagicMock()
+        r.returncode = 1
+        r.stdout = b""
+        return r
+
+    with patch("scanner._probe_video_duration", return_value=0.5):
+        with patch("subprocess.run", side_effect=_fake_run):
+            _extract_video_thumb(Path("short.mp4"))
+
+    # Find the ffmpeg call (not ffprobe)
+    ffmpeg_calls = [a for a in captured_args if a and "ffmpeg" in a[0]]
+    assert ffmpeg_calls, "expected an ffmpeg subprocess call"
+    seek_arg = ffmpeg_calls[0][ffmpeg_calls[0].index("-ss") + 1]
+    seek_val = float(seek_arg)
+    assert abs(seek_val - 0.25) < 0.01, f"expected seek ~0.25 s, got {seek_val}"
+
+
+# ── graceful degradation (ffmpeg/OpenCV missing) ──────────────────────────────
+
+def test_extract_video_thumb_returns_none_when_both_tools_missing():
+    """If both ffmpeg and cv2 are unavailable, return None without crashing."""
+    from scanner import _extract_video_thumb
+
+    with patch("scanner._probe_video_duration", return_value=None):
+        with patch("subprocess.run", side_effect=FileNotFoundError):
+            with patch.dict("sys.modules", {"cv2": None}):
+                result = _extract_video_thumb(Path("clip.mp4"))
+
+    assert result is None
+
+
+# ── ffmpeg timeout ─────────────────────────────────────────────────────────────
+
+def test_extract_video_thumb_handles_timeout():
+    """A subprocess.TimeoutExpired must not propagate — return None instead."""
+    from scanner import _extract_video_thumb
+    import subprocess as _sp
+
+    with patch("scanner._probe_video_duration", return_value=None):
+        with patch("subprocess.run", side_effect=_sp.TimeoutExpired(cmd="ffmpeg", timeout=10)):
+            with patch.dict("sys.modules", {"cv2": None}):
+                result = _extract_video_thumb(Path("hanging.mp4"))
+
+    assert result is None
