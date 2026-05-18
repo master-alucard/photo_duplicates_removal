@@ -943,18 +943,29 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
 
     # Cross-format pairs get an additional threshold relaxation on top of series scaling.
     #
-    # IMPORTANT: the effective cross-format threshold is a FIXED physical constant
-    # calibrated on Canon EOS M100 CR2 vs camera JPEG pairs (max intra-group pHash=12,
-    # min inter-group pHash=20 → 8-bit safety gap).  It must NOT scale with the user's
-    # current ``threshold`` setting, because at threshold=4 the naive ``threshold *
-    # cf_factor = 4 * 6 = 24`` would exceed the inter-group gap (20 bits) and cause
-    # unrelated landscape shots to chain together via single-linkage union-find.
+    # Two modes, with different calibrated constants:
     #
-    # Formula: cf_abs_threshold = _CF_BASE_THRESHOLD * cf_factor  (always uses base=2)
-    # Default: 2 * 6.0 = 12 bits — covers all true RAW+JPEG pairs, stays below gap.
+    # Postprocess mode (raw_use_embedded_thumb=False):
+    #   rawpy.postprocess() decodes the full sensor without the camera's tone curve,
+    #   producing brightness ~2× higher than the camera JPEG engine.  This brightness
+    #   difference causes pHash to drift by up to 12 bits on real Canon EOS M100 pairs.
+    #   cf_abs_threshold = _CF_BASE_THRESHOLD * cf_factor = 2 * 6.0 = 12 bits.
+    #   Must NOT scale with user threshold (at threshold=4, 4*6=24 exceeds the
+    #   20-bit inter-group safety gap, causing false-positive chaining).
+    #
+    # Embedded-thumb mode (raw_use_embedded_thumb=True):
+    #   rawpy.extract_thumb() returns the camera's own JPEG preview — essentially the
+    #   same rendering as the companion camera JPEG.  Measured max intra-pair pHash
+    #   distance across 35 Canon EOS M100 pairs = 2 bits (thumbnail compression only).
+    #   The regular eff_threshold (= settings.threshold, default 2) is sufficient.
+    #   No extra CF relaxation needed: do not raise eff_threshold above its current value.
     if cross_format:
-        cf_abs_threshold = int(_CF_BASE_THRESHOLD * cf_factor)
-        eff_threshold = max(eff_threshold, cf_abs_threshold)
+        use_embedded = getattr(settings, "raw_use_embedded_thumb", True)
+        if not use_embedded:
+            # Postprocess path: use the large fixed CF threshold.
+            cf_abs_threshold = int(_CF_BASE_THRESHOLD * cf_factor)
+            eff_threshold = max(eff_threshold, cf_abs_threshold)
+        # Embedded-thumb path: eff_threshold stays as-is (already covers max dist=2).
 
     if settings.dark_protection:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
