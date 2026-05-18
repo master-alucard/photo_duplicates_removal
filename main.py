@@ -1604,8 +1604,12 @@ class App:
         self._date_org_phase_var = tk.StringVar(value="Ready.")
         self._date_org_msg_var   = tk.StringVar(value="")
         prog_section = _section(body, "Progress")
-        ttk.Label(prog_section, textvariable=self._date_org_phase_var,
-                 font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        _do_phase_row = ttk.Frame(prog_section)
+        _do_phase_row.pack(anchor=tk.W, fill=tk.X)
+        self._date_org_pulse_dot = _anim.PulsingDot(
+            _do_phase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        ttk.Label(_do_phase_row, textvariable=self._date_org_phase_var,
+                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, anchor=tk.W)
         self._date_org_pbar = ttk.Progressbar(prog_section, mode="determinate", maximum=100)
         self._date_org_pbar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(prog_section, textvariable=self._date_org_msg_var,
@@ -1787,6 +1791,11 @@ class App:
         self._date_org_stop_flag = [False]
         self._date_org_pbar["value"] = 0
         self._date_org_phase_var.set("Starting…")
+        # Show pulsing dot
+        try:
+            self._date_org_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
         self._date_org_msg_var.set("")
         self._set_date_org_result("Running…  See the Progress section above for live status.")
 
@@ -1854,6 +1863,11 @@ class App:
         self._date_org_active_frame.pack_forget()
         self._date_org_idle_frame.pack(fill=tk.X, padx=4)
         self._date_org_running = False
+        # Stop pulsing dot
+        try:
+            self._date_org_pulse_dot.hide()
+        except Exception:
+            pass
 
         if error:
             self._date_org_phase_var.set("Error.")
@@ -2003,6 +2017,18 @@ class App:
         vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 6), pady=6)
         self._hist_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
+        # Empty state: shown when the history list is empty
+        self._hist_empty_frame = tk.Frame(tab, bg=_BG)
+        tk.Label(self._hist_empty_frame,
+                 text="\U0001f4cb",   # clipboard
+                 font=("Segoe UI", 36), bg=_BG, fg=_M_HINT4).pack(pady=(0, 6))
+        tk.Label(self._hist_empty_frame,
+                 text="No scan history yet",
+                 font=("Segoe UI", 12, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._hist_empty_frame,
+                 text="Run your first scan and it will appear here.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3).pack(pady=(4, 0))
+
         btn_bar = tk.Frame(tab, bg=_BG)
         btn_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
         _mat_btn(btn_bar, "Clear History", self._clear_history, _BTN_SECONDARY).pack(side=tk.LEFT)
@@ -2027,6 +2053,19 @@ class App:
                 "Yes" if entry.get("dry_run") else "No",
                 "Yes" if entry.get("applied") else "No",
             ))
+        # Show/hide empty state placeholder
+        try:
+            if self._scan_history:
+                self._hist_empty_frame.place_forget()
+            else:
+                # Overlay the empty state centred over the treeview
+                self._hist_empty_frame.place(
+                    in_=self._hist_tree,
+                    relx=0.5, rely=0.4,
+                    anchor="center",
+                )
+        except Exception:
+            pass
 
     def _load_scan_history(self) -> list[dict]:
         try:

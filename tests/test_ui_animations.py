@@ -100,15 +100,18 @@ class TestPulsingDot(unittest.TestCase):
         self.assertIsNone(dot._after_id)
 
     def test_double_start_idempotent(self):
+        """start() when already running must not reset phase or restart tick."""
         from ui_animations import PulsingDot
         dot = PulsingDot(self.root)
-        # Verify that calling start() when already running is a no-op:
-        # manually set running=True and confirm a second start() doesn't reset phase
+        # Simulate "already running" without actually scheduling after() timers.
         dot._running = True
-        dot._phase = 0.75
-        dot.start()   # should bail early because _running is True
-        self.assertEqual(dot._phase, 0.75, "start() on running dot must not reset phase")
-        self.assertTrue(dot._running)
+        dot._phase   = 0.75
+        # Call start() — should return early because _running is True
+        # and should NOT touch _phase (which would be reset to 0.0).
+        dot.start()
+        self.assertTrue(dot._running, "dot should still be running")
+        self.assertAlmostEqual(dot._phase, 0.75, places=5,
+                               msg="start() on running dot must not reset phase")
 
     def test_update_colors(self):
         from ui_animations import PulsingDot
