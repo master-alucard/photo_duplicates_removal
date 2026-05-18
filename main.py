@@ -336,8 +336,19 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
         if str(btn["state"]) != "disabled":
             btn.configure(bg=btn._mat_bg)
 
-    btn.bind("<Enter>", _enter)
-    btn.bind("<Leave>", _leave)
+    def _focus_in(_):
+        """Show a visible focus ring when navigating by keyboard."""
+        if str(btn["state"]) != "disabled":
+            btn.configure(highlightthickness=2, highlightbackground="#FFFFFF",
+                          highlightcolor="#FFFFFF")
+
+    def _focus_out(_):
+        btn.configure(highlightthickness=0)
+
+    btn.bind("<Enter>",    _enter)
+    btn.bind("<Leave>",    _leave)
+    btn.bind("<FocusIn>",  _focus_in)
+    btn.bind("<FocusOut>", _focus_out)
     # Brief pressed-state feedback (100 ms darker bg on click)
     _anim.bind_press_feedback(btn)
     return btn
@@ -1113,7 +1124,8 @@ class App:
         self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
         # Phase label row: pulsing dot + label side by side
-        _phase_row = tk.Frame(self._prog_frame, bg=_CARD_BG)
+        # Use ttk.Frame so it inherits the LabelFrame background in both themes
+        _phase_row = ttk.Frame(self._prog_frame)
         _phase_row.pack(anchor=tk.W, fill=tk.X)
         self._scan_pulse_dot = _anim.PulsingDot(
             _phase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
@@ -2419,7 +2431,7 @@ class App:
         self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
         # Phase label row: pulsing dot + label
-        _cphase_row = tk.Frame(self._custom_prog_frame, bg=_CARD_BG)
+        _cphase_row = ttk.Frame(self._custom_prog_frame)
         _cphase_row.pack(anchor=tk.W, fill=tk.X)
         self._custom_pulse_dot = _anim.PulsingDot(
             _cphase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
