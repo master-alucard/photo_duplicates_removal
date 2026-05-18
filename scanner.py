@@ -963,18 +963,33 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # Rotation-aware pHash: check all orientations of both images.
     # We check b's rotations vs a's upright hash AND a's rotations vs b's upright
     # hash, so it doesn't matter which image is the "rotated" one.
+    #
+    # Cross-format pairs use only the direct (upright) pHash — no rotation-aware
+    # matching.  Rationale: a genuine RAW+JPEG duplicate of the same shot will
+    # always have a very small direct pHash distance (0-4 bits) because both
+    # files are rendered from the same sensor data with only minor tone-mapping
+    # differences.  Allowing rotation-aware comparison for CF pairs creates
+    # serious false positives: two unrelated landscape photos shot from the
+    # same location on different days can have phash_norm=22-36 (clearly
+    # different) but phash_rot=2-4 (accidentally rotation-similar), causing
+    # them to be incorrectly grouped as duplicates.  The direct pHash check
+    # at cf_abs_threshold=12 bits is sufficient for all genuine CF pairs.
     dist_normal = a.phash - b.phash
-    # b's rotations vs a's upright hash
-    dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
-    dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
-    dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
-    # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
-    dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
-    dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
-    dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
-    phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
-                      dist_ar90, dist_ar180, dist_ar270)
-    is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
+    if cross_format:
+        phash_dist = dist_normal
+        is_rotated = False
+    else:
+        # b's rotations vs a's upright hash
+        dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
+        dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
+        dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
+        # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
+        dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
+        dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
+        dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
+        phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
+                          dist_ar90, dist_ar180, dist_ar270)
+        is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
 
     # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of
     # pHash drift even for pixel-identical content.  Apply a rotation-lenient

@@ -870,13 +870,24 @@ def _find_groups_fast(
         if dark_on and (pd.brightness_a < dark_thr or pd.brightness_b < dark_thr):
             eff_thr = max(1, int(eff_thr * dark_tight))
 
-        # 6. Rotation-lenient floor
-        is_rotated = pd.phash_rot_dist < pd.phash_norm_dist
+        # 6. pHash gate — select distance to check.
+        #    Cross-format pairs use only the direct (upright) pHash, not the
+        #    rotation-aware minimum.  True CR2+JPEG duplicates always have a small
+        #    direct pHash (0-4 bits); rotation-aware matching would let accidentally
+        #    rotation-similar but unrelated landscape shots (phash_norm=22-36,
+        #    phash_rot=2-4) pass the gate incorrectly.
+        if pd.cross_format:
+            phash_to_check = pd.phash_norm_dist
+            is_rotated = False
+        else:
+            phash_to_check = pd.phash_rot_dist
+            is_rotated = pd.phash_rot_dist < pd.phash_norm_dist
+
         if is_rotated:
             eff_thr = max(eff_thr, rot_floor)
 
         # 7. pHash gate
-        if pd.phash_rot_dist > eff_thr:
+        if phash_to_check > eff_thr:
             continue
 
         # 8. dHash gate (skipped for rotation matches and cross-format)
