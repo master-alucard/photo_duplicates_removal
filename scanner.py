@@ -2149,13 +2149,20 @@ def find_video_duplicates(
                 if px != py:
                     parent[px] = py
 
+            # Track which pairs joined due to a missing thumbnail (zero-hash).
+            # If any pair in a final bucket is size-only (one or both thumbs
+            # missing), we mark that group ambiguous so the UI flags it.
+            ambiguous_pairs: set[tuple[int, int]] = set()
+
             for i in range(n):
                 for j in range(i + 1, n):
                     pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
                     pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
                     # If either thumbnail is missing, group by size alone.
-                    if (pi_zero or pj_zero or
-                            members[i].phash - members[j].phash <= _THUMB_THR):
+                    if pi_zero or pj_zero:
+                        _union(i, j)
+                        ambiguous_pairs.add((i, j))
+                    elif members[i].phash - members[j].phash <= _THUMB_THR:
                         _union(i, j)
 
             buckets: dict[int, list[int]] = defaultdict(list)
@@ -2169,22 +2176,30 @@ def find_video_duplicates(
                 # Keep oldest (smallest mtime); use file_size desc as tiebreaker
                 bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
                 group_counter += 1
+                # Mark ambiguous if any member pair in this bucket lacked a thumbnail.
+                idx_set = set(bucket_indices)
+                is_amb = any(
+                    (a in idx_set and b in idx_set) for a, b in ambiguous_pairs
+                )
                 groups.append(DuplicateGroup(
                     originals=[bucket_members[0]],
                     previews=bucket_members[1:],
                     is_series=False,
-                    is_ambiguous=False,
+                    is_ambiguous=is_amb,
                     group_id=f"v{group_counter:04d}",
                 ))
         else:
-            # Size-only: all same-size members are duplicates — keep the oldest
+            # Size-only: no thumbnails available at all.  Mark ambiguous so the
+            # report flags these groups — same size alone is strong evidence in
+            # personal libraries but can produce false positives (e.g. two
+            # different videos encoded to the same target bitrate).
             members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
             group_counter += 1
             groups.append(DuplicateGroup(
                 originals=[members_sorted[0]],
                 previews=members_sorted[1:],
                 is_series=False,
-                is_ambiguous=False,
+                is_ambiguous=True,   # no visual confirmation available
                 group_id=f"v{group_counter:04d}",
             ))
 
