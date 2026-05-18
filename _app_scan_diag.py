@@ -142,14 +142,20 @@ def guard_trace(a, b, settings) -> list:
 def main() -> None:
     print("=" * 72)
     print("APP SCAN DIAGNOSTIC")
-    print("Settings: default Settings() + use_rawpy=True  (no other overrides)")
+    print("Settings: loaded from settings.json (same as the running app)")
     print(f"Scan folder: {GROUPS_DIR}")
     print("=" * 72)
     print()
 
-    settings = Settings()
-    settings.use_rawpy = True
-    # raw_use_embedded_thumb stays False (app default)
+    from pathlib import Path as _Path
+    from config import load_settings as _load_settings
+    _settings_path = _Path(__file__).parent / "settings.json"
+    if _settings_path.exists():
+        settings = _load_settings(_settings_path)
+    else:
+        settings = Settings()
+        settings.use_rawpy = True
+    # raw_use_embedded_thumb comes from settings.json (or True by new default)
 
     cf_abs = int(_CF_BASE_THRESHOLD * settings.cross_format_threshold_factor)
     print(f"  threshold                     = {settings.threshold}")

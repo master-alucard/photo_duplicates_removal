@@ -7,9 +7,24 @@ import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+# Increment this when a default value changes for a field that has no UI control
+# (i.e. the user cannot change it via the Settings panel).  load_settings uses
+# this to detect stale persisted values and overwrite them with the new defaults
+# rather than silently running the app with the old wrong value.
+#
+# Version history:
+#   0  — initial (no version field in file); raw_use_embedded_thumb defaulted False,
+#         cross_format_threshold_factor had no stable default (was tuned by calib runs)
+#   1  — raw_use_embedded_thumb default changed to True (commit 925431d);
+#         cross_format_threshold_factor locked to 6.0 (commit 3233345/5f63627)
+_SETTINGS_VERSION = 1
+
 
 @dataclass
 class Settings:
+    # Internal schema version.  Written to every saved file so load_settings can
+    # migrate stale on-disk values when defaults change.  Not shown in the UI.
+    settings_version: int = _SETTINGS_VERSION
     mode: str = "quick"                    # "quick" or "advanced"
     src_folder: str = ""
     out_folder: str = ""
@@ -112,7 +127,23 @@ DEFAULTS = Settings()
 
 
 def load_settings(path: Path) -> Settings:
-    """Load settings from a JSON file. Returns defaults if file does not exist or is invalid."""
+    """Load settings from a JSON file, applying migrations for default changes.
+
+    Returns fresh defaults if the file does not exist or cannot be parsed.
+
+    Migration policy
+    ----------------
+    When a field's default value changes in code but the field has no UI control
+    (the user cannot change it through the Settings panel), stale on-disk values
+    would silently override the new default and break detection.  We detect this
+    by comparing the file's ``settings_version`` to ``_SETTINGS_VERSION``:
+
+    - ``settings_version`` absent or 0 → v0 file (written before versioning).
+      Reset all v0→v1 migrated fields to their current code defaults.
+    - ``settings_version`` == current → nothing to do; apply as-is.
+    - ``settings_version`` > current → written by a newer build; unknown fields
+      are already filtered out by the known-field guard below.
+    """
     if not path.exists():
         return Settings()
     try:
@@ -120,9 +151,43 @@ def load_settings(path: Path) -> Settings:
         # Only apply known fields; ignore unknowns for forward-compatibility
         known = {f for f in Settings.__dataclass_fields__}  # type: ignore[attr-defined]
         filtered = {k: v for k, v in data.items() if k in known}
-        return Settings(**filtered)
+        s = Settings(**filtered)
+        _migrate(s, data)
+        return s
     except Exception:
         return Settings()
+
+
+def _migrate(s: Settings, raw_data: dict) -> None:
+    """Apply in-place migrations based on the on-disk settings_version.
+
+    ``raw_data`` is the raw dict read from JSON (used to detect absent keys).
+    """
+    file_version = raw_data.get("settings_version", 0)
+    defaults = Settings.__new__(Settings)
+    # Initialise defaults without calling __init__ so we can read field defaults
+    # directly from the class without side effects.
+    defaults = Settings()
+
+    if file_version < 1:
+        # v0 → v1 migrations
+        # ── raw_use_embedded_thumb ──────────────────────────────────────────
+        # Default changed from False to True in commit 925431d.  The field has
+        # no UI control; any False in a v0 file is the old default, not an
+        # intentional user choice.  Reset to the new default (True).
+        if not s.raw_use_embedded_thumb:
+            s.raw_use_embedded_thumb = defaults.raw_use_embedded_thumb  # True
+        # ── cross_format_threshold_factor ───────────────────────────────────
+        # Was never settable via the UI.  Calibration runs or manual JSON edits
+        # may have left 2.0 in the file (the value used during iteration 3-4
+        # calibration).  The correct production default is 6.0 (covers all true
+        # RAW+JPEG pairs with an 8-bit safety gap to the inter-group minimum).
+        # Any value below 4.0 produces a CF threshold of < 8 bits, which misses
+        # pairs where rawpy postprocess gives up to 6-bit pHash drift.
+        if s.cross_format_threshold_factor < 4.0:
+            s.cross_format_threshold_factor = defaults.cross_format_threshold_factor  # 6.0
+        # Stamp the migrated version so the next save writes v1
+        s.settings_version = _SETTINGS_VERSION
 
 
 def save_settings(settings: Settings, path: Path) -> None:
