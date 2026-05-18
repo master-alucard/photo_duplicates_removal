@@ -1196,12 +1196,24 @@ class App:
         self._results_summary_frame.pack(fill=tk.BOTH, expand=True)
         sf = self._results_summary_frame
 
-        # Placeholder shown before first scan
-        self._results_placeholder = tk.Label(
-            sf, text="Run a scan to review results here.",
-            font=("Segoe UI", 11), bg=_BG, fg=_M_HINT5,
-        )
+        # Polished empty state shown before first scan
+        self._results_placeholder = tk.Frame(sf, bg=_BG)
         self._results_placeholder.pack(expand=True)
+        tk.Label(self._results_placeholder,
+                 text="\U0001f5bc",   # framed-picture emoji as icon
+                 font=("Segoe UI", 40), bg=_BG, fg=_M_HINT4).pack(pady=(0, 8))
+        tk.Label(self._results_placeholder,
+                 text="No scan results yet",
+                 font=("Segoe UI", 14, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._results_placeholder,
+                 text="Select a source folder on the Scan tab and click  Start Scan\n"
+                      "to find duplicate images in your collection.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3,
+                 justify=tk.CENTER).pack(pady=(4, 16))
+        _mat_btn(self._results_placeholder,
+                 "Go to Scan tab",
+                 lambda: self._nb.select(self._tab_scan),
+                 _BTN_PRIMARY, font_size=10).pack()
 
         # Success card (hidden until scan completes; contents rebuilt dynamically)
         self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
@@ -2503,6 +2515,25 @@ class App:
         self._custom_results_summary_frame.pack(fill=tk.BOTH, expand=True)
         sf = self._custom_results_summary_frame
 
+        # Polished empty state shown before first compare scan
+        self._custom_results_placeholder = tk.Frame(sf, bg=_BG)
+        self._custom_results_placeholder.pack(expand=True)
+        tk.Label(self._custom_results_placeholder,
+                 text="\U0001f4c2",   # open file folder
+                 font=("Segoe UI", 40), bg=_BG, fg=_M_HINT4).pack(pady=(0, 8))
+        tk.Label(self._custom_results_placeholder,
+                 text="No compare-scan results yet",
+                 font=("Segoe UI", 14, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._custom_results_placeholder,
+                 text="Select a Main folder and a Check folder on the Compare Scan tab,\n"
+                      "then click  Start Scan  to find cross-folder duplicates.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3,
+                 justify=tk.CENTER).pack(pady=(4, 16))
+        _mat_btn(self._custom_results_placeholder,
+                 "Go to Compare Scan tab",
+                 lambda: self._nb.select(self._tab_custom),
+                 _BTN_PRIMARY, font_size=10).pack()
+
         # Stats card (rebuilt dynamically after each scan)
         self._custom_results_info_card = tk.Frame(
             sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
@@ -2597,7 +2628,11 @@ class App:
                      font=("Segoe UI", 9), bg=_CARD_BG,
                      fg=_M_HINT5, anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
 
-        # Show card, buttons, divider, new-scan button
+        # Show card, buttons, divider, new-scan button; hide empty-state
+        try:
+            self._custom_results_placeholder.pack_forget()
+        except Exception:
+            pass
         self._custom_results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
         self._custom_results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._custom_results_divider.pack(fill=tk.X, padx=16, pady=14)
