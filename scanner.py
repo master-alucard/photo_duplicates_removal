@@ -1879,6 +1879,7 @@ def collect_videos(
     progress_cb: Optional[ProgressCb] = None,
     stop_flag: Optional[list[bool]] = None,
     library=None,
+    failed_paths_out: "Optional[list[Path]]" = None,
 ) -> List[ImageRecord]:
     """Walk *folder* and return one :class:`ImageRecord` per video file found.
 
@@ -1892,6 +1893,9 @@ def collect_videos(
                  whose ``mtime`` and ``size`` are unchanged (cache hit), so
                  repeated scans of a large video collection skip the costly
                  ffmpeg subprocess for every file.
+        failed_paths_out: Optional list; any video file that caused an
+                 unrecoverable exception during stat/hashing is appended here
+                 so callers can report failures without crashing the scan.
 
     The function is intentionally sequential (no thread pool) because thumbnail
     extraction already involves spawning ffmpeg subprocesses — parallel spawning
@@ -1931,10 +1935,15 @@ def collect_videos(
     )
     _vcache_new: dict[str, _VideoRecord] = {}
 
+    # Progress throttle: report every file when the collection is small;
+    # otherwise at most once every 5 files to avoid flooding the UI.
+    _progress_step = 1 if total <= 20 else 5
+    failed_paths: list[Path] = []
+
     for i, path in enumerate(video_paths):
         if stop_flag and stop_flag[0]:
             break
-        if progress_cb and (i == 0 or i % 5 == 0 or i == total - 1):
+        if progress_cb and (i == 0 or i % _progress_step == 0 or i == total - 1):
             progress_cb(
                 f"Indexing video {i + 1}/{total}: {path.name}",
                 i + 1, total, "Videos",
@@ -2000,8 +2009,15 @@ def collect_videos(
                 histogram=[],
                 is_video=True,
             ))
-        except Exception:
-            pass
+        except Exception as _exc:
+            failed_paths.append(path)
+            if failed_paths_out is not None:
+                failed_paths_out.append(path)
+            if progress_cb:
+                progress_cb(
+                    f"Failed (skipped): {path.name} — {_exc}",
+                    i + 1, total, "Videos",
+                )
 
     # Persist the updated video cache (new + untouched carry-forwards from old).
     if library is not None and _vcache_new:

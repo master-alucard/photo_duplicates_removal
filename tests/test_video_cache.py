@@ -296,3 +296,84 @@ def test_extract_video_thumb_handles_timeout():
                 result = _extract_video_thumb(Path("hanging.mp4"))
 
     assert result is None
+
+
+# ── corrupt video / failed_paths_out ─────────────────────────────────────────
+
+def test_collect_videos_corrupt_file_logged_to_failed_paths_out(tmp_path):
+    """A file that raises during stat must appear in failed_paths_out."""
+    from config import Settings
+    from scanner import collect_videos
+
+    # Create a legitimate-looking .mp4 name but make stat() raise
+    vid = tmp_path / "corrupt.mp4"
+    vid.write_bytes(b"garbage" * 10)
+    settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
+
+    failed = []
+    # Patch path.stat to raise for the specific file
+    original_stat = Path.stat
+
+    def _bad_stat(self, *args, **kwargs):
+        if self.name == "corrupt.mp4":
+            raise OSError("Simulated I/O error")
+        return original_stat(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", _bad_stat):
+        with patch("scanner._extract_video_thumb", return_value=None):
+            records = collect_videos(tmp_path, set(), settings, failed_paths_out=failed)
+
+    assert any(p.name == "corrupt.mp4" for p in failed)
+    # The corrupt file must not appear in results
+    assert all(r.path.name != "corrupt.mp4" for r in records)
+
+
+def test_collect_videos_corrupt_file_reported_via_progress_cb(tmp_path):
+    """A failed file must trigger a progress_cb message containing 'Failed'."""
+    from config import Settings
+    from scanner import collect_videos
+
+    vid = tmp_path / "bad.mp4"
+    vid.write_bytes(b"x" * 50)
+    settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
+    messages = []
+
+    original_stat = Path.stat
+
+    def _bad_stat(self, *args, **kwargs):
+        if self.name == "bad.mp4":
+            raise OSError("disk error")
+        return original_stat(self, *args, **kwargs)
+
+    def _cb(msg, *args):
+        messages.append(msg)
+
+    with patch.object(Path, "stat", _bad_stat):
+        collect_videos(tmp_path, set(), settings, progress_cb=_cb)
+
+    assert any("Failed" in m for m in messages)
+
+
+# ── progress reporting density ─────────────────────────────────────────────
+
+def test_collect_videos_progress_every_file_for_small_collections(tmp_path):
+    """With <= 20 videos, progress_cb must fire for every file."""
+    from config import Settings
+    from scanner import collect_videos
+
+    n = 5
+    for k in range(n):
+        _make_fake_video(tmp_path, f"v{k}.mp4")
+
+    settings = Settings(include_videos=True, video_use_thumb=False, recursive=False)
+    calls = []
+
+    def _cb(msg, current, total, stage):
+        if "Indexing" in msg:
+            calls.append(current)
+
+    with patch("scanner._extract_video_thumb", return_value=None):
+        collect_videos(tmp_path, set(), settings, progress_cb=_cb)
+
+    # We expect one "Indexing" call per file
+    assert len(calls) == n
