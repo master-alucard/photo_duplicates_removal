@@ -37,10 +37,14 @@ CALIB_FOLDERS = {
 }
 
 # Ground-truth expected group counts (total pairs/groups in the GT folders)
+# CrossFmt was updated from 31 to 35 when 4 valid RAW+JPEG pairs were moved
+# from calibration_cf/singles/ to calibration_cf/groups/ (they had phash=0/
+# dhash=0 with their JPEG companions, confirming same-shot identity, but were
+# absent from the GT catalog).
 GT_EXPECTED = {
     "RAW":      35,
     "JPEG":     419,
-    "CrossFmt": 31,
+    "CrossFmt": 35,
 }
 
 
