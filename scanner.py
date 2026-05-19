@@ -1055,8 +1055,18 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # a 90°-rotated copy will always fail a naive dHash check.
     # Also skipped when pHash == 0: a definitive identity signal; dHash would only add
     # false negatives due to JPEG quality / denoising differences.
+    #
+    # Threshold multiplier is 1.0 (not 1.5) to match eff_threshold exactly.
+    # Rationale (Group-24 false-chain bug):
+    #   Consecutive burst-shot same-format pairs (e.g. two CR2s or two JPEGs of a
+    #   textured surface taken seconds apart) can have pHash = threshold and dHash =
+    #   threshold+1.  With a 1.5× dHash multiplier the dHash check passes and
+    #   single-linkage union-find chains both pairs into one group.  Calibration
+    #   data shows max dHash for any legitimate same-format non-rotation pair with
+    #   pHash > 0 is pHash+0 (i.e., dHash ≤ pHash), so the 1.0× multiplier admits
+    #   all true pairs while blocking the one-bit-above-threshold burst-shot edges.
     if settings.use_dual_hash and not cross_format and not is_rotated and dist_normal > 0:
-        dhash_thr = eff_threshold * 1.5
+        dhash_thr = eff_threshold * 1.0
         if a.dhash - b.dhash > dhash_thr:
             return False
 

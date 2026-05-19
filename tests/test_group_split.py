@@ -648,5 +648,122 @@ class TestVideoZeroHashFix(unittest.TestCase):
         self.assertEqual(len(groups), 1, "Same-size zero-hash videos must be grouped by size")
 
 
+class TestGroup24BurstShotChainFix(unittest.TestCase):
+    """
+    Regression test for the Group-24 false-chain bug.
+
+    Context: calibration_cf folder, set_024 and set_025.  Four files:
+      A = CR2_011485 (pHash X)   C = JPG_202278 (pHash X)   -- true pair (same shot)
+      B = CR2_011486 (pHash Y)   D = JPG_202287 (pHash Y)   -- true pair (same shot)
+
+    X and Y differ by pHash=4, dHash=5 (consecutive burst shots of a textured
+    surface).  At threshold=4 the same-format burst-shot edges A↔B and C↔D
+    (both pHash=4) passed the old dHash check (dhash_thr = threshold * 1.5 = 6,
+    dHash=5 ≤ 6).  Union-find then chained A, B, C, D into one group instead
+    of two.
+
+    Fix: reduce the dHash multiplier from 1.5 to 1.0 so
+    dhash_thr = threshold = 4, blocking dHash=5 edges.
+    True pairs (pHash=0, dHash=0) are unaffected (pHash=0 → dHash skipped).
+    """
+
+    # pHash values derived from real calibration files
+    _HASH_A = "acf5f21884e3996c"   # A=CR2_011485, C=JPG_202278 (identical shot)
+    _HASH_B = "ade5f2188ce3916c"   # B=CR2_011486, D=JPG_202287 (identical shot)
+
+    def _cr2(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        return ImageRecord(
+            path=Path(f"/calib/{idx:03d}.cr2"),
+            width=6024, height=4020,
+            file_size=29_000_000,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_000_000.0 + idx,
+            brightness=117.0,
+            histogram=[1 / 96] * 96,
+            metadata_count=3,
+        )
+
+    def _jpg(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        return ImageRecord(
+            path=Path(f"/calib/{idx:03d}.jpg"),
+            width=6000, height=4000,
+            file_size=3_200_000,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_000_000.0 + idx + 0.5,
+            brightness=128.0,
+            histogram=[1 / 96] * 96,
+            metadata_count=0,
+        )
+
+    def _settings(self) -> Settings:
+        s = Settings()
+        s.threshold = 4                   # user's calibrated setting that triggered the bug
+        s.use_dual_hash = True
+        s.use_histogram = False           # isolate hash-based logic
+        s.dark_protection = False
+        s.series_threshold_factor = 1.0   # as in calibration_cf
+        s.use_rawpy = True
+        s.raw_use_embedded_thumb = True
+        s.keep_all_formats = False
+        return s
+
+    def test_true_cf_pairs_pass(self):
+        """Same-shot CR2+JPEG pairs (pHash=0, dHash=0) must still be similar."""
+        settings = self._settings()
+        # A and C are the same shot
+        a = self._cr2(0, self._HASH_A, self._HASH_A)
+        c = self._jpg(2, self._HASH_A, self._HASH_A)
+        self.assertTrue(
+            _can_be_similar(a, c, settings),
+            "True CF pair (pHash=0, dHash=0) must pass _can_be_similar",
+        )
+
+    def test_burst_shot_same_format_blocked(self):
+        """Consecutive burst-shot same-format pairs (pHash=4, dHash=5) must be blocked."""
+        settings = self._settings()
+        # A and B are consecutive burst shots — different images, pHash=4, dHash=5
+        a = self._cr2(0, self._HASH_A, "ee2fc6e3f7fb9f93")
+        b = self._cr2(1, self._HASH_B, "6e07c7e3f7fb8f93")
+        ph = int(a.phash - b.phash)
+        dh = int(a.dhash - b.dhash)
+        self.assertEqual(ph, 4, f"Expected pHash=4, got {ph}")
+        self.assertEqual(dh, 5, f"Expected dHash=5, got {dh}")
+        self.assertFalse(
+            _can_be_similar(a, b, settings),
+            "Burst-shot same-format pair (pHash=4, dHash=5, threshold=4) must be blocked "
+            "by dHash check (dhash_thr = threshold * 1.0 = 4 < dHash=5)",
+        )
+
+    def test_group_24_splits_into_two_groups(self):
+        """
+        All four files (A=CR2_485, B=CR2_486, C=JPG_278, D=JPG_287) must form
+        exactly two groups: {A, C} and {B, D}.  Union-find must NOT chain them all
+        into one group via the A↔B and C↔D burst-shot edges.
+        """
+        settings = self._settings()
+        a = self._cr2(0, self._HASH_A, "ee2fc6e3f7fb9f93")
+        b = self._cr2(1, self._HASH_B, "6e07c7e3f7fb8f93")
+        c = self._jpg(2, self._HASH_A, "ee2fc6e3f7fb9f93")
+        d = self._jpg(3, self._HASH_B, "6e07c7e3f7fb8f93")
+
+        groups, _ = find_groups([a, b, c, d], settings)
+
+        self.assertEqual(
+            len(groups), 2,
+            f"Expected 2 groups (one per burst-shot pair), got {len(groups)}. "
+            "Group-24 false-chain bug: burst-shot edges A↔B and C↔D must be blocked "
+            "by the dHash check (dhash_thr = threshold * 1.0).",
+        )
+        # Verify each group contains exactly one CR2 and one JPEG
+        for g in groups:
+            all_files = g.originals + g.previews
+            exts = {r.path.suffix.lower() for r in all_files}
+            self.assertIn(".cr2", exts, "Each group must contain a CR2")
+            self.assertIn(".jpg", exts, "Each group must contain a JPEG")
+            self.assertEqual(len(all_files), 2, "Each group must have exactly 2 files")
+
+
 if __name__ == "__main__":
     unittest.main()
