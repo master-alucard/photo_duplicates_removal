@@ -1065,9 +1065,16 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     #   data shows max dHash for any legitimate same-format non-rotation pair with
     #   pHash > 0 is pHash+0 (i.e., dHash ≤ pHash), so the 1.0× multiplier admits
     #   all true pairs while blocking the one-bit-above-threshold burst-shot edges.
+    #
+    # Gate is strictly less than (>= rejects): a pair whose dHash exactly equals
+    # eff_threshold is borderline and should not be merged.  Calibration data shows
+    # the maximum intra-group dHash for any same-format non-rotation pair with
+    # pHash > 0 is pHash itself, so the pair sits at or below eff_threshold - 1.
+    # Pairs at the boundary (dHash == eff_threshold) are consecutive-burst cross-group
+    # edges (e.g. Canon EOS M100 burst: set_024 × set_025 at pHash=4, dHash=4).
     if settings.use_dual_hash and not cross_format and not is_rotated and dist_normal > 0:
         dhash_thr = eff_threshold * 1.0
-        if a.dhash - b.dhash > dhash_thr:
+        if a.dhash - b.dhash >= dhash_thr:
             return False
 
     # 5. Histogram intersection.
