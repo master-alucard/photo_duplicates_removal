@@ -1633,6 +1633,98 @@ def _classify_group(
     exact_dup_indices: set[int] = set()  # exact same-image copies — trash extras
     is_series = False
 
+    # ── cross-format detection (always runs, independent of disable_series_detection) ──
+    # Fix #158: when disable_series_detection=True the entire dim-bucket block was
+    # skipped, which meant RAW+JPEG pairs of the same shot with keep_all_formats=True
+    # were never added to series_indices, so they fell through to _is_preview and the
+    # JPEG was incorrectly flagged as a duplicate to trash.  Cross-format handling must
+    # always run regardless of series detection being enabled or disabled.
+    _has_any_raw    = any(is_raw_flags)
+    _has_any_nonraw = not all(is_raw_flags)
+    _group_is_mixed_format = _has_any_raw and _has_any_nonraw
+
+    if _group_is_mixed_format:
+        # Fast path: whole group is cross-format (RAW + non-RAW).  Build a
+        # temporary dim-bucket so we can pair each RAW with its JPEG partners
+        # using the cross-format dimension tolerance (_CROSS_FORMAT_DIM_TOL).
+        tol_cf = _CROSS_FORMAT_DIM_TOL
+
+        def _cf_same_dim(i: int, j: int) -> bool:
+            """True if a RAW+JPEG pair share the same capture resolution."""
+            if is_raw_flags[i] == is_raw_flags[j]:
+                return False   # same-format pair — not handled here
+            a = members_sorted[i]
+            b = members_sorted[j]
+            if a.width == 0 or a.height == 0 or b.width == 0 or b.height == 0:
+                return False
+            w_ratio = abs(a.width - b.width) / max(a.width, b.width)
+            h_ratio = abs(a.height - b.height) / max(a.height, b.height)
+            if w_ratio <= tol_cf and h_ratio <= tol_cf:
+                return True
+            # Also accept transposed dimensions (portrait RAW vs landscape JPEG)
+            w_rot = abs(a.width - b.height) / max(a.width, b.height)
+            h_rot = abs(a.height - b.width) / max(a.height, b.width)
+            return w_rot <= tol_cf and h_rot <= tol_cf
+
+        cf_parent = list(range(len(members_sorted)))
+
+        def _cf_find(x: int) -> int:
+            while cf_parent[x] != x:
+                cf_parent[x] = cf_parent[cf_parent[x]]
+                x = cf_parent[x]
+            return x
+
+        def _cf_union(x: int, y: int) -> None:
+            px, py = _cf_find(x), _cf_find(y)
+            if px != py:
+                cf_parent[px] = py
+
+        for _i in range(len(members_sorted)):
+            for _j in range(_i + 1, len(members_sorted)):
+                if _cf_same_dim(_i, _j):
+                    _cf_union(_i, _j)
+
+        cf_buckets: dict[int, list[int]] = defaultdict(list)
+        for _i in range(len(members_sorted)):
+            cf_buckets[_cf_find(_i)].append(_i)
+
+        for cf_bucket_indices in cf_buckets.values():
+            if len(cf_bucket_indices) < 2:
+                continue
+            cf_raw_flags = {is_raw_flags[bi] for bi in cf_bucket_indices}
+            cf_all_cross = (True in cf_raw_flags and False in cf_raw_flags)
+            if not cf_all_cross:
+                continue
+            # This dimension bucket contains both RAW and non-RAW files.
+            # Within each same-format sub-group (all RAWs, or all non-RAWs),
+            # exact-duplicate copies must still be handled as duplicates —
+            # only the BEST copy of each format is an "original" to keep.
+            # Build per-format sorted lists and pick the best of each format.
+            keep_all = getattr(settings, "keep_all_formats", True)
+            by_ext_cf: dict[str, list[int]] = defaultdict(list)
+            for bi in cf_bucket_indices:
+                ext = members_sorted[bi].path.suffix.lower()
+                by_ext_cf[ext].append(bi)
+
+            for ext, ext_indices in by_ext_cf.items():
+                ext_sorted = sorted(ext_indices,
+                                    key=lambda bi: _sort_key(members_sorted[bi], settings))
+                # Best copy of this format
+                best_bi = ext_sorted[0]
+                ext_is_raw = is_raw_flags[best_bi]
+                if keep_all:
+                    # All formats kept: protect the best copy of every format as a series member.
+                    series_indices.add(best_bi)
+                else:
+                    if ext_is_raw:
+                        series_indices.add(best_bi)
+                    else:
+                        exact_dup_indices.add(best_bi)   # non-RAW trashed when keep_all=False
+                # Extra same-format copies are exact duplicates regardless of keep_all.
+                for dup_bi in ext_sorted[1:]:
+                    exact_dup_indices.add(dup_bi)
+            is_series = True
+
     if not getattr(settings, "disable_series_detection", False):
         tol = settings.series_tolerance_pct / 100.0
 
@@ -1698,12 +1790,6 @@ def _classify_group(
             # keep only the best copy and trash the rest.
             # pHash > _EXACT_DUP_PHASH means genuine burst/series shots.
             #
-            # Special case: cross-format pairs (RAW vs JPEG of the same shot)
-            # have pHash distance 3-8 bits due to different colour rendering, so
-            # they would incorrectly be classified as series shots.  Instead we
-            # treat all-cross-format buckets as exact duplicates so the best copy
-            # (RAW when keep_all_formats=False) is kept and the rest are trashed.
-            #
             # We only need the boolean "any pair exceeds _EXACT_DUP_PHASH",
             # not the exact maximum — short-circuit on the first such pair so
             # large genuine-series buckets (e.g. 500-shot bursts) don't pay the
@@ -1724,27 +1810,10 @@ def _classify_group(
             all_cross_format = (True in raw_flags and False in raw_flags)
 
             if all_cross_format:
-                # Cross-format bucket: same shot captured as both RAW and JPEG.
-                #
-                # keep_all_formats=True  → user explicitly wants every format
-                #   preserved.  Mark ALL members as series originals; this leaves
-                #   previews empty so _classify_group returns None and the group
-                #   never appears in the review list — nothing can be trashed.
-                #
-                # keep_all_formats=False → RAW is the authoritative master; the
-                #   camera-generated JPEG is a derivative that can be trashed.
-                #   • Every RAW file in the bucket → series_indices (always kept).
-                #   • Every non-RAW (JPEG/PNG) file → exact_dup_indices (preview).
-                if getattr(settings, "keep_all_formats", True):
-                    # All formats preserved — hide the group entirely.
-                    series_indices.update(bucket_indices)
-                else:
-                    for bi in bucket_indices:
-                        if members_sorted[bi].path.suffix.lower() in RAW_EXTENSIONS:
-                            series_indices.add(bi)      # RAW: always keep as original
-                        else:
-                            exact_dup_indices.add(bi)   # JPEG/PNG: always a duplicate
-                is_series = True
+                # Cross-format sub-bucket inside series detection: this was already
+                # handled by the cross-format block above.  Skip to avoid double-counting
+                # (series_indices already contains these members).
+                pass
             elif not exceeds_exact:
                 # True exact duplicates: same format, same content.
                 # Keep the best (bucket_indices[0]); trash the rest.
