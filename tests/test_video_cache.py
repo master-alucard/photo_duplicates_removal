@@ -354,6 +354,50 @@ def test_collect_videos_corrupt_file_reported_via_progress_cb(tmp_path):
     assert any("Failed" in m for m in messages)
 
 
+def test_collect_videos_isfile_raises_during_enumeration(tmp_path):
+    """If is_file() raises during non-recursive enumeration (e.g. Python 3.12
+    where is_file() re-raises a no-errno OSError from a flaky drive), the scan
+    must NOT crash — the file is logged to failed_paths_out instead.
+
+    Regression: on Python 3.12 is_file() calls self.stat() and re-raises
+    OSErrors without an errno, while Python 3.13+ swallows them. The
+    enumeration loop ran is_file() outside the try/except, so the whole
+    video scan crashed on 3.12 but passed on 3.14. This test patches is_file()
+    directly so it fails on every Python version if the guard is removed.
+    """
+    from config import Settings
+    from scanner import collect_videos
+
+    (tmp_path / "corrupt.mp4").write_bytes(b"garbage" * 10)
+    (tmp_path / "good.mp4").write_bytes(b"x" * 100)
+    settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
+
+    failed = []
+    original_stat = Path.stat
+    original_is_file = Path.is_file
+
+    def _bad_stat(self, *args, **kwargs):
+        if self.name == "corrupt.mp4":
+            raise OSError("disk error")
+        return original_stat(self, *args, **kwargs)
+
+    def _bad_is_file(self, *args, **kwargs):
+        # Mimic CPython 3.12: is_file() calls self.stat() and lets a
+        # no-errno OSError propagate.
+        if self.name == "corrupt.mp4":
+            raise OSError("disk error")
+        return original_is_file(self, *args, **kwargs)
+
+    with patch.object(Path, "stat", _bad_stat), \
+         patch.object(Path, "is_file", _bad_is_file), \
+         patch("scanner._extract_video_thumb", return_value=None):
+        records = collect_videos(tmp_path, set(), settings, failed_paths_out=failed)
+
+    assert any(p.name == "corrupt.mp4" for p in failed)
+    assert all(r.path.name != "corrupt.mp4" for r in records)
+    assert any(r.path.name == "good.mp4" for r in records)
+
+
 # ── progress reporting density ─────────────────────────────────────────────
 
 def test_collect_videos_progress_every_file_for_small_collections(tmp_path):

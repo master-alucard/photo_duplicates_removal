@@ -2114,7 +2114,16 @@ def collect_videos(
     else:
         for fname in os.listdir(folder):
             fpath = folder / fname
-            if fpath.is_file() and fpath.suffix.lower() in VIDEO_EXTENSIONS:
+            if fpath.suffix.lower() not in VIDEO_EXTENSIONS:
+                continue
+            # is_file() stats the path and can raise (e.g. disconnected drive,
+            # I/O error). Don't let an enumeration-time failure crash the whole
+            # scan — append the candidate so the protected stat() in Phase 1
+            # records it to failed_paths_out instead.
+            try:
+                if fpath.is_file():
+                    video_paths.append(fpath)
+            except OSError:
                 video_paths.append(fpath)
 
     total = len(video_paths)
