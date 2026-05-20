@@ -93,6 +93,63 @@ _CROSS_FORMAT_DIM_TOL = 0.02
 # discrimination (different scenes always have pHash distance > 10 bits).
 _CROSS_FORMAT_HIST_FLOOR = 0.0
 
+# Base threshold used when computing the absolute cross-format pHash threshold.
+#
+# ``cross_format_threshold_factor`` (default 6.0) was calibrated at threshold=2:
+#   effective CF threshold = 2 * 6.0 = 12 bits
+# This covers all true RAW+JPEG pairs (max intra-group pHash=12) while staying
+# below the inter-group safety gap (min inter-group pHash=20).
+#
+# Using the user's current ``settings.threshold`` as the base would cause the CF
+# threshold to scale linearly with the sweep value during calibration (e.g.
+# threshold=4 → cf_thr=24, which overlaps the inter-group gap and chains unrelated
+# landscape shots together via single-linkage union-find).
+_CF_BASE_THRESHOLD: int = 2
+
+# Maximum pHash distance allowed for cross-format pairs in embedded-thumb mode.
+#
+# rawpy.extract_thumb() returns the camera-generated JPEG preview so the hash
+# closely matches the companion camera JPEG.  Measured across 31 Canon EOS M100
+# RAW+JPEG pairs in calibration_cf:
+#   max intra-pair pHash (same shot)  = 2 bits   (thumbnail compression drift)
+#   min inter-pair pHash (diff shot)  = 4 bits   (consecutive burst frames)
+#
+# Safety gap = 4 - 2 = 2 bits.  Threshold of 3 sits in the middle: covers every
+# true pair while rejecting consecutive-shot false positives at distance = 4.
+#
+# This is a fixed physical constant — intentionally NOT scaled by the user's
+# threshold slider.  Using settings.threshold (default 2, user-visible range
+# 1-20) would let the user accidentally widen the window past the inter-group
+# gap (≥ 4 bits) and chain consecutive burst shots into one group, exactly the
+# Group-19 bug that this constant was introduced to prevent.
+_CF_EMBEDDED_THUMB_MAX_PHASH: int = 3
+
+# ── Low-entropy dHash guard ───────────────────────────────────────────────────
+#
+# Night-sky photos and other near-uniform images (>95% black pixels) have
+# pHash that collapses to 0 across consecutive shots even when the moon or
+# other subject has moved noticeably.  pHash=0 normally means "definitely
+# identical" and the dHash check is skipped.  This creates a blind spot: two
+# different shots of the same scene (pHash=0) get merged when dHash would
+# have blocked them.
+#
+# Guard: when BOTH images in a candidate pair have histogram entropy below
+# _LOW_ENTROPY_THR (their histograms are dominated by 1-2 bins) AND pHash=0
+# AND dHash ≥ _LOW_ENTROPY_DHASH_THR, the pair is rejected.
+#
+# Calibration data (Calibration JPEG set, 418 GT groups):
+#   Intra-group low-entropy pairs (byte-identical copies):
+#     pHash=0, dHash=0 consistently
+#   Inter-group wrong-merge low-entropy pairs (different shots, pHash collapsed):
+#     pHash=0, dHash=4-6
+#
+# Threshold _LOW_ENTROPY_DHASH_THR=3 catches all observed false merges
+# (dHash≥4) while passing all legitimate intra-group pairs (dHash≤2).
+# Entropy threshold 3.0 nats separates low-entropy images (moon shots,
+# solid-colour images) from normal photographic content.
+_LOW_ENTROPY_THR:       float = 3.0   # Shannon entropy in nats (96-bin RGB histogram)
+_LOW_ENTROPY_DHASH_THR: int   = 3     # dHash bits at which low-entropy pairs are rejected
+
 # ── Hashing performance constants ────────────────────────────────────────────
 #
 # Pre-downscale every image to at most _HASH_WORKING_SIZE pixels on its longest
@@ -255,6 +312,28 @@ def _compute_brightness(img: Image.Image) -> float:
     """Return mean pixel brightness 0.0-255.0."""
     gray = img if img.mode == "L" else img.convert("L")
     return float(_np.asarray(gray, dtype=_np.float32).mean())
+
+
+def _histogram_entropy(histogram: "list[float]") -> float:
+    """Shannon entropy (nats) of a 96-bin RGB histogram.
+
+    High (~4-5 nats) for natural images with diverse pixel values.
+    Low (<2 nats) for near-uniform images (all-black night-sky shots,
+    solid-colour screenshots, blank pages).
+
+    Used by the low-entropy dHash guard in _can_be_similar: images where
+    pHash collapses to 0 even across different shots (because >95% of pixels
+    are the same colour) are given an extra dHash check.
+    """
+    if not histogram:
+        return 0.0
+    arr = _np.array(histogram, dtype=_np.float64)
+    s = arr.sum()
+    if s <= 0:
+        return 0.0
+    arr /= s
+    nz = arr[arr > 0]
+    return float(-_np.sum(nz * _np.log(nz)))
 
 
 # ── thread-count resolution ──────────────────────────────────────────────────
@@ -928,9 +1007,40 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     else:
         eff_threshold = settings.threshold
 
-    # Cross-format pairs get an additional threshold relaxation on top of series scaling
+    # Cross-format pairs get an additional threshold relaxation on top of series scaling.
+    #
+    # Two modes, with different calibrated constants:
+    #
+    # Postprocess mode (raw_use_embedded_thumb=False):
+    #   rawpy.postprocess() decodes the full sensor without the camera's tone curve,
+    #   producing brightness ~2× higher than the camera JPEG engine.  This brightness
+    #   difference causes pHash to drift by up to 12 bits on real Canon EOS M100 pairs.
+    #   cf_abs_threshold = _CF_BASE_THRESHOLD * cf_factor = 2 * 6.0 = 12 bits.
+    #   Must NOT scale with user threshold (at threshold=4, 4*6=24 exceeds the
+    #   20-bit inter-group safety gap, causing false-positive chaining).
+    #
+    # Embedded-thumb mode (raw_use_embedded_thumb=True):
+    #   rawpy.extract_thumb() returns the camera's own JPEG preview — essentially the
+    #   same rendering as the companion camera JPEG.  Measured max intra-pair pHash
+    #   distance across 35 Canon EOS M100 pairs = 2 bits (thumbnail compression only).
+    #   The regular eff_threshold would be sufficient at default threshold=2, but the
+    #   user can raise the threshold slider above the 4-bit inter-shot safety gap.
+    #   We therefore CAP eff_threshold at _CF_EMBEDDED_THUMB_MAX_PHASH (3 bits) so
+    #   consecutive burst shots (inter-shot pHash = 4) are always blocked.
     if cross_format:
-        eff_threshold = max(eff_threshold, int(settings.threshold * cf_factor))
+        use_embedded = getattr(settings, "raw_use_embedded_thumb", True)
+        if not use_embedded:
+            # Postprocess path: use the large fixed CF threshold.
+            cf_abs_threshold = int(_CF_BASE_THRESHOLD * cf_factor)
+            eff_threshold = max(eff_threshold, cf_abs_threshold)
+        else:
+            # Embedded-thumb path: the camera's own JPEG preview is nearly identical
+            # to the companion camera JPEG so true-pair pHash ≤ 2 bits.  Cap the
+            # threshold at _CF_EMBEDDED_THUMB_MAX_PHASH (3 bits) regardless of the
+            # user's threshold slider.  This prevents consecutive burst shots taken
+            # seconds apart (inter-shot pHash = 4 bits) from being chained into the
+            # same group as a different RAW+JPEG pair (the "Group-19 false chain" bug).
+            eff_threshold = min(eff_threshold, _CF_EMBEDDED_THUMB_MAX_PHASH)
 
     if settings.dark_protection:
         if a.brightness < settings.dark_threshold or b.brightness < settings.dark_threshold:
@@ -939,18 +1049,57 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # Rotation-aware pHash: check all orientations of both images.
     # We check b's rotations vs a's upright hash AND a's rotations vs b's upright
     # hash, so it doesn't matter which image is the "rotated" one.
+    #
+    # Cross-format pairs use only the direct (upright) pHash — no rotation-aware
+    # matching.  Rationale: a genuine RAW+JPEG duplicate of the same shot will
+    # always have a very small direct pHash distance (0-4 bits) because both
+    # files are rendered from the same sensor data with only minor tone-mapping
+    # differences.  Allowing rotation-aware comparison for CF pairs creates
+    # serious false positives: two unrelated landscape photos shot from the
+    # same location on different days can have phash_norm=22-36 (clearly
+    # different) but phash_rot=2-4 (accidentally rotation-similar), causing
+    # them to be incorrectly grouped as duplicates.  The direct pHash check
+    # at cf_abs_threshold=12 bits is sufficient for all genuine CF pairs.
     dist_normal = a.phash - b.phash
-    # b's rotations vs a's upright hash
-    dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
-    dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
-    dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
-    # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
-    dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
-    dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
-    dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
-    phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
-                      dist_ar90, dist_ar180, dist_ar270)
-    is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
+    if cross_format:
+        phash_dist = dist_normal
+        is_rotated = False
+    else:
+        # Low-entropy rotation guard:
+        # Near-uniform images (night-sky photos, solid-colour screenshots) have pHash
+        # patterns that are nearly symmetric under rotation — e.g., a tiny moon on a
+        # black field produces a pHash that at 180° accidentally resembles a different
+        # night-sky shot.  For such pairs, a rotation-aware min distance of 4-6 bits
+        # triggers the rotation floor (6 bits) even though the images are genuinely
+        # different (direct pHash = 28-36).  This is a false rotation match caused by
+        # accidental pHash symmetry, NOT a real rotated duplicate.
+        #
+        # Fix: for low-entropy pairs, use only the direct pHash distance (no rotation
+        # search).  Calibration data (418 GT groups) confirms zero legitimate
+        # low-entropy rotation pairs, so this change has no recall cost.
+        #
+        # This mirrors the reasoning applied to cross-format pairs: both cases involve
+        # image types where rotation-aware matching produces consistent false positives.
+        both_low_entropy = (
+            bool(a.histogram) and bool(b.histogram)
+            and _histogram_entropy(a.histogram) < _LOW_ENTROPY_THR
+            and _histogram_entropy(b.histogram) < _LOW_ENTROPY_THR
+        )
+        if both_low_entropy:
+            phash_dist = dist_normal
+            is_rotated = False
+        else:
+            # b's rotations vs a's upright hash
+            dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
+            dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
+            dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
+            # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
+            dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
+            dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
+            dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
+            phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
+                              dist_ar90, dist_ar180, dist_ar270)
+            is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
 
     # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of
     # pHash drift even for pixel-identical content.  Apply a rotation-lenient
@@ -976,12 +1125,56 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # directional gradients vs the camera JPEG engine).
     # Skipped for rotation matches: dHash is directional and not rotation-invariant —
     # a 90°-rotated copy will always fail a naive dHash check.
-    # Also skipped when pHash == 0: a definitive identity signal; dHash would only add
-    # false negatives due to JPEG quality / denoising differences.
-    if settings.use_dual_hash and not cross_format and not is_rotated and dist_normal > 0:
-        dhash_thr = eff_threshold * 1.5
-        if a.dhash - b.dhash > dhash_thr:
-            return False
+    # Normally skipped when pHash == 0: a definitive identity signal; dHash would
+    # only add false negatives due to JPEG quality / denoising differences.
+    #
+    # Exception — low-entropy dHash guard:
+    # Near-uniform images (night-sky photos, solid-colour screenshots) have pHash
+    # that collapses to 0 even across DIFFERENT shots: >95% of pixels are black,
+    # so the 8×8 pHash grid sees only background.  For such image pairs, pHash=0
+    # is NOT a reliable identity signal, but dHash still captures directional
+    # gradient differences (e.g. moon position changed → gradient changed).
+    # When BOTH images have histogram entropy below _LOW_ENTROPY_THR AND dHash ≥
+    # _LOW_ENTROPY_DHASH_THR, we apply the dHash gate even though pHash=0.
+    #
+    # Calibration data (Calibration JPEG set, 418 GT groups):
+    #   Intra-group low-entropy pairs (same shot saved twice): dHash=0 always.
+    #   Inter-group false-merge low-entropy pairs (different shots): dHash=4-6.
+    # Threshold=3 rejects dHash≥4 while passing dHash≤2.
+    #
+    # Threshold multiplier is 1.0 (not 1.5) to match eff_threshold exactly.
+    # Rationale (Group-24 false-chain bug):
+    #   Consecutive burst-shot same-format pairs (e.g. two CR2s or two JPEGs of a
+    #   textured surface taken seconds apart) can have pHash = threshold and dHash =
+    #   threshold+1.  With a 1.5× dHash multiplier the dHash check passes and
+    #   single-linkage union-find chains both pairs into one group.  Calibration
+    #   data shows max dHash for any legitimate same-format non-rotation pair with
+    #   pHash > 0 is pHash+0 (i.e., dHash ≤ pHash), so the 1.0× multiplier admits
+    #   all true pairs while blocking the one-bit-above-threshold burst-shot edges.
+    #
+    # Gate is strictly less than (>= rejects): a pair whose dHash exactly equals
+    # eff_threshold is borderline and should not be merged.  Calibration data shows
+    # the maximum intra-group dHash for any same-format non-rotation pair with
+    # pHash > 0 is pHash itself, so the pair sits at or below eff_threshold - 1.
+    # Pairs at the boundary (dHash == eff_threshold) are consecutive-burst cross-group
+    # edges (e.g. Canon EOS M100 burst: set_024 × set_025 at pHash=4, dHash=4).
+    if settings.use_dual_hash and not cross_format and not is_rotated:
+        dhash_val = a.dhash - b.dhash
+
+        # Low-entropy guard: apply dHash even when pHash=0 for near-uniform images.
+        # See _LOW_ENTROPY_THR / _LOW_ENTROPY_DHASH_THR constants for calibration.
+        if dist_normal == 0 and a.histogram and b.histogram:
+            ent_a = _histogram_entropy(a.histogram)
+            ent_b = _histogram_entropy(b.histogram)
+            if (ent_a < _LOW_ENTROPY_THR and ent_b < _LOW_ENTROPY_THR
+                    and dhash_val >= _LOW_ENTROPY_DHASH_THR):
+                return False
+
+        # Standard dHash gate (pHash > 0 required).
+        if dist_normal > 0:
+            dhash_thr = eff_threshold * 1.0
+            if dhash_val >= dhash_thr:
+                return False
 
     # 5. Histogram intersection.
     #    Cross-format pairs (RAW vs JPEG) use a relaxed floor instead of the full
@@ -1776,44 +1969,97 @@ def _split_by_format(
 
 # ── Video duplicate detection ─────────────────────────────────────────────────
 
+_FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/truncated videos
+_VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
+
+
+def _probe_video_duration(path: Path) -> "Optional[float]":
+    """Return video duration in seconds via ffprobe, or None if unavailable.
+
+    Used by _extract_video_thumb to choose a safe seek position for very
+    short clips (duration < 1 s).
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "error",
+                "-show_entries", "format=duration",
+                "-of", "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            capture_output=True, timeout=5,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+    except Exception:
+        pass
+    return None
+
+
 def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
     """Try to extract a representative frame from a video file.
 
-    Tries ffmpeg subprocess first (widely available), then OpenCV.
-    Returns a PIL Image (RGB) or None if neither method is available / succeeds.
-    The frame is taken at 1 second into the video (safe for most clips; falls back
-    to the very first frame if the video is shorter than 1 s).
+    Tries ffmpeg subprocess first (widely available), then OpenCV as fallback.
+    Returns a PIL Image (RGB), or None if neither tool is available or both fail.
+
+    Seek position:
+    - Query duration via ffprobe and seek to ``min(duration / 2, 1.0)`` so that
+      very short clips (< 1 s) get a frame at their midpoint rather than past EOF.
+    - Falls back to seeking at 1 s without a prior duration probe when ffprobe is
+      unavailable (behaviour is unchanged for normal-length videos).
+    - If the timed-out ffmpeg call fails (malformed file), returns None.
+
+    Both ffmpeg and ffprobe calls are bounded by timeouts to prevent hangs on
+    corrupt or truncated video files.
     """
-    # 1. Try ffmpeg (most reliable; no Python dependency)
+    import subprocess
+    import io as _io
+
+    # ── determine a safe seek offset ─────────────────────────────────────────
+    seek_s = 1.0
+    dur = _probe_video_duration(path)
+    if dur is not None and dur < 2.0:
+        # For clips shorter than 2 s, seek to the midpoint so we always land
+        # on a valid frame.  For normal videos this evaluates to >= 1.0.
+        seek_s = max(dur / 2.0, 0.0)
+
+    seek_str = f"{seek_s:.3f}"
+
+    # ── 1. ffmpeg path ─────────────────────────────────────────────────────
     try:
-        import subprocess
-        import io as _io
         result = subprocess.run(
             [
                 "ffmpeg", "-hide_banner", "-loglevel", "error",
-                "-ss", "00:00:01", "-i", str(path),
+                "-ss", seek_str, "-i", str(path),
                 "-frames:v", "1", "-f", "image2pipe",
                 "-vcodec", "png", "-",
             ],
-            capture_output=True, timeout=15,
+            capture_output=True, timeout=_FFMPEG_TIMEOUT,
         )
         if result.returncode == 0 and result.stdout:
             img = Image.open(_io.BytesIO(result.stdout))
             img.load()
             return img.convert("RGB") if img.mode != "RGB" else img
+    except FileNotFoundError:
+        # ffmpeg not installed — fall through to OpenCV silently.
+        pass
     except Exception:
         pass
 
-    # 2. Try OpenCV (cv2) — only available if user installed it
+    # ── 2. OpenCV fallback ────────────────────────────────────────────────
     try:
         import cv2  # type: ignore
         cap = cv2.VideoCapture(str(path))
-        # Seek to 1000 ms
-        cap.set(cv2.CAP_PROP_POS_MSEC, 1000)
+        seek_ms = seek_s * 1000.0
+        cap.set(cv2.CAP_PROP_POS_MSEC, seek_ms)
         ret, frame = cap.read()
         cap.release()
         if ret and frame is not None:
             return Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    except ImportError:
+        # cv2 not installed — that's fine, it's optional.
+        pass
     except Exception:
         pass
 
@@ -1826,6 +2072,8 @@ def collect_videos(
     settings: Settings,
     progress_cb: Optional[ProgressCb] = None,
     stop_flag: Optional[list[bool]] = None,
+    library=None,
+    failed_paths_out: "Optional[list[Path]]" = None,
 ) -> List[ImageRecord]:
     """Walk *folder* and return one :class:`ImageRecord` per video file found.
 
@@ -1833,10 +2081,20 @@ def collect_videos(
     ``phash`` holds a thumbnail pHash when ``settings.video_use_thumb`` is True
     and a frame could be extracted via ffmpeg or OpenCV; otherwise a zero hash.
 
-    The function is intentionally sequential (no thread pool) because thumbnail
-    extraction already involves spawning ffmpeg subprocesses — parallel spawning
-    would overload the system for large collections.  Size-stat (stat.st_size) is
-    the primary duplicate signal anyway and is nearly free per file.
+    Args:
+        library: Optional :class:`~library.Library` instance.  When supplied,
+                 previously extracted thumbnail pHashes are reused for files
+                 whose ``mtime`` and ``size`` are unchanged (cache hit), so
+                 repeated scans of a large video collection skip the costly
+                 ffmpeg subprocess for every file.
+        failed_paths_out: Optional list; any video file that caused an
+                 unrecoverable exception during stat/hashing is appended here
+                 so callers can report failures without crashing the scan.
+
+    Parallelism: up to ``_VIDEO_EXTRACT_WORKERS`` ffmpeg/OpenCV subprocesses run
+    concurrently for cache-miss files.  Files that hit the cache are never sent
+    to the pool.  The cap is intentionally low (2) to avoid overwhelming a HDD
+    or spinning fans on a large video collection.
     """
     skip_names_set = {s.strip() for s in settings.skip_names.split(",") if s.strip()}
     video_paths: list[Path] = []
@@ -1862,43 +2120,145 @@ def collect_videos(
     total = len(video_paths)
     _zero = imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
-    records: list[ImageRecord] = []
+
+    # Load per-folder video pHash cache when a library is available.
+    from library import VideoRecord as _VideoRecord
+    _vcache_old: dict[str, _VideoRecord] = (
+        library.load_video_cache(str(folder)) if library is not None else {}
+    )
+    _vcache_new: dict[str, _VideoRecord] = {}
+
+    # Progress throttle: report every file when the collection is small;
+    # otherwise at most once every 5 files to avoid flooding the UI.
+    _progress_step = 1 if total <= 20 else 5
+    failed_paths: list[Path] = []
+
+    # ── Phase 1: stat + cache check (fast, sequential) ─────────────────────
+    # Produces two buckets: `ready` (cache hits, no ffmpeg needed) and
+    # `to_extract` (cache misses that need frame extraction).
+    # Both share the same slot in the final `ordered_phashes` list, keyed by
+    # path string so Phase 3 can assemble records in original walk order.
+
+    @dataclass
+    class _VideoSlot:
+        path: Path
+        stat_result: "os.stat_result"
+        ph: "imagehash.ImageHash"           # filled by cache hit or extraction
+        done: bool = False                  # True once ph is final
+
+    slots: list[_VideoSlot] = []
+    extract_indices: list[int] = []         # indices into slots[] needing extraction
 
     for i, path in enumerate(video_paths):
         if stop_flag and stop_flag[0]:
             break
-        if progress_cb and (i == 0 or i % 5 == 0 or i == total - 1):
+        if progress_cb and (i == 0 or i % _progress_step == 0 or i == total - 1):
             progress_cb(
                 f"Indexing video {i + 1}/{total}: {path.name}",
                 i + 1, total, "Videos",
             )
         try:
             stat = path.stat()
-            ph = _zero
-            if use_thumb:
-                try:
-                    thumb = _extract_video_thumb(path)
-                    if thumb is not None:
-                        work = _downscaled_for_hashing(
-                            thumb if thumb.mode == "RGB" else thumb.convert("RGB")
-                        )
-                        ph = imagehash.phash(work)
-                except Exception:
-                    ph = _zero
+            # Skip zero-byte files — they cannot be valid videos.
+            if stat.st_size == 0:
+                if progress_cb:
+                    progress_cb(
+                        f"Skipped (0-byte): {path.name}",
+                        i + 1, total, "Videos",
+                    )
+                continue
+            file_key = str(path)
 
-            records.append(ImageRecord(
-                path=path,
-                width=0, height=0,
-                file_size=stat.st_size,
-                phash=ph,
-                dhash=_zero,
-                mtime=min(stat.st_mtime, stat.st_ctime),
-                brightness=128.0,
-                histogram=[],
-                is_video=True,
-            ))
-        except Exception:
-            pass
+            if use_thumb:
+                cached = _vcache_old.get(file_key)
+                if (
+                    cached is not None
+                    and cached.mtime == stat.st_mtime
+                    and cached.size == stat.st_size
+                ):
+                    # Cache hit — resolve pHash immediately, no extraction needed.
+                    ph = imagehash.hex_to_hash(cached.phash) if cached.phash else _zero
+                    slots.append(_VideoSlot(path=path, stat_result=stat, ph=ph, done=True))
+                else:
+                    # Cache miss — mark slot for parallel extraction.
+                    slot_idx = len(slots)
+                    slots.append(_VideoSlot(path=path, stat_result=stat, ph=_zero, done=False))
+                    extract_indices.append(slot_idx)
+            else:
+                # No thumb requested — carry forward existing cache entry.
+                cached = _vcache_old.get(file_key)
+                if (
+                    cached is not None
+                    and cached.mtime == stat.st_mtime
+                    and cached.size == stat.st_size
+                ):
+                    _vcache_new[file_key] = cached
+                slots.append(_VideoSlot(path=path, stat_result=stat, ph=_zero, done=True))
+
+        except Exception as _exc:
+            failed_paths.append(path)
+            if failed_paths_out is not None:
+                failed_paths_out.append(path)
+            if progress_cb:
+                progress_cb(
+                    f"Failed (skipped): {path.name} — {_exc}",
+                    i + 1, total, "Videos",
+                )
+
+    # ── Phase 2: bounded parallel extraction for cache-miss files ──────────
+    if extract_indices and not (stop_flag and stop_flag[0]):
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+
+        def _extract_one(slot_idx: int):
+            """Extract thumbnail for one slot; safe to run in a thread."""
+            slot = slots[slot_idx]
+            ph = _zero
+            try:
+                thumb = _extract_video_thumb(slot.path)
+                if thumb is not None:
+                    work = _downscaled_for_hashing(
+                        thumb if thumb.mode == "RGB" else thumb.convert("RGB")
+                    )
+                    ph = imagehash.phash(work)
+            except Exception:
+                ph = _zero
+            slot.ph = ph
+            slot.done = True
+            file_key = str(slot.path)
+            _vcache_new[file_key] = _VideoRecord(
+                path=file_key,
+                mtime=slot.stat_result.st_mtime,
+                size=slot.stat_result.st_size,
+                phash=str(ph) if ph is not _zero else "",
+            )
+
+        with _TPE(max_workers=_VIDEO_EXTRACT_WORKERS) as _pool:
+            list(_pool.map(_extract_one, extract_indices))
+
+    # ── Phase 3: assemble ImageRecord list in original walk order ──────────
+    records: list[ImageRecord] = []
+    for slot in slots:
+        records.append(ImageRecord(
+            path=slot.path,
+            width=0, height=0,
+            file_size=slot.stat_result.st_size,
+            phash=slot.ph,
+            dhash=_zero,
+            mtime=min(slot.stat_result.st_mtime, slot.stat_result.st_ctime),
+            brightness=128.0,
+            histogram=[],
+            is_video=True,
+        ))
+
+    # Persist the updated video cache (new + untouched carry-forwards from old).
+    if library is not None and _vcache_new:
+        # Merge: start from old cache, update with fresh extractions.
+        merged_vcache = dict(_vcache_old)
+        merged_vcache.update(_vcache_new)
+        # Drop entries for files that no longer exist in this scan.
+        seen = {str(p) for p in video_paths}
+        merged_vcache = {k: v for k, v in merged_vcache.items() if k in seen}
+        library.save_video_cache(str(folder), merged_vcache)
 
     return records
 
@@ -1982,13 +2342,20 @@ def find_video_duplicates(
                 if px != py:
                     parent[px] = py
 
+            # Track which pairs joined due to a missing thumbnail (zero-hash).
+            # If any pair in a final bucket is size-only (one or both thumbs
+            # missing), we mark that group ambiguous so the UI flags it.
+            ambiguous_pairs: set[tuple[int, int]] = set()
+
             for i in range(n):
                 for j in range(i + 1, n):
                     pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
                     pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
                     # If either thumbnail is missing, group by size alone.
-                    if (pi_zero or pj_zero or
-                            members[i].phash - members[j].phash <= _THUMB_THR):
+                    if pi_zero or pj_zero:
+                        _union(i, j)
+                        ambiguous_pairs.add((i, j))
+                    elif members[i].phash - members[j].phash <= _THUMB_THR:
                         _union(i, j)
 
             buckets: dict[int, list[int]] = defaultdict(list)
@@ -2002,22 +2369,30 @@ def find_video_duplicates(
                 # Keep oldest (smallest mtime); use file_size desc as tiebreaker
                 bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
                 group_counter += 1
+                # Mark ambiguous if any member pair in this bucket lacked a thumbnail.
+                idx_set = set(bucket_indices)
+                is_amb = any(
+                    (a in idx_set and b in idx_set) for a, b in ambiguous_pairs
+                )
                 groups.append(DuplicateGroup(
                     originals=[bucket_members[0]],
                     previews=bucket_members[1:],
                     is_series=False,
-                    is_ambiguous=False,
+                    is_ambiguous=is_amb,
                     group_id=f"v{group_counter:04d}",
                 ))
         else:
-            # Size-only: all same-size members are duplicates — keep the oldest
+            # Size-only: no thumbnails available at all.  Mark ambiguous so the
+            # report flags these groups — same size alone is strong evidence in
+            # personal libraries but can produce false positives (e.g. two
+            # different videos encoded to the same target bitrate).
             members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
             group_counter += 1
             groups.append(DuplicateGroup(
                 originals=[members_sorted[0]],
                 previews=members_sorted[1:],
                 is_series=False,
-                is_ambiguous=False,
+                is_ambiguous=True,   # no visual confirmation available
                 group_id=f"v{group_counter:04d}",
             ))
 

@@ -1,5 +1,7 @@
-# User settings (kept local only)
+# User settings and runtime state (kept local only)
 settings.json
+scan_history.json
+calib_out.txt
 
 # Python
 __pycache__/

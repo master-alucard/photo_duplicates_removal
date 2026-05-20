@@ -42,7 +42,8 @@ def _publish_master_root(root: tk.Tk) -> None:
                 or modname.endswith("test_report_viewer")
                 or modname.endswith("test_library")
                 or modname.endswith("test_rotation_detection")
-                or modname.endswith("test_cache_merge")):
+                or modname.endswith("test_cache_merge")
+                or modname.endswith("test_ui_animations")):
             continue
         if hasattr(mod, "_ROOT"):
             try:

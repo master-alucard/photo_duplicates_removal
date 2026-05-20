@@ -648,5 +648,300 @@ class TestVideoZeroHashFix(unittest.TestCase):
         self.assertEqual(len(groups), 1, "Same-size zero-hash videos must be grouped by size")
 
 
+class TestGroup24BurstShotChainFix(unittest.TestCase):
+    """
+    Regression test for the Group-24 false-chain bug.
+
+    Context: calibration_cf folder, set_024 and set_025.  Four files:
+      A = CR2_011485 (pHash X)   C = JPG_202278 (pHash X)   -- true pair (same shot)
+      B = CR2_011486 (pHash Y)   D = JPG_202287 (pHash Y)   -- true pair (same shot)
+
+    X and Y differ by pHash=4, dHash=5 (consecutive burst shots of a textured
+    surface).  At threshold=4 the same-format burst-shot edges A↔B and C↔D
+    (both pHash=4) passed the old dHash check (dhash_thr = threshold * 1.5 = 6,
+    dHash=5 ≤ 6).  Union-find then chained A, B, C, D into one group instead
+    of two.
+
+    Fix: reduce the dHash multiplier from 1.5 to 1.0 so
+    dhash_thr = threshold = 4, blocking dHash=5 edges.
+    True pairs (pHash=0, dHash=0) are unaffected (pHash=0 → dHash skipped).
+    """
+
+    # pHash values derived from real calibration files
+    _HASH_A = "acf5f21884e3996c"   # A=CR2_011485, C=JPG_202278 (identical shot)
+    _HASH_B = "ade5f2188ce3916c"   # B=CR2_011486, D=JPG_202287 (identical shot)
+
+    def _cr2(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        return ImageRecord(
+            path=Path(f"/calib/{idx:03d}.cr2"),
+            width=6024, height=4020,
+            file_size=29_000_000,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_000_000.0 + idx,
+            brightness=117.0,
+            histogram=[1 / 96] * 96,
+            metadata_count=3,
+        )
+
+    def _jpg(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        return ImageRecord(
+            path=Path(f"/calib/{idx:03d}.jpg"),
+            width=6000, height=4000,
+            file_size=3_200_000,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_000_000.0 + idx + 0.5,
+            brightness=128.0,
+            histogram=[1 / 96] * 96,
+            metadata_count=0,
+        )
+
+    def _settings(self) -> Settings:
+        s = Settings()
+        s.threshold = 4                   # user's calibrated setting that triggered the bug
+        s.use_dual_hash = True
+        s.use_histogram = False           # isolate hash-based logic
+        s.dark_protection = False
+        s.series_threshold_factor = 1.0   # as in calibration_cf
+        s.use_rawpy = True
+        s.raw_use_embedded_thumb = True
+        s.keep_all_formats = False
+        return s
+
+    def test_true_cf_pairs_pass(self):
+        """Same-shot CR2+JPEG pairs (pHash=0, dHash=0) must still be similar."""
+        settings = self._settings()
+        # A and C are the same shot
+        a = self._cr2(0, self._HASH_A, self._HASH_A)
+        c = self._jpg(2, self._HASH_A, self._HASH_A)
+        self.assertTrue(
+            _can_be_similar(a, c, settings),
+            "True CF pair (pHash=0, dHash=0) must pass _can_be_similar",
+        )
+
+    def test_burst_shot_same_format_blocked(self):
+        """Consecutive burst-shot same-format pairs (pHash=4, dHash=5) must be blocked."""
+        settings = self._settings()
+        # A and B are consecutive burst shots — different images, pHash=4, dHash=5
+        a = self._cr2(0, self._HASH_A, "ee2fc6e3f7fb9f93")
+        b = self._cr2(1, self._HASH_B, "6e07c7e3f7fb8f93")
+        ph = int(a.phash - b.phash)
+        dh = int(a.dhash - b.dhash)
+        self.assertEqual(ph, 4, f"Expected pHash=4, got {ph}")
+        self.assertEqual(dh, 5, f"Expected dHash=5, got {dh}")
+        self.assertFalse(
+            _can_be_similar(a, b, settings),
+            "Burst-shot same-format pair (pHash=4, dHash=5, threshold=4) must be blocked "
+            "by dHash check (dhash_thr = threshold * 1.0 = 4 < dHash=5)",
+        )
+
+    def test_group_24_splits_into_two_groups(self):
+        """
+        All four files (A=CR2_485, B=CR2_486, C=JPG_278, D=JPG_287) must form
+        exactly two groups: {A, C} and {B, D}.  Union-find must NOT chain them all
+        into one group via the A↔B and C↔D burst-shot edges.
+        """
+        settings = self._settings()
+        a = self._cr2(0, self._HASH_A, "ee2fc6e3f7fb9f93")
+        b = self._cr2(1, self._HASH_B, "6e07c7e3f7fb8f93")
+        c = self._jpg(2, self._HASH_A, "ee2fc6e3f7fb9f93")
+        d = self._jpg(3, self._HASH_B, "6e07c7e3f7fb8f93")
+
+        groups, _ = find_groups([a, b, c, d], settings)
+
+        self.assertEqual(
+            len(groups), 2,
+            f"Expected 2 groups (one per burst-shot pair), got {len(groups)}. "
+            "Group-24 false-chain bug: burst-shot edges A↔B and C↔D must be blocked "
+            "by the dHash check (dhash_thr = threshold * 1.0).",
+        )
+        # Verify each group contains exactly one CR2 and one JPEG
+        for g in groups:
+            all_files = g.originals + g.previews
+            exts = {r.path.suffix.lower() for r in all_files}
+            self.assertIn(".cr2", exts, "Each group must contain a CR2")
+            self.assertIn(".jpg", exts, "Each group must contain a JPEG")
+            self.assertEqual(len(all_files), 2, "Each group must have exactly 2 files")
+
+
+class TestLowEntropyDHashGuard(unittest.TestCase):
+    """
+    Regression tests for the low-entropy dHash guard.
+
+    Context: night-sky photos (and other near-uniform images) have pHash that
+    collapses to 0 across consecutive shots.  With >95% black pixels, the
+    8x8 pHash grid sees only background, so two different shots of the same
+    night scene hash identically.
+
+    Before the fix, the dHash check was completely skipped when pHash=0
+    (the rationale: pHash=0 = "definitely identical").  For low-entropy images
+    this was wrong — dHash still captured gradient differences (e.g. the moon
+    moved).
+
+    Fix: when BOTH images have histogram entropy < _LOW_ENTROPY_THR AND
+    pHash=0 AND dHash >= _LOW_ENTROPY_DHASH_THR, reject the pair even
+    though pHash=0.
+
+    Calibration data (pair_186/pair_187 and pair_220/pair_221 in the
+    Calibration JPEG test set):
+      intra-group (same shot, byte-identical copies): pHash=0, dHash=0
+      inter-group wrong-merge (different shots):      pHash=0, dHash=4-6
+    Threshold _LOW_ENTROPY_DHASH_THR=3 rejects dHash>=4 while passing dHash<=2.
+    """
+
+    # Low-entropy histogram: dominated by the first bin (nearly all black pixels).
+    # 96 values = 3 channels x 32 bins.  Per channel: first bin=0.95, last=0.05.
+    # Shannon entropy ~1.8 nats (well below _LOW_ENTROPY_THR=3.0).
+    _LOW_HIST = ([0.95] + [0.0] * 30 + [0.05]) * 3
+
+    # Normal-entropy histogram: roughly uniform across all 96 bins.
+    # Shannon entropy ~4.5 nats (well above _LOW_ENTROPY_THR=3.0).
+    _HIGH_HIST = [1.0 / 32] * 96   # 1/32 per bin, 32 bins per channel = 1.0 per channel
+
+    def _low_entropy_record(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        """A night-sky JPEG with low histogram entropy."""
+        return ImageRecord(
+            path=Path(f"/night_sky/shot_{idx:03d}.jpg"),
+            width=1620, height=1080,
+            file_size=80_000 + idx * 100,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_763_416_800.0 + idx * 60,
+            brightness=5.0,   # very dark
+            histogram=list(self._LOW_HIST),
+            metadata_count=0,
+        )
+
+    def _high_entropy_record(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        """A normal daytime JPEG with high histogram entropy."""
+        return ImageRecord(
+            path=Path(f"/daytime/shot_{idx:03d}.jpg"),
+            width=1620, height=1080,
+            file_size=300_000 + idx * 100,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_763_416_800.0 + idx,
+            brightness=128.0,
+            histogram=list(self._HIGH_HIST),
+            metadata_count=0,
+        )
+
+    def _settings(self) -> Settings:
+        s = Settings()
+        s.threshold = 4
+        s.use_dual_hash = True
+        s.use_histogram = True
+        s.dark_protection = False
+        s.series_threshold_factor = 1.0
+        return s
+
+    # ── dHash=0 (byte-identical copies) always pass ---------------------------
+
+    def test_low_entropy_same_shot_copies_pass(self):
+        """
+        Two copies of the same night-sky shot (pHash=0, dHash=0) must still
+        be grouped — they are genuine duplicates.  The guard must not reject them.
+        """
+        settings = self._settings()
+        # Same pHash AND same dHash = byte-identical copies
+        ZERO = "0" * 16
+        original = self._low_entropy_record(0, ZERO, ZERO)
+        duplicate = self._low_entropy_record(1, ZERO, ZERO)
+        self.assertTrue(
+            _can_be_similar(original, duplicate, settings),
+            "Low-entropy duplicate pair (pHash=0, dHash=0) must pass _can_be_similar",
+        )
+
+    # ── dHash differs → different shots → must be rejected -------------------
+
+    def test_low_entropy_different_shots_blocked_by_dhash(self):
+        """
+        Two DIFFERENT night-sky shots with pHash=0 (collapsed) but dHash=4
+        must be BLOCKED.  Without the guard they would be wrongly merged.
+
+        dHash=4 exceeds _LOW_ENTROPY_DHASH_THR=3, so the guard fires.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        # dHash differs by 4 bits: flip 4 low bits
+        DHASH_B = _bit_flip(ZERO, 4)
+        shot_a = self._low_entropy_record(0, ZERO, ZERO)
+        shot_b = self._low_entropy_record(1, ZERO, DHASH_B)
+        pd = int(shot_a.phash - shot_b.phash)
+        dd = int(shot_a.dhash - shot_b.dhash)
+        self.assertEqual(pd, 0, f"Expected pHash=0, got {pd}")
+        self.assertEqual(dd, 4, f"Expected dHash=4, got {dd}")
+        self.assertFalse(
+            _can_be_similar(shot_a, shot_b, settings),
+            "Low-entropy pair with pHash=0 but dHash=4 must be blocked by "
+            "the low-entropy dHash guard",
+        )
+
+    def test_low_entropy_dhash_2_still_passes(self):
+        """
+        Low-entropy pair with pHash=0 and dHash=2 (below the guard threshold)
+        must still PASS — dHash=2 is within normal JPEG recompression noise.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 2)
+        shot_a = self._low_entropy_record(0, ZERO, ZERO)
+        shot_b = self._low_entropy_record(1, ZERO, DHASH_B)
+        self.assertTrue(
+            _can_be_similar(shot_a, shot_b, settings),
+            "Low-entropy pair with pHash=0 and dHash=2 (below guard) must still pass",
+        )
+
+    # ── High-entropy images: guard must NOT fire ------------------------------
+
+    def test_high_entropy_pHash0_still_passes(self):
+        """
+        A normal-entropy pair (pHash=0, dHash=4) must still PASS — for
+        high-entropy images pHash=0 remains a reliable identity signal and
+        the low-entropy guard must not interfere.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 4)
+        shot_a = self._high_entropy_record(0, ZERO, ZERO)
+        shot_b = self._high_entropy_record(1, ZERO, DHASH_B)
+        self.assertTrue(
+            _can_be_similar(shot_a, shot_b, settings),
+            "High-entropy pair with pHash=0 must NOT be blocked by the low-entropy guard",
+        )
+
+    # ── find_groups integration: two different low-entropy shots must not merge
+
+    def test_find_groups_does_not_merge_different_low_entropy_shots(self):
+        """
+        Integration test: two pairs of low-entropy night-sky shots where
+        pair A and pair B have identical pHash but dHash=4 between groups.
+        find_groups must return 2 separate groups, not 1 merged group.
+        """
+        settings = self._settings()
+        settings.use_histogram = False   # histogram guard would also stop the merge;
+                                         # disable it to isolate the dHash guard
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 4)
+
+        # Pair A: original + duplicate (same shot, dHash=0 between them)
+        orig_a = self._low_entropy_record(0, ZERO, ZERO)
+        dupl_a = self._low_entropy_record(1, ZERO, ZERO)
+
+        # Pair B: different shot, same pHash but dHash=4 away from pair A
+        orig_b = self._low_entropy_record(2, ZERO, DHASH_B)
+        dupl_b = self._low_entropy_record(3, ZERO, DHASH_B)
+
+        groups, _ = find_groups([orig_a, dupl_a, orig_b, dupl_b], settings)
+
+        self.assertEqual(
+            len(groups), 2,
+            f"Expected 2 separate groups (different low-entropy shots), got {len(groups)}. "
+            "Low-entropy dHash guard must prevent pair A and pair B from merging "
+            "when pHash=0 but dHash=4 between the groups.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

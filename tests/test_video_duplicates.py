@@ -129,3 +129,81 @@ def test_extension_match_is_case_insensitive():
     ]
     groups = find_video_duplicates(recs, s)
     assert len(groups) == 1
+
+
+# ── ambiguous flag for size-only matches ─────────────────────────────────────
+
+def test_size_only_group_marked_ambiguous_when_no_thumbs():
+    """Groups formed on size alone (no thumbnails) must be is_ambiguous=True."""
+    s = Settings(video_match_format=True, video_match_size=True,
+                 video_use_thumb=True)
+    # Both have zero hash (extraction failed / not attempted)
+    recs = [
+        _video_rec("a.mp4", 1024),
+        _video_rec("b.mp4", 1024),
+    ]
+    groups = find_video_duplicates(recs, s)
+    assert len(groups) == 1
+    assert groups[0].is_ambiguous is True
+
+
+def test_size_only_group_marked_ambiguous_when_thumb_disabled():
+    """With video_use_thumb=False, every group must be is_ambiguous=True."""
+    s = Settings(video_match_format=True, video_match_size=True,
+                 video_use_thumb=False)
+    recs = [
+        _video_rec("a.mp4", 1024),
+        _video_rec("b.mp4", 1024),
+    ]
+    groups = find_video_duplicates(recs, s)
+    assert len(groups) == 1
+    assert groups[0].is_ambiguous is True
+
+
+def _video_rec_with_hash(path: str, size: int, hash_val: imagehash.ImageHash,
+                         mtime: float = 0.0) -> ImageRecord:
+    return ImageRecord(
+        path=Path(path),
+        width=0, height=0,
+        file_size=size,
+        phash=hash_val,
+        dhash=_zero_hash(),
+        mtime=mtime,
+        brightness=128.0,
+        histogram=[],
+        is_video=True,
+    )
+
+
+def _nonzero_hash_video() -> imagehash.ImageHash:
+    arr = np.zeros((8, 8), dtype=bool)
+    arr[0, 0] = True
+    return imagehash.ImageHash(arr)
+
+
+def test_visually_confirmed_group_not_ambiguous():
+    """A group where both thumbnails are non-zero and similar must NOT be ambiguous."""
+    s = Settings(video_match_format=True, video_match_size=True,
+                 video_use_thumb=True)
+    h = _nonzero_hash_video()
+    recs = [
+        _video_rec_with_hash("a.mp4", 1024, h),
+        _video_rec_with_hash("b.mp4", 1024, h),
+    ]
+    groups = find_video_duplicates(recs, s)
+    assert len(groups) == 1
+    assert groups[0].is_ambiguous is False
+
+
+def test_mixed_thumb_group_marked_ambiguous():
+    """If one video in a bucket has a zero hash, the group must be ambiguous."""
+    s = Settings(video_match_format=True, video_match_size=True,
+                 video_use_thumb=True)
+    h = _nonzero_hash_video()
+    recs = [
+        _video_rec_with_hash("a.mp4", 1024, h),            # good thumb
+        _video_rec("b.mp4", 1024),                          # zero hash (failed)
+    ]
+    groups = find_video_duplicates(recs, s)
+    assert len(groups) == 1
+    assert groups[0].is_ambiguous is True

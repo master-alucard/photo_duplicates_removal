@@ -202,6 +202,41 @@ class FileRecord:
             return True
 
 
+# ── VideoRecord ───────────────────────────────────────────────────────────────
+
+_VIDEO_CACHE_VERSION = 1
+
+
+@dataclass
+class VideoRecord:
+    """Serialisable per-file cache record for a video file.
+
+    Stores the thumbnail pHash so repeated scans of a folder skip re-extracting
+    frames with ffmpeg/OpenCV for unchanged files (same mtime + size).
+    """
+    path:   str
+    mtime:  float   # stat.st_mtime
+    size:   int     # st_size in bytes
+    phash:  str     # imagehash hex string; "" means extraction failed
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "VideoRecord":
+        return cls(
+            path  = d["path"],
+            mtime = d["mtime"],
+            size  = d["size"],
+            phash = d.get("phash", ""),
+        )
+
+    def is_stale(self, path: Path) -> bool:
+        """Return True if the file has changed since it was cached."""
+        try:
+            st = path.stat()
+            return st.st_mtime != self.mtime or st.st_size != self.size
+        except (FileNotFoundError, OSError):
+            return True
+
+
 # ── Library directory ──────────────────────────────────────────────────────────
 
 def get_library_dir() -> Path:
@@ -435,6 +470,33 @@ class Library:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
         data = {
             "version": _CACHE_VERSION,
+            "files":   {k: asdict(v) for k, v in cache.items()},
+        }
+        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+    # ── Video-record cache ─────────────────────────────────────────────────
+
+    def _video_cache_path(self, norm_path: str) -> Path:
+        return self._dir / self._folder_id(norm_path) / "video_hashes.json"
+
+    def load_video_cache(self, path: str) -> "dict[str, VideoRecord]":
+        """Load the video pHash cache for *path*. Returns ``{}`` if not found."""
+        cache_path = self._video_cache_path(self._norm(path))
+        if not cache_path.exists():
+            return {}
+        try:
+            data = json.loads(cache_path.read_text(encoding="utf-8"))
+            return {k: VideoRecord.from_dict(v) for k, v in data.get("files", {}).items()}
+        except Exception:
+            return {}
+
+    def save_video_cache(self, path: str, cache: "dict[str, VideoRecord]") -> None:
+        """Persist the video pHash cache for *path*."""
+        norm       = self._norm(path)
+        cache_path = self._video_cache_path(norm)
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        data = {
+            "version": _VIDEO_CACHE_VERSION,
             "files":   {k: asdict(v) for k, v in cache.items()},
         }
         cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
