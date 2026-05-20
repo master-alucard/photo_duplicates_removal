@@ -43,7 +43,7 @@ CALIB_FOLDERS = {
 # absent from the GT catalog).
 GT_EXPECTED = {
     "RAW":      35,
-    "JPEG":     419,
+    "JPEG":     418,  # Confirmed: 418 subdirectories in E:\MEDIA\test\Calibration\groups\
     "CrossFmt": 35,
 }
 

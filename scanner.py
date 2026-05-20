@@ -124,6 +124,32 @@ _CF_BASE_THRESHOLD: int = 2
 # Group-19 bug that this constant was introduced to prevent.
 _CF_EMBEDDED_THUMB_MAX_PHASH: int = 3
 
+# ── Low-entropy dHash guard ───────────────────────────────────────────────────
+#
+# Night-sky photos and other near-uniform images (>95% black pixels) have
+# pHash that collapses to 0 across consecutive shots even when the moon or
+# other subject has moved noticeably.  pHash=0 normally means "definitely
+# identical" and the dHash check is skipped.  This creates a blind spot: two
+# different shots of the same scene (pHash=0) get merged when dHash would
+# have blocked them.
+#
+# Guard: when BOTH images in a candidate pair have histogram entropy below
+# _LOW_ENTROPY_THR (their histograms are dominated by 1-2 bins) AND pHash=0
+# AND dHash ≥ _LOW_ENTROPY_DHASH_THR, the pair is rejected.
+#
+# Calibration data (Calibration JPEG set, 418 GT groups):
+#   Intra-group low-entropy pairs (byte-identical copies):
+#     pHash=0, dHash=0 consistently
+#   Inter-group wrong-merge low-entropy pairs (different shots, pHash collapsed):
+#     pHash=0, dHash=4-6
+#
+# Threshold _LOW_ENTROPY_DHASH_THR=3 catches all observed false merges
+# (dHash≥4) while passing all legitimate intra-group pairs (dHash≤2).
+# Entropy threshold 3.0 nats separates low-entropy images (moon shots,
+# solid-colour images) from normal photographic content.
+_LOW_ENTROPY_THR:       float = 3.0   # Shannon entropy in nats (96-bin RGB histogram)
+_LOW_ENTROPY_DHASH_THR: int   = 3     # dHash bits at which low-entropy pairs are rejected
+
 # ── Hashing performance constants ────────────────────────────────────────────
 #
 # Pre-downscale every image to at most _HASH_WORKING_SIZE pixels on its longest
@@ -286,6 +312,28 @@ def _compute_brightness(img: Image.Image) -> float:
     """Return mean pixel brightness 0.0-255.0."""
     gray = img if img.mode == "L" else img.convert("L")
     return float(_np.asarray(gray, dtype=_np.float32).mean())
+
+
+def _histogram_entropy(histogram: "list[float]") -> float:
+    """Shannon entropy (nats) of a 96-bin RGB histogram.
+
+    High (~4-5 nats) for natural images with diverse pixel values.
+    Low (<2 nats) for near-uniform images (all-black night-sky shots,
+    solid-colour screenshots, blank pages).
+
+    Used by the low-entropy dHash guard in _can_be_similar: images where
+    pHash collapses to 0 even across different shots (because >95% of pixels
+    are the same colour) are given an extra dHash check.
+    """
+    if not histogram:
+        return 0.0
+    arr = _np.array(histogram, dtype=_np.float64)
+    s = arr.sum()
+    if s <= 0:
+        return 0.0
+    arr /= s
+    nz = arr[arr > 0]
+    return float(-_np.sum(nz * _np.log(nz)))
 
 
 # ── thread-count resolution ──────────────────────────────────────────────────
@@ -1053,8 +1101,22 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # directional gradients vs the camera JPEG engine).
     # Skipped for rotation matches: dHash is directional and not rotation-invariant —
     # a 90°-rotated copy will always fail a naive dHash check.
-    # Also skipped when pHash == 0: a definitive identity signal; dHash would only add
-    # false negatives due to JPEG quality / denoising differences.
+    # Normally skipped when pHash == 0: a definitive identity signal; dHash would
+    # only add false negatives due to JPEG quality / denoising differences.
+    #
+    # Exception — low-entropy dHash guard:
+    # Near-uniform images (night-sky photos, solid-colour screenshots) have pHash
+    # that collapses to 0 even across DIFFERENT shots: >95% of pixels are black,
+    # so the 8×8 pHash grid sees only background.  For such image pairs, pHash=0
+    # is NOT a reliable identity signal, but dHash still captures directional
+    # gradient differences (e.g. moon position changed → gradient changed).
+    # When BOTH images have histogram entropy below _LOW_ENTROPY_THR AND dHash ≥
+    # _LOW_ENTROPY_DHASH_THR, we apply the dHash gate even though pHash=0.
+    #
+    # Calibration data (Calibration JPEG set, 418 GT groups):
+    #   Intra-group low-entropy pairs (same shot saved twice): dHash=0 always.
+    #   Inter-group false-merge low-entropy pairs (different shots): dHash=4-6.
+    # Threshold=3 rejects dHash≥4 while passing dHash≤2.
     #
     # Threshold multiplier is 1.0 (not 1.5) to match eff_threshold exactly.
     # Rationale (Group-24 false-chain bug):
@@ -1072,10 +1134,23 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
     # pHash > 0 is pHash itself, so the pair sits at or below eff_threshold - 1.
     # Pairs at the boundary (dHash == eff_threshold) are consecutive-burst cross-group
     # edges (e.g. Canon EOS M100 burst: set_024 × set_025 at pHash=4, dHash=4).
-    if settings.use_dual_hash and not cross_format and not is_rotated and dist_normal > 0:
-        dhash_thr = eff_threshold * 1.0
-        if a.dhash - b.dhash >= dhash_thr:
-            return False
+    if settings.use_dual_hash and not cross_format and not is_rotated:
+        dhash_val = a.dhash - b.dhash
+
+        # Low-entropy guard: apply dHash even when pHash=0 for near-uniform images.
+        # See _LOW_ENTROPY_THR / _LOW_ENTROPY_DHASH_THR constants for calibration.
+        if dist_normal == 0 and a.histogram and b.histogram:
+            ent_a = _histogram_entropy(a.histogram)
+            ent_b = _histogram_entropy(b.histogram)
+            if (ent_a < _LOW_ENTROPY_THR and ent_b < _LOW_ENTROPY_THR
+                    and dhash_val >= _LOW_ENTROPY_DHASH_THR):
+                return False
+
+        # Standard dHash gate (pHash > 0 required).
+        if dist_normal > 0:
+            dhash_thr = eff_threshold * 1.0
+            if dhash_val >= dhash_thr:
+                return False
 
     # 5. Histogram intersection.
     #    Cross-format pairs (RAW vs JPEG) use a relaxed floor instead of the full

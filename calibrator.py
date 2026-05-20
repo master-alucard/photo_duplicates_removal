@@ -51,8 +51,11 @@ from scanner import (
     DuplicateGroup,
     ImageRecord,
     collect_images,
-    _classify_group,   # private but accessible; used by the fast calibration path
-    _CF_BASE_THRESHOLD,  # fixed base for cross-format pHash threshold computation
+    _classify_group,          # private but accessible; used by the fast calibration path
+    _CF_BASE_THRESHOLD,       # fixed base for cross-format pHash threshold computation
+    _histogram_entropy,       # Shannon entropy of a 96-bin RGB histogram
+    _LOW_ENTROPY_THR,         # entropy threshold for the low-entropy dHash guard
+    _LOW_ENTROPY_DHASH_THR,   # dHash rejection threshold for low-entropy image pairs
 )
 
 
@@ -718,6 +721,11 @@ class _PairData:
     h_ratio: float
     # Fixed flags
     cross_format: bool
+    # Per-image histogram entropy (Shannon entropy of the 96-bin RGB histogram).
+    # Pre-computed for the low-entropy dHash guard in _find_groups_fast.
+    # -1.0 when histogram is unavailable (histogram disabled in settings, or empty).
+    hist_entropy_a: float
+    hist_entropy_b: float
 
 
 def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
@@ -727,6 +735,13 @@ def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
     """
     pairs: list[_PairData] = []
     n = len(records)
+
+    # Pre-compute per-record histogram entropy once — reused for every pair.
+    # -1.0 when the histogram list is empty (histogram disabled in settings).
+    record_entropy: list[float] = [
+        _histogram_entropy(r.histogram) if r.histogram else -1.0
+        for r in records
+    ]
 
     for i in range(n):
         a = records[i]
@@ -786,6 +801,8 @@ def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
                 w_ratio=w_r,
                 h_ratio=h_r,
                 cross_format=(a_raw != b_raw),
+                hist_entropy_a=record_entropy[i],
+                hist_entropy_b=record_entropy[j],
             ))
 
     # Sort ascending by rotation-aware pHash distance.
@@ -904,9 +921,20 @@ def _find_groups_fast(
             continue
 
         # 8. dHash gate (skipped for rotation matches and cross-format)
-        if use_dhash and not pd.cross_format and not is_rotated and pd.phash_norm_dist > 0:
-            if pd.dhash_dist >= 0 and pd.dhash_dist > eff_thr * 1.5:
+        if use_dhash and not pd.cross_format and not is_rotated:
+            # Low-entropy guard: apply dHash even when pHash=0 for near-uniform images.
+            # See _LOW_ENTROPY_THR / _LOW_ENTROPY_DHASH_THR in scanner.py for details.
+            if (pd.phash_norm_dist == 0
+                    and pd.dhash_dist >= _LOW_ENTROPY_DHASH_THR
+                    and pd.hist_entropy_a >= 0.0 and pd.hist_entropy_b >= 0.0
+                    and pd.hist_entropy_a < _LOW_ENTROPY_THR
+                    and pd.hist_entropy_b < _LOW_ENTROPY_THR):
                 continue
+
+            # Standard dHash gate (pHash > 0 required).
+            if pd.phash_norm_dist > 0:
+                if pd.dhash_dist >= 0 and pd.dhash_dist > eff_thr * 1.5:
+                    continue
 
         # 9. Histogram gate (relaxed floor for cross-format pairs)
         if use_hist and pd.hist_sim >= 0.0:

@@ -765,5 +765,183 @@ class TestGroup24BurstShotChainFix(unittest.TestCase):
             self.assertEqual(len(all_files), 2, "Each group must have exactly 2 files")
 
 
+class TestLowEntropyDHashGuard(unittest.TestCase):
+    """
+    Regression tests for the low-entropy dHash guard.
+
+    Context: night-sky photos (and other near-uniform images) have pHash that
+    collapses to 0 across consecutive shots.  With >95% black pixels, the
+    8x8 pHash grid sees only background, so two different shots of the same
+    night scene hash identically.
+
+    Before the fix, the dHash check was completely skipped when pHash=0
+    (the rationale: pHash=0 = "definitely identical").  For low-entropy images
+    this was wrong — dHash still captured gradient differences (e.g. the moon
+    moved).
+
+    Fix: when BOTH images have histogram entropy < _LOW_ENTROPY_THR AND
+    pHash=0 AND dHash >= _LOW_ENTROPY_DHASH_THR, reject the pair even
+    though pHash=0.
+
+    Calibration data (pair_186/pair_187 and pair_220/pair_221 in the
+    Calibration JPEG test set):
+      intra-group (same shot, byte-identical copies): pHash=0, dHash=0
+      inter-group wrong-merge (different shots):      pHash=0, dHash=4-6
+    Threshold _LOW_ENTROPY_DHASH_THR=3 rejects dHash>=4 while passing dHash<=2.
+    """
+
+    # Low-entropy histogram: dominated by the first bin (nearly all black pixels).
+    # 96 values = 3 channels x 32 bins.  Per channel: first bin=0.95, last=0.05.
+    # Shannon entropy ~1.8 nats (well below _LOW_ENTROPY_THR=3.0).
+    _LOW_HIST = ([0.95] + [0.0] * 30 + [0.05]) * 3
+
+    # Normal-entropy histogram: roughly uniform across all 96 bins.
+    # Shannon entropy ~4.5 nats (well above _LOW_ENTROPY_THR=3.0).
+    _HIGH_HIST = [1.0 / 32] * 96   # 1/32 per bin, 32 bins per channel = 1.0 per channel
+
+    def _low_entropy_record(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        """A night-sky JPEG with low histogram entropy."""
+        return ImageRecord(
+            path=Path(f"/night_sky/shot_{idx:03d}.jpg"),
+            width=1620, height=1080,
+            file_size=80_000 + idx * 100,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_763_416_800.0 + idx * 60,
+            brightness=5.0,   # very dark
+            histogram=list(self._LOW_HIST),
+            metadata_count=0,
+        )
+
+    def _high_entropy_record(self, idx: int, phash_hex: str, dhash_hex: str) -> ImageRecord:
+        """A normal daytime JPEG with high histogram entropy."""
+        return ImageRecord(
+            path=Path(f"/daytime/shot_{idx:03d}.jpg"),
+            width=1620, height=1080,
+            file_size=300_000 + idx * 100,
+            phash=imagehash.hex_to_hash(phash_hex),
+            dhash=imagehash.hex_to_hash(dhash_hex),
+            mtime=1_763_416_800.0 + idx,
+            brightness=128.0,
+            histogram=list(self._HIGH_HIST),
+            metadata_count=0,
+        )
+
+    def _settings(self) -> Settings:
+        s = Settings()
+        s.threshold = 4
+        s.use_dual_hash = True
+        s.use_histogram = True
+        s.dark_protection = False
+        s.series_threshold_factor = 1.0
+        return s
+
+    # ── dHash=0 (byte-identical copies) always pass ---------------------------
+
+    def test_low_entropy_same_shot_copies_pass(self):
+        """
+        Two copies of the same night-sky shot (pHash=0, dHash=0) must still
+        be grouped — they are genuine duplicates.  The guard must not reject them.
+        """
+        settings = self._settings()
+        # Same pHash AND same dHash = byte-identical copies
+        ZERO = "0" * 16
+        original = self._low_entropy_record(0, ZERO, ZERO)
+        duplicate = self._low_entropy_record(1, ZERO, ZERO)
+        self.assertTrue(
+            _can_be_similar(original, duplicate, settings),
+            "Low-entropy duplicate pair (pHash=0, dHash=0) must pass _can_be_similar",
+        )
+
+    # ── dHash differs → different shots → must be rejected -------------------
+
+    def test_low_entropy_different_shots_blocked_by_dhash(self):
+        """
+        Two DIFFERENT night-sky shots with pHash=0 (collapsed) but dHash=4
+        must be BLOCKED.  Without the guard they would be wrongly merged.
+
+        dHash=4 exceeds _LOW_ENTROPY_DHASH_THR=3, so the guard fires.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        # dHash differs by 4 bits: flip 4 low bits
+        DHASH_B = _bit_flip(ZERO, 4)
+        shot_a = self._low_entropy_record(0, ZERO, ZERO)
+        shot_b = self._low_entropy_record(1, ZERO, DHASH_B)
+        pd = int(shot_a.phash - shot_b.phash)
+        dd = int(shot_a.dhash - shot_b.dhash)
+        self.assertEqual(pd, 0, f"Expected pHash=0, got {pd}")
+        self.assertEqual(dd, 4, f"Expected dHash=4, got {dd}")
+        self.assertFalse(
+            _can_be_similar(shot_a, shot_b, settings),
+            "Low-entropy pair with pHash=0 but dHash=4 must be blocked by "
+            "the low-entropy dHash guard",
+        )
+
+    def test_low_entropy_dhash_2_still_passes(self):
+        """
+        Low-entropy pair with pHash=0 and dHash=2 (below the guard threshold)
+        must still PASS — dHash=2 is within normal JPEG recompression noise.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 2)
+        shot_a = self._low_entropy_record(0, ZERO, ZERO)
+        shot_b = self._low_entropy_record(1, ZERO, DHASH_B)
+        self.assertTrue(
+            _can_be_similar(shot_a, shot_b, settings),
+            "Low-entropy pair with pHash=0 and dHash=2 (below guard) must still pass",
+        )
+
+    # ── High-entropy images: guard must NOT fire ------------------------------
+
+    def test_high_entropy_pHash0_still_passes(self):
+        """
+        A normal-entropy pair (pHash=0, dHash=4) must still PASS — for
+        high-entropy images pHash=0 remains a reliable identity signal and
+        the low-entropy guard must not interfere.
+        """
+        settings = self._settings()
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 4)
+        shot_a = self._high_entropy_record(0, ZERO, ZERO)
+        shot_b = self._high_entropy_record(1, ZERO, DHASH_B)
+        self.assertTrue(
+            _can_be_similar(shot_a, shot_b, settings),
+            "High-entropy pair with pHash=0 must NOT be blocked by the low-entropy guard",
+        )
+
+    # ── find_groups integration: two different low-entropy shots must not merge
+
+    def test_find_groups_does_not_merge_different_low_entropy_shots(self):
+        """
+        Integration test: two pairs of low-entropy night-sky shots where
+        pair A and pair B have identical pHash but dHash=4 between groups.
+        find_groups must return 2 separate groups, not 1 merged group.
+        """
+        settings = self._settings()
+        settings.use_histogram = False   # histogram guard would also stop the merge;
+                                         # disable it to isolate the dHash guard
+        ZERO    = "0" * 16
+        DHASH_B = _bit_flip(ZERO, 4)
+
+        # Pair A: original + duplicate (same shot, dHash=0 between them)
+        orig_a = self._low_entropy_record(0, ZERO, ZERO)
+        dupl_a = self._low_entropy_record(1, ZERO, ZERO)
+
+        # Pair B: different shot, same pHash but dHash=4 away from pair A
+        orig_b = self._low_entropy_record(2, ZERO, DHASH_B)
+        dupl_b = self._low_entropy_record(3, ZERO, DHASH_B)
+
+        groups, _ = find_groups([orig_a, dupl_a, orig_b, dupl_b], settings)
+
+        self.assertEqual(
+            len(groups), 2,
+            f"Expected 2 separate groups (different low-entropy shots), got {len(groups)}. "
+            "Low-entropy dHash guard must prevent pair A and pair B from merging "
+            "when pHash=0 but dHash=4 between the groups.",
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
