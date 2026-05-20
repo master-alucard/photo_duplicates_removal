@@ -3302,7 +3302,8 @@ class App:
             # Phase 4 — report
             cb("Generating report…", 0, 1, "Report")
             report = generate_report(
-                combined_groups, out_path, main_path, len(all_records), settings)
+                combined_groups, out_path, main_path, len(all_records), settings,
+                progress_cb=cb)
             self._custom_groups      = combined_groups
             self._custom_report_path = report
 
@@ -5116,7 +5117,8 @@ class App:
                         pass
 
             cb("Generating report…", 0, 1, "Report")
-            report = generate_report(groups, out, src, len(records), settings)
+            report = generate_report(groups, out, src, len(records), settings,
+                                     progress_cb=cb)
             self.report_path = report
             self.scan_groups = groups
             # Freeze the output folder used by THIS scan so the viewer always
