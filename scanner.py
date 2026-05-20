@@ -1370,10 +1370,21 @@ def find_groups(
     # cross_format_threshold_factor; rotation pairs use rotation_threshold_factor.
     # We query the BK-tree with the widest radius and let _can_be_similar apply
     # the exact per-pair logic.
+    #
+    # Fix #164: the cross-format BK-tree query radius must use _CF_BASE_THRESHOLD
+    # (a fixed constant = 2) rather than settings.threshold.  _can_be_similar uses
+    # cf_abs_threshold = _CF_BASE_THRESHOLD * cf_factor (fixed at 12 bits for the
+    # default cf_factor=6.0).  Using settings.threshold * cf_factor would produce a
+    # query radius that grows with the user's threshold slider (e.g. threshold=10 →
+    # radius=60), causing the BK-tree to return thousands of false candidates that
+    # single-linkage union-find then chains into giant groups of unrelated images.
+    _cf_abs_query_thr = int(
+        _CF_BASE_THRESHOLD * getattr(settings, "cross_format_threshold_factor", 6.0)
+    )
     _max_query_thr = max(
         settings.threshold,
         int(settings.threshold * getattr(settings, "series_threshold_factor",    1.0)),
-        int(settings.threshold * getattr(settings, "cross_format_threshold_factor", 2.0)),
+        _cf_abs_query_thr,
         int(2 * getattr(settings, "rotation_threshold_factor",  3.0)),  # fixed floor, not scaled
     )
 
@@ -1798,7 +1809,16 @@ def _classify_group(
                         for rh in (rec_bi.phash_r90, rec_bi.phash_r180, rec_bi.phash_r270):
                             if rh is not None:
                                 d = min(d, int(med_rec.phash - rh))
-                        if d <= series_thr:
+                        # Fix #157: pHash-distance gate alone is insufficient because
+                        # _can_be_similar was already satisfied for every member of the
+                        # bucket at union-find time (that is how they ended up here).
+                        # However the "confirmed series" list re-validates at series_thr
+                        # (which may be > threshold when series_threshold_factor > 1).
+                        # Apply the full _can_be_similar guard against the medoid so that
+                        # images admitted only by the wider series threshold but failing
+                        # the brightness / histogram / dHash guards are evicted, preventing
+                        # unrelated same-resolution images from being lumped into one series.
+                        if d <= series_thr and _can_be_similar(med_rec, rec_bi, settings):
                             confirmed_series.append(bi)
 
                     if len(confirmed_series) >= 2:
