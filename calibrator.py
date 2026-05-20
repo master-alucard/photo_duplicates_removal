@@ -51,7 +51,11 @@ from scanner import (
     DuplicateGroup,
     ImageRecord,
     collect_images,
-    _classify_group,   # private but accessible; used by the fast calibration path
+    _classify_group,          # private but accessible; used by the fast calibration path
+    _CF_BASE_THRESHOLD,       # fixed base for cross-format pHash threshold computation
+    _histogram_entropy,       # Shannon entropy of a 96-bin RGB histogram
+    _LOW_ENTROPY_THR,         # entropy threshold for the low-entropy dHash guard
+    _LOW_ENTROPY_DHASH_THR,   # dHash rejection threshold for low-entropy image pairs
 )
 
 
@@ -411,7 +415,12 @@ def _score(
 
         if len(ids) == 1 and ids:
             groups_found += 1
-            dg = path_to_dgroup.get(resolved_all[0])
+            # Use the first file that actually has a record (CR2 may be invisible
+            # when use_rawpy=False; don't let an invisible file cause dg=None).
+            dg = next(
+                (path_to_dgroup[p] for p in resolved_all if p in path_to_dgroup),
+                None,
+            )
             if dg:
                 orig_ok = any(r.path.resolve() == resolved_orig for r in dg.originals)
                 if not orig_ok:
@@ -519,7 +528,15 @@ def _score_verbose(
         orig_correct = False
         prev_correct_list: list[tuple[str, bool]] = []
 
-        dg = path_to_dgroup.get(resolved_all[0]) if detected_together else None
+        # Use the first file that actually has a record (CR2 may be invisible
+        # when use_rawpy=False; don't let an invisible file cause dg=None).
+        dg = (
+            next(
+                (path_to_dgroup[p] for p in resolved_all if p in path_to_dgroup),
+                None,
+            )
+            if detected_together else None
+        )
         if detected_together and dg:
             groups_found += 1
             orig_correct = any(r.path.resolve() == resolved_orig for r in dg.originals)
@@ -704,6 +721,11 @@ class _PairData:
     h_ratio: float
     # Fixed flags
     cross_format: bool
+    # Per-image histogram entropy (Shannon entropy of the 96-bin RGB histogram).
+    # Pre-computed for the low-entropy dHash guard in _find_groups_fast.
+    # -1.0 when histogram is unavailable (histogram disabled in settings, or empty).
+    hist_entropy_a: float
+    hist_entropy_b: float
 
 
 def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
@@ -713,6 +735,13 @@ def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
     """
     pairs: list[_PairData] = []
     n = len(records)
+
+    # Pre-compute per-record histogram entropy once — reused for every pair.
+    # -1.0 when the histogram list is empty (histogram disabled in settings).
+    record_entropy: list[float] = [
+        _histogram_entropy(r.histogram) if r.histogram else -1.0
+        for r in records
+    ]
 
     for i in range(n):
         a = records[i]
@@ -772,6 +801,8 @@ def _build_pair_cache(records: list[ImageRecord]) -> list[_PairData]:
                 w_ratio=w_r,
                 h_ratio=h_r,
                 cross_format=(a_raw != b_raw),
+                hist_entropy_a=record_entropy[i],
+                hist_entropy_b=record_entropy[j],
             ))
 
     # Sort ascending by rotation-aware pHash distance.
@@ -815,6 +846,10 @@ def _find_groups_fast(
     threshold  = settings.threshold
     s_factor   = settings.series_threshold_factor
     cf_factor  = getattr(settings, "cross_format_threshold_factor", 5.0)
+    # Fixed absolute CF threshold — same logic as scanner._can_be_similar:
+    # the inter-group pHash gap (20 bits) must not be crossed at any sweep value.
+    # Uses _CF_BASE_THRESHOLD (=2) instead of the current sweep ``threshold``.
+    cf_abs_thr = int(_CF_BASE_THRESHOLD * cf_factor)
     dark_on    = settings.dark_protection
     dark_thr   = settings.dark_threshold
     dark_tight = settings.dark_tighten_factor
@@ -831,7 +866,7 @@ def _find_groups_fast(
     max_eff_thr = max(
         threshold,
         int(threshold * s_factor),
-        int(threshold * cf_factor),
+        cf_abs_thr,   # fixed; does not scale with sweep threshold
         rot_floor,
     )
 
@@ -858,23 +893,62 @@ def _find_groups_fast(
         # 5. Effective pHash threshold
         eff_thr = int(threshold * s_factor) if same_dims else threshold
         if pd.cross_format:
-            eff_thr = max(eff_thr, int(threshold * eff_cf))
+            # Fixed CF threshold: always uses _CF_BASE_THRESHOLD, not the sweep value.
+            # This prevents the threshold from scaling into the inter-group pHash gap
+            # when the calibration sweeps threshold > 2 (see _CF_BASE_THRESHOLD docs).
+            eff_thr = max(eff_thr, cf_abs_thr)
         if dark_on and (pd.brightness_a < dark_thr or pd.brightness_b < dark_thr):
             eff_thr = max(1, int(eff_thr * dark_tight))
 
-        # 6. Rotation-lenient floor
-        is_rotated = pd.phash_rot_dist < pd.phash_norm_dist
+        # 6. pHash gate — select distance to check.
+        #    Cross-format pairs use only the direct (upright) pHash, not the
+        #    rotation-aware minimum.  True CR2+JPEG duplicates always have a small
+        #    direct pHash (0-4 bits); rotation-aware matching would let accidentally
+        #    rotation-similar but unrelated landscape shots (phash_norm=22-36,
+        #    phash_rot=2-4) pass the gate incorrectly.
+        #
+        #    Low-entropy pairs also use only the direct pHash.  Near-uniform images
+        #    (night-sky photos, solid-colour screenshots) have pHash patterns that
+        #    are nearly symmetric under rotation — a tiny moon on a black field can
+        #    produce phash_rot=4-6 against a different shot, triggering the rotation
+        #    floor even though the direct distance is 28-36 bits.  Calibration data
+        #    (418 GT groups) shows zero legitimate low-entropy rotation pairs, so
+        #    disabling rotation-aware matching for them has no recall cost.
+        both_low_entropy_fast = (
+            pd.hist_entropy_a >= 0.0
+            and pd.hist_entropy_b >= 0.0
+            and pd.hist_entropy_a < _LOW_ENTROPY_THR
+            and pd.hist_entropy_b < _LOW_ENTROPY_THR
+        )
+        if pd.cross_format or both_low_entropy_fast:
+            phash_to_check = pd.phash_norm_dist
+            is_rotated = False
+        else:
+            phash_to_check = pd.phash_rot_dist
+            is_rotated = pd.phash_rot_dist < pd.phash_norm_dist
+
         if is_rotated:
             eff_thr = max(eff_thr, rot_floor)
 
         # 7. pHash gate
-        if pd.phash_rot_dist > eff_thr:
+        if phash_to_check > eff_thr:
             continue
 
         # 8. dHash gate (skipped for rotation matches and cross-format)
-        if use_dhash and not pd.cross_format and not is_rotated and pd.phash_norm_dist > 0:
-            if pd.dhash_dist >= 0 and pd.dhash_dist > eff_thr * 1.5:
+        if use_dhash and not pd.cross_format and not is_rotated:
+            # Low-entropy guard: apply dHash even when pHash=0 for near-uniform images.
+            # See _LOW_ENTROPY_THR / _LOW_ENTROPY_DHASH_THR in scanner.py for details.
+            if (pd.phash_norm_dist == 0
+                    and pd.dhash_dist >= _LOW_ENTROPY_DHASH_THR
+                    and pd.hist_entropy_a >= 0.0 and pd.hist_entropy_b >= 0.0
+                    and pd.hist_entropy_a < _LOW_ENTROPY_THR
+                    and pd.hist_entropy_b < _LOW_ENTROPY_THR):
                 continue
+
+            # Standard dHash gate (pHash > 0 required).
+            if pd.phash_norm_dist > 0:
+                if pd.dhash_dist >= 0 and pd.dhash_dist > eff_thr * 1.5:
+                    continue
 
         # 9. Histogram gate (relaxed floor for cross-format pairs)
         if use_hist and pd.hist_sim >= 0.0:

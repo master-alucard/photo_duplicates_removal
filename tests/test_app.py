@@ -82,6 +82,168 @@ class TestConfig(unittest.TestCase):
         from config import Settings
         self.assertFalse(Settings().developer_mode)
 
+    # ── Settings migration (v0 → v1) ─────────────────────────────────────────
+
+    def test_migration_v0_raw_use_embedded_thumb_false_is_reset(self):
+        """
+        v0 file with raw_use_embedded_thumb=False must be upgraded to True.
+
+        This was the primary root cause of under-detection on RAW and CF
+        calibration folders: the old default (False) was written to settings.json
+        before the default was changed to True in commit 925431d.  Any v0 file
+        that has False stored must have it reset so the app uses the correct
+        hashing mode without requiring the user to manually toggle the hidden
+        (no-UI-control) setting.
+        """
+        import json
+        import tempfile
+        from config import load_settings, Settings
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "threshold": 4,
+                "raw_use_embedded_thumb": False,
+                # no settings_version → treated as v0
+            }, f)
+            tmp = Path(f.name)
+
+        try:
+            s = load_settings(tmp)
+            self.assertTrue(
+                s.raw_use_embedded_thumb,
+                "load_settings must migrate v0 raw_use_embedded_thumb=False to True"
+            )
+            self.assertEqual(s.settings_version, 1, "migrated file must be stamped v1")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_migration_v0_cross_format_threshold_factor_too_low_is_reset(self):
+        """
+        v0 file with cross_format_threshold_factor < 4.0 must be reset to 6.0.
+
+        The value 2.0 was left in settings.json by a calibration iteration run
+        (ROUND4_CF_THRESHOLD_FACTORS sweep).  With factor=2.0 the effective CF
+        pHash threshold is only 4 bits — far too tight to cover the 0–12 bit
+        range of true RAW+JPEG pairs.  The correct production default is 6.0
+        (effective threshold 12 bits, 8-bit safety gap to inter-group minimum).
+        """
+        import json
+        import tempfile
+        from config import load_settings, Settings
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "cross_format_threshold_factor": 2.0,
+                # no settings_version → v0
+            }, f)
+            tmp = Path(f.name)
+
+        try:
+            s = load_settings(tmp)
+            self.assertAlmostEqual(
+                s.cross_format_threshold_factor, 6.0, places=3,
+                msg="load_settings must migrate CF factor < 4.0 to default 6.0"
+            )
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_migration_v0_raw_embedded_true_is_preserved(self):
+        """
+        v0 file with raw_use_embedded_thumb=True must be left unchanged.
+        (Only False → True migration is needed; True was already correct.)
+        """
+        import json
+        import tempfile
+        from config import load_settings
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({"raw_use_embedded_thumb": True}, f)
+            tmp = Path(f.name)
+
+        try:
+            s = load_settings(tmp)
+            self.assertTrue(s.raw_use_embedded_thumb)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_migration_v0_cf_factor_at_or_above_4_is_preserved(self):
+        """
+        v0 file with cross_format_threshold_factor >= 4.0 must be preserved.
+        Only values below 4.0 (too tight) are reset.
+        """
+        import json
+        import tempfile
+        from config import load_settings
+
+        for val in (4.0, 5.0, 6.0, 8.0):
+            with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+                json.dump({"cross_format_threshold_factor": val}, f)
+                tmp = Path(f.name)
+
+            try:
+                s = load_settings(tmp)
+                self.assertAlmostEqual(
+                    s.cross_format_threshold_factor, val, places=3,
+                    msg=f"CF factor {val} >= 4.0 must not be changed by migration"
+                )
+            finally:
+                tmp.unlink(missing_ok=True)
+
+    def test_migration_v1_file_no_changes(self):
+        """
+        A v1 file is not modified by migration even if it has 'bad' values.
+        Version 1 means the user explicitly set these fields on a v1 build,
+        so we must respect whatever values are stored.
+        """
+        import json
+        import tempfile
+        from config import load_settings
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
+            json.dump({
+                "settings_version": 1,
+                "raw_use_embedded_thumb": False,   # user explicitly set False on v1
+                "cross_format_threshold_factor": 2.0,  # user explicitly set
+            }, f)
+            tmp = Path(f.name)
+
+        try:
+            s = load_settings(tmp)
+            # v1 values must be preserved as-is; migration only applies to v0
+            self.assertFalse(
+                s.raw_use_embedded_thumb,
+                "v1 raw_use_embedded_thumb=False must not be migrated"
+            )
+            self.assertAlmostEqual(
+                s.cross_format_threshold_factor, 2.0, places=3,
+                msg="v1 CF factor=2.0 must not be migrated"
+            )
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_raw_use_embedded_thumb_new_default_is_true(self):
+        """
+        Settings() default for raw_use_embedded_thumb must be True.
+        Regression guard: this was changed in commit 925431d from False to True.
+        """
+        from config import Settings
+        self.assertTrue(
+            Settings().raw_use_embedded_thumb,
+            "raw_use_embedded_thumb default must be True (changed in commit 925431d)"
+        )
+
+    def test_cross_format_threshold_factor_default_is_6(self):
+        """
+        Settings() default for cross_format_threshold_factor must be 6.0.
+        This is calibrated to cover max intra-group pHash=12 with an 8-bit
+        safety gap (inter-group minimum pHash=20).
+        """
+        from config import Settings
+        self.assertAlmostEqual(
+            Settings().cross_format_threshold_factor, 6.0, places=3,
+            msg="cross_format_threshold_factor default must be 6.0"
+        )
+
     def test_error_handler_normal_mode_hides_detail(self):
         """error_handler returns only user_msg when developer mode is OFF."""
         import error_handler

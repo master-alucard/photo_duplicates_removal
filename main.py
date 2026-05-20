@@ -56,6 +56,7 @@ except ImportError:
 from config import Settings, DEFAULTS, load_settings, save_settings
 from info_texts import INFO_TEXTS
 import theme as _theme_mod
+import ui_animations as _anim
 from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates)
@@ -111,6 +112,9 @@ _M_DETAIL_BG    = "#F5F5F5"
 _M_PURPLE       = "#7c3aed"
 _M_NOT_INST     = "#e03030"
 _M_DISABLED_FG  = "#838387"
+# Tint backgrounds for stat cells
+_M_ERROR_TINT   = "#FFCDD2"
+_M_SUCCESS_TINT = "#DCEDC8"
 # Button backgrounds — always saturated for white text
 _BTN_PRIMARY    = "#1565C0"
 _BTN_SUCCESS    = "#2E7D32"
@@ -139,6 +143,7 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
     global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
     global _SL_REC_BAND, _SL_TRACK, _SL_THUMB, _SL_THUMB_OL
+    global _M_ERROR_TINT, _M_SUCCESS_TINT
 
     p = _theme_mod.get_palette(dark)
     _ACCENT        = p["ACCENT"]
@@ -181,10 +186,12 @@ def _apply_theme(dark: bool = False) -> None:
     _BTN_ERROR     = p["BTN_ERROR"]
     _BTN_WARNING   = p["BTN_WARNING"]
     _BTN_SECONDARY = p["BTN_SECONDARY"]
-    _SL_REC_BAND   = p["SLIDER_REC_BAND"]
-    _SL_TRACK      = p["SLIDER_TRACK"]
-    _SL_THUMB      = p["SLIDER_THUMB"]
-    _SL_THUMB_OL   = p["SLIDER_THUMB_OL"]
+    _SL_REC_BAND    = p["SLIDER_REC_BAND"]
+    _SL_TRACK       = p["SLIDER_TRACK"]
+    _SL_THUMB       = p["SLIDER_THUMB"]
+    _SL_THUMB_OL    = p["SLIDER_THUMB_OL"]
+    _M_ERROR_TINT   = p["ERROR_TINT"]
+    _M_SUCCESS_TINT = p["SUCCESS_TINT"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -335,8 +342,21 @@ def _mat_btn(parent, text, command, bg, fg="#FFFFFF", font_size=9, **kw) -> tk.B
         if str(btn["state"]) != "disabled":
             btn.configure(bg=btn._mat_bg)
 
-    btn.bind("<Enter>", _enter)
-    btn.bind("<Leave>", _leave)
+    def _focus_in(_):
+        """Show a visible focus ring when navigating by keyboard."""
+        if str(btn["state"]) != "disabled":
+            btn.configure(highlightthickness=2, highlightbackground="#FFFFFF",
+                          highlightcolor="#FFFFFF")
+
+    def _focus_out(_):
+        btn.configure(highlightthickness=0)
+
+    btn.bind("<Enter>",    _enter)
+    btn.bind("<Leave>",    _leave)
+    btn.bind("<FocusIn>",  _focus_in)
+    btn.bind("<FocusOut>", _focus_out)
+    # Brief pressed-state feedback (100 ms darker bg on click)
+    _anim.bind_press_feedback(btn)
     return btn
 
 
@@ -730,6 +750,8 @@ class App:
 
         self._nb = ttk.Notebook(self.root, style="App.TNotebook")
         self._nb.pack(fill=tk.BOTH, expand=True)
+        # Animated tab indicator — slides to selected tab on switch
+        self._tab_indicator = _anim.TabIndicator(self._nb, accent_color=_ACCENT)
 
         self._tab_scan     = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_custom   = ttk.Frame(self._nb, style="Page.TFrame")
@@ -758,6 +780,12 @@ class App:
         self._build_library_tab()
         self._build_settings_tab()
         self._build_about_tab()
+
+        # Bind tab indicator after all tabs are added so bbox() works correctly
+        try:
+            self._tab_indicator.bind()
+        except Exception:
+            pass
 
     def _init_setting_vars(self) -> None:
         """Create all tkinter data vars from current settings. Called once before building tabs."""
@@ -1109,8 +1137,20 @@ class App:
         self._prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
         self._prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
-        ttk.Label(self._prog_frame, textvariable=self._phase_label_var,
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        # Phase label row: pulsing dot + label side by side
+        # Use ttk.Frame so it inherits the LabelFrame background in both themes
+        _phase_row = ttk.Frame(self._prog_frame)
+        _phase_row.pack(anchor=tk.W, fill=tk.X)
+        self._scan_pulse_dot = _anim.PulsingDot(
+            _phase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        # dot starts hidden; shown when scanning begins
+        self._scan_phase_lbl = ttk.Label(
+            _phase_row, textvariable=self._phase_label_var,
+            font=("Segoe UI", 9, "bold"))
+        self._scan_phase_lbl.pack(side=tk.LEFT, anchor=tk.W)
+        # Phase transition flash (triggers on phase change)
+        self._scan_phase_flash = _anim.PhaseFlash(
+            self._scan_phase_lbl, accent_color=_ACCENT, normal_color=_M_TEXT1)
         self._progress_bar = ttk.Progressbar(self._prog_frame, mode="determinate", maximum=100)
         self._progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._prog_frame, textvariable=self._eta_var,
@@ -1182,12 +1222,24 @@ class App:
         self._results_summary_frame.pack(fill=tk.BOTH, expand=True)
         sf = self._results_summary_frame
 
-        # Placeholder shown before first scan
-        self._results_placeholder = tk.Label(
-            sf, text="Run a scan to review results here.",
-            font=("Segoe UI", 11), bg=_BG, fg=_M_HINT5,
-        )
+        # Polished empty state shown before first scan
+        self._results_placeholder = tk.Frame(sf, bg=_BG)
         self._results_placeholder.pack(expand=True)
+        tk.Label(self._results_placeholder,
+                 text="\U0001f5bc",   # framed-picture emoji as icon
+                 font=("Segoe UI", 40), bg=_BG, fg=_M_HINT4).pack(pady=(0, 8))
+        tk.Label(self._results_placeholder,
+                 text="No scan results yet",
+                 font=("Segoe UI", 14, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._results_placeholder,
+                 text="Select a source folder on the Scan tab and click  Start Scan\n"
+                      "to find duplicate images in your collection.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3,
+                 justify=tk.CENTER).pack(pady=(4, 16))
+        _mat_btn(self._results_placeholder,
+                 "Go to Scan tab",
+                 lambda: self._nb.select(self._tab_scan),
+                 _BTN_PRIMARY, font_size=10).pack()
 
         # Success card (hidden until scan completes; contents rebuilt dynamically)
         self._results_info_card = tk.Frame(sf, bg=_CARD_BG, bd=0, relief=tk.FLAT,
@@ -1354,21 +1406,28 @@ class App:
         stats_row = tk.Frame(self._results_info_card, bg=_CARD_BG)
         stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
 
-        def _stat_cell(parent, value, label, fg=_M_TEXT1):
-            cell = tk.Frame(parent, bg=_CARD_BG)
-            cell.pack(side=tk.LEFT, padx=(0, 28))
+        def _stat_cell(parent, value, label, fg=_M_TEXT1, tint=None):
+            """Render a stat cell; tint adds a soft background behind the number."""
+            cell_bg = tint if tint else _CARD_BG
+            cell = tk.Frame(parent, bg=cell_bg, padx=8 if tint else 0, pady=4 if tint else 0)
+            cell.pack(side=tk.LEFT, padx=(0, 16))
             vstr = f"{value:,}" if isinstance(value, int) else str(value)
             tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
-                     bg=_CARD_BG, fg=fg).pack(anchor=tk.W)
+                     bg=cell_bg, fg=fg).pack(anchor=tk.W)
             tk.Label(cell, text=label, font=("Segoe UI", 8),
-                     bg=_CARD_BG, fg=_M_HINT5).pack(anchor=tk.W)
+                     bg=cell_bg, fg=_M_HINT5).pack(anchor=tk.W)
 
-        _stat_cell(stats_row, files,   "files scanned")
+        _stat_cell(stats_row, files, "files scanned")
+        _dup_tint = _M_ERROR_TINT if n_groups > 0 else None
         _stat_cell(stats_row, n_groups, "dup groups",
-                   _M_ERROR if n_groups > 0 else _M_TEXT1)
-        _stat_cell(stats_row, n_dupes,  "duplicates",
-                   _M_ERROR if n_dupes > 0 else _M_TEXT1)
-        _stat_cell(stats_row, space_lbl, "space to free", _M_SUCCESS if space_b > 0 else _M_TEXT1)
+                   _M_ERROR if n_groups > 0 else _M_TEXT1,
+                   tint=_dup_tint)
+        _stat_cell(stats_row, n_dupes, "duplicates",
+                   _M_ERROR if n_dupes > 0 else _M_TEXT1,
+                   tint=_dup_tint)
+        _stat_cell(stats_row, space_lbl, "space to free",
+                   _M_SUCCESS if space_b > 0 else _M_TEXT1,
+                   tint=_M_SUCCESS_TINT if space_b > 0 else None)
         if dur_s:
             _stat_cell(stats_row, _fmt_duration(dur_s), "scan time")
 
@@ -1393,6 +1452,11 @@ class App:
         self._results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._results_divider.pack(fill=tk.X, padx=16, pady=14)
         self._results_new_frame.pack(pady=10)
+        # Slide-down reveal animation on the results card
+        try:
+            _anim.SlideDownReveal(self._results_info_card, duration_ms=350).play()
+        except Exception:
+            pass
 
     # ── Organize by Date tab ──────────────────────────────────────────────
 
@@ -1540,8 +1604,12 @@ class App:
         self._date_org_phase_var = tk.StringVar(value="Ready.")
         self._date_org_msg_var   = tk.StringVar(value="")
         prog_section = _section(body, "Progress")
-        ttk.Label(prog_section, textvariable=self._date_org_phase_var,
-                 font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        _do_phase_row = ttk.Frame(prog_section)
+        _do_phase_row.pack(anchor=tk.W, fill=tk.X)
+        self._date_org_pulse_dot = _anim.PulsingDot(
+            _do_phase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        ttk.Label(_do_phase_row, textvariable=self._date_org_phase_var,
+                 font=("Segoe UI", 9, "bold")).pack(side=tk.LEFT, anchor=tk.W)
         self._date_org_pbar = ttk.Progressbar(prog_section, mode="determinate", maximum=100)
         self._date_org_pbar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(prog_section, textvariable=self._date_org_msg_var,
@@ -1723,6 +1791,11 @@ class App:
         self._date_org_stop_flag = [False]
         self._date_org_pbar["value"] = 0
         self._date_org_phase_var.set("Starting…")
+        # Show pulsing dot
+        try:
+            self._date_org_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
         self._date_org_msg_var.set("")
         self._set_date_org_result("Running…  See the Progress section above for live status.")
 
@@ -1790,6 +1863,11 @@ class App:
         self._date_org_active_frame.pack_forget()
         self._date_org_idle_frame.pack(fill=tk.X, padx=4)
         self._date_org_running = False
+        # Stop pulsing dot
+        try:
+            self._date_org_pulse_dot.hide()
+        except Exception:
+            pass
 
         if error:
             self._date_org_phase_var.set("Error.")
@@ -1939,6 +2017,18 @@ class App:
         vsb.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 6), pady=6)
         self._hist_tree.pack(fill=tk.BOTH, expand=True, padx=6, pady=(0, 6))
 
+        # Empty state: shown when the history list is empty
+        self._hist_empty_frame = tk.Frame(tab, bg=_BG)
+        tk.Label(self._hist_empty_frame,
+                 text="\U0001f4cb",   # clipboard
+                 font=("Segoe UI", 36), bg=_BG, fg=_M_HINT4).pack(pady=(0, 6))
+        tk.Label(self._hist_empty_frame,
+                 text="No scan history yet",
+                 font=("Segoe UI", 12, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._hist_empty_frame,
+                 text="Run your first scan and it will appear here.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3).pack(pady=(4, 0))
+
         btn_bar = tk.Frame(tab, bg=_BG)
         btn_bar.pack(fill=tk.X, padx=8, pady=(0, 8))
         _mat_btn(btn_bar, "Clear History", self._clear_history, _BTN_SECONDARY).pack(side=tk.LEFT)
@@ -1963,6 +2053,19 @@ class App:
                 "Yes" if entry.get("dry_run") else "No",
                 "Yes" if entry.get("applied") else "No",
             ))
+        # Show/hide empty state placeholder
+        try:
+            if self._scan_history:
+                self._hist_empty_frame.place_forget()
+            else:
+                # Overlay the empty state centred over the treeview
+                self._hist_empty_frame.place(
+                    in_=self._hist_tree,
+                    relx=0.5, rely=0.4,
+                    anchor="center",
+                )
+        except Exception:
+            pass
 
     def _load_scan_history(self) -> list[dict]:
         try:
@@ -2387,8 +2490,17 @@ class App:
         self._custom_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
         self._custom_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
 
-        ttk.Label(self._custom_prog_frame, textvariable=self._custom_phase_label,
-                  font=("Segoe UI", 9, "bold")).pack(anchor=tk.W)
+        # Phase label row: pulsing dot + label
+        _cphase_row = ttk.Frame(self._custom_prog_frame)
+        _cphase_row.pack(anchor=tk.W, fill=tk.X)
+        self._custom_pulse_dot = _anim.PulsingDot(
+            _cphase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        self._custom_phase_lbl_widget = ttk.Label(
+            _cphase_row, textvariable=self._custom_phase_label,
+            font=("Segoe UI", 9, "bold"))
+        self._custom_phase_lbl_widget.pack(side=tk.LEFT, anchor=tk.W)
+        self._custom_phase_flash = _anim.PhaseFlash(
+            self._custom_phase_lbl_widget, accent_color=_ACCENT, normal_color=_M_TEXT1)
         self._custom_progress_bar = ttk.Progressbar(
             self._custom_prog_frame, mode="determinate", maximum=100)
         self._custom_progress_bar.pack(fill=tk.X, pady=(6, 3))
@@ -2479,6 +2591,25 @@ class App:
         self._custom_results_summary_frame = tk.Frame(tab, bg=_BG)
         self._custom_results_summary_frame.pack(fill=tk.BOTH, expand=True)
         sf = self._custom_results_summary_frame
+
+        # Polished empty state shown before first compare scan
+        self._custom_results_placeholder = tk.Frame(sf, bg=_BG)
+        self._custom_results_placeholder.pack(expand=True)
+        tk.Label(self._custom_results_placeholder,
+                 text="\U0001f4c2",   # open file folder
+                 font=("Segoe UI", 40), bg=_BG, fg=_M_HINT4).pack(pady=(0, 8))
+        tk.Label(self._custom_results_placeholder,
+                 text="No compare-scan results yet",
+                 font=("Segoe UI", 14, "bold"), bg=_BG, fg=_M_TEXT2).pack()
+        tk.Label(self._custom_results_placeholder,
+                 text="Select a Main folder and a Check folder on the Compare Scan tab,\n"
+                      "then click  Start Scan  to find cross-folder duplicates.",
+                 font=("Segoe UI", 9), bg=_BG, fg=_M_HINT3,
+                 justify=tk.CENTER).pack(pady=(4, 16))
+        _mat_btn(self._custom_results_placeholder,
+                 "Go to Compare Scan tab",
+                 lambda: self._nb.select(self._tab_custom),
+                 _BTN_PRIMARY, font_size=10).pack()
 
         # Stats card (rebuilt dynamically after each scan)
         self._custom_results_info_card = tk.Frame(
@@ -2574,11 +2705,20 @@ class App:
                      font=("Segoe UI", 9), bg=_CARD_BG,
                      fg=_M_HINT5, anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
 
-        # Show card, buttons, divider, new-scan button
+        # Show card, buttons, divider, new-scan button; hide empty-state
+        try:
+            self._custom_results_placeholder.pack_forget()
+        except Exception:
+            pass
         self._custom_results_info_card.pack(fill=tk.X, padx=16, pady=(16, 8))
         self._custom_results_btn_row.pack(fill=tk.X, padx=16, pady=6)
         self._custom_results_divider.pack(fill=tk.X, padx=16, pady=14)
         self._custom_results_new_frame.pack(pady=10)
+        # Slide-down reveal animation on the results card
+        try:
+            _anim.SlideDownReveal(self._custom_results_info_card, duration_ms=350).play()
+        except Exception:
+            pass
 
         # Enable appropriate buttons
         _mat_enable(self._cr_inapp_btn)
@@ -2749,6 +2889,12 @@ class App:
         self._custom_progress_bar.start(12)
         self._custom_tracker = PhaseTracker(_CUSTOM_PHASES)
         self._custom_tracker.start_phase(_CUSTOM_PHASES[0], 1)
+
+        # Show pulsing dot during custom scan
+        try:
+            self._custom_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
 
         _set_sleep_prevention(True)
         self._custom_scan_start_time = time.perf_counter()
@@ -3229,6 +3375,11 @@ class App:
         if tracker.current_phase_name != mapped:
             tracker.finish_phase()
             tracker.start_phase(mapped, max(total, 1))
+            # Brief accent flash on phase change
+            try:
+                self._custom_phase_flash.trigger()
+            except Exception:
+                pass
 
         if total > 0:
             tracker.update(done)
@@ -3289,6 +3440,11 @@ class App:
         self._custom_progress_bar["mode"]  = "determinate"
         self._custom_progress_bar["value"] = 100 if (success and not paused) else self._custom_progress_bar["value"]
         self._scanning = False
+        # Stop pulsing dot
+        try:
+            self._custom_pulse_dot.hide()
+        except Exception:
+            pass
 
         if paused:
             # Keep the active frame visible; flip Pause → Resume
@@ -4517,6 +4673,12 @@ class App:
         self._progress_bar["mode"]  = "indeterminate"
         self._progress_bar.start(12)
 
+        # Show pulsing dot during scan
+        try:
+            self._scan_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
+
         _set_sleep_prevention(True)
         self._scan_start_time = time.perf_counter()
 
@@ -4672,6 +4834,11 @@ class App:
             self._phase_label_var.set(f"Phase {phase_num}/{len(PHASE_NAMES)}: {phase_name}…")
             self._progress_bar.stop()
             self._progress_bar["mode"] = "determinate"
+            # Brief accent flash on phase change
+            try:
+                self._scan_phase_flash.trigger()
+            except Exception:
+                pass
 
         if total > 0:
             self._tracker.update(done)
@@ -5071,6 +5238,11 @@ class App:
         self._progress_bar["mode"]  = "determinate"
         self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
         self._scanning = False
+        # Stop pulsing dot
+        try:
+            self._scan_pulse_dot.hide()
+        except Exception:
+            pass
 
         if paused:
             # Keep the active frame visible; flip Pause → Resume
@@ -5502,7 +5674,7 @@ class App:
         notes_text.configure(state=tk.DISABLED)
 
         # ── Action buttons ─────────────────────────────────────────────────
-        btn_row = tk.Frame(win, bg=_CARD_BG, padx=24, pady=(0, 18))
+        btn_row = tk.Frame(win, bg=_CARD_BG, padx=24, pady=18)
         btn_row.pack(fill=tk.X)
 
         def _do_download() -> None:
