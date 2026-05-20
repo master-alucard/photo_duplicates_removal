@@ -906,7 +906,21 @@ def _find_groups_fast(
         #    direct pHash (0-4 bits); rotation-aware matching would let accidentally
         #    rotation-similar but unrelated landscape shots (phash_norm=22-36,
         #    phash_rot=2-4) pass the gate incorrectly.
-        if pd.cross_format:
+        #
+        #    Low-entropy pairs also use only the direct pHash.  Near-uniform images
+        #    (night-sky photos, solid-colour screenshots) have pHash patterns that
+        #    are nearly symmetric under rotation — a tiny moon on a black field can
+        #    produce phash_rot=4-6 against a different shot, triggering the rotation
+        #    floor even though the direct distance is 28-36 bits.  Calibration data
+        #    (418 GT groups) shows zero legitimate low-entropy rotation pairs, so
+        #    disabling rotation-aware matching for them has no recall cost.
+        both_low_entropy_fast = (
+            pd.hist_entropy_a >= 0.0
+            and pd.hist_entropy_b >= 0.0
+            and pd.hist_entropy_a < _LOW_ENTROPY_THR
+            and pd.hist_entropy_b < _LOW_ENTROPY_THR
+        )
+        if pd.cross_format or both_low_entropy_fast:
             phash_to_check = pd.phash_norm_dist
             is_rotated = False
         else:

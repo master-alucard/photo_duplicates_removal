@@ -1065,17 +1065,41 @@ def _can_be_similar(a: ImageRecord, b: ImageRecord, settings: Settings) -> bool:
         phash_dist = dist_normal
         is_rotated = False
     else:
-        # b's rotations vs a's upright hash
-        dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
-        dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
-        dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
-        # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
-        dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
-        dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
-        dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
-        phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
-                          dist_ar90, dist_ar180, dist_ar270)
-        is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
+        # Low-entropy rotation guard:
+        # Near-uniform images (night-sky photos, solid-colour screenshots) have pHash
+        # patterns that are nearly symmetric under rotation — e.g., a tiny moon on a
+        # black field produces a pHash that at 180° accidentally resembles a different
+        # night-sky shot.  For such pairs, a rotation-aware min distance of 4-6 bits
+        # triggers the rotation floor (6 bits) even though the images are genuinely
+        # different (direct pHash = 28-36).  This is a false rotation match caused by
+        # accidental pHash symmetry, NOT a real rotated duplicate.
+        #
+        # Fix: for low-entropy pairs, use only the direct pHash distance (no rotation
+        # search).  Calibration data (418 GT groups) confirms zero legitimate
+        # low-entropy rotation pairs, so this change has no recall cost.
+        #
+        # This mirrors the reasoning applied to cross-format pairs: both cases involve
+        # image types where rotation-aware matching produces consistent false positives.
+        both_low_entropy = (
+            bool(a.histogram) and bool(b.histogram)
+            and _histogram_entropy(a.histogram) < _LOW_ENTROPY_THR
+            and _histogram_entropy(b.histogram) < _LOW_ENTROPY_THR
+        )
+        if both_low_entropy:
+            phash_dist = dist_normal
+            is_rotated = False
+        else:
+            # b's rotations vs a's upright hash
+            dist_r90    = (a.phash - b.phash_r90)  if b.phash_r90  is not None else dist_normal
+            dist_r180   = (a.phash - b.phash_r180) if b.phash_r180 is not None else dist_normal
+            dist_r270   = (a.phash - b.phash_r270) if b.phash_r270 is not None else dist_normal
+            # a's rotations vs b's upright hash (symmetric — needed when a is the rotated copy)
+            dist_ar90   = (a.phash_r90  - b.phash) if a.phash_r90  is not None else dist_normal
+            dist_ar180  = (a.phash_r180 - b.phash) if a.phash_r180 is not None else dist_normal
+            dist_ar270  = (a.phash_r270 - b.phash) if a.phash_r270 is not None else dist_normal
+            phash_dist  = min(dist_normal, dist_r90, dist_r180, dist_r270,
+                              dist_ar90, dist_ar180, dist_ar270)
+            is_rotated  = phash_dist < dist_normal   # True when a rotation gives a closer match
 
     # JPEG DCT re-encoding at a different orientation introduces up to ~6 bits of
     # pHash drift even for pixel-identical content.  Apply a rotation-lenient
