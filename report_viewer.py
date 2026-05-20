@@ -1360,6 +1360,24 @@ class ReportViewer(tk.Frame):
         else:
             trash_dir = paths_to_trash[0].parent / "trash"
 
+        # Filter out files already inside trash_dir — they were moved by move_groups()
+        # during a non-dry-run scan (preview.path is mutated in-place by mover.py).
+        # Moving them again would re-trash already-trashed files to trash/_1 etc.
+        try:
+            _trash_dir_resolved = trash_dir.resolve()
+            paths_to_trash = [
+                p for p in paths_to_trash
+                if not p.resolve().is_relative_to(_trash_dir_resolved)
+            ]
+        except Exception:
+            pass  # is_relative_to is Python 3.9+; skip guard on older builds
+
+        if not paths_to_trash:
+            self._show_results_panel(0, 0, [],
+                note="Files were already moved to trash during the scan.\n"
+                     "Nothing left to move.")
+            return
+
         # Validate that the output drive is accessible before starting the move
         _anchor = trash_dir.anchor  # e.g. "G:\\" on Windows, "/" on Unix
         if _anchor and not Path(_anchor).exists():

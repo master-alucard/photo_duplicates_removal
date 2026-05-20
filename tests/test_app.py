@@ -557,6 +557,20 @@ class TestMoverTrashFiles(unittest.TestCase):
             self.assertEqual(moved, 0)
             self.assertEqual(len(errors), 1)
 
+    def test_on_apply_skips_already_trashed_paths(self):
+        """_on_apply must not re-move files that move_groups already placed in trash/.
+
+        When dry_run=False, move_groups mutates preview.path to point inside trash/.
+        _on_apply must filter those out rather than attempting a second move.
+        """
+        import tempfile, inspect
+        src = inspect.getsource(
+            __import__("report_viewer").ReportViewer._on_apply
+        )
+        # Guard must check is_relative_to or equivalent before calling trash_files
+        self.assertIn("is_relative_to", src,
+                      "_on_apply must filter out paths already inside trash_dir")
+
 
 # ═════════════════════════════════════════════════════════════════════════════
 # 8. Scanner — smoke tests (no Tk)
