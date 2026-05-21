@@ -1301,6 +1301,12 @@ class App:
 
         log_path = ops_log_path(Path(out)) if out else None
 
+        # Sync settings.out_folder to the folder used by THIS scan (#159).
+        # Without this, a user who edits the out_folder field between scan
+        # completion and clicking "View Report" would see the wrong trash path.
+        if out and self.settings.out_folder.strip() != out:
+            self.settings.out_folder = out
+
         def _on_close():
             # Save selection state before destroying the viewer
             for w in self._results_viewer_host.winfo_children():
@@ -3296,7 +3302,8 @@ class App:
             # Phase 4 — report
             cb("Generating report…", 0, 1, "Report")
             report = generate_report(
-                combined_groups, out_path, main_path, len(all_records), settings)
+                combined_groups, out_path, main_path, len(all_records), settings,
+                progress_cb=cb)
             self._custom_groups      = combined_groups
             self._custom_report_path = report
 
@@ -5110,9 +5117,14 @@ class App:
                         pass
 
             cb("Generating report…", 0, 1, "Report")
-            report = generate_report(groups, out, src, len(records), settings)
+            report = generate_report(groups, out, src, len(records), settings,
+                                     progress_cb=cb)
             self.report_path = report
             self.scan_groups = groups
+            # Freeze the output folder used by THIS scan so the viewer always
+            # targets the correct trash/ folder even if the user changes the
+            # out_folder widget before clicking "View Report" (bug #159).
+            self._last_scan_out_folder = str(out)
 
             grouped_paths = {
                 r.path.resolve()
@@ -5417,7 +5429,10 @@ class App:
             error_handler.show_info(self.root, "No Results",
                 "No scan results yet. Run a scan first, then come back to review.")
             return
-        out = self.settings.out_folder.strip()
+        # Use the output folder that was active when THIS scan ran (#159).
+        # Falls back to current settings value when loading a previous session
+        # (no _last_scan_out_folder stored yet).
+        out = getattr(self, "_last_scan_out_folder", None) or self.settings.out_folder.strip()
 
         def _apply_cb(_paths_trashed: list) -> None:
             if out:
