@@ -977,6 +977,24 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Verify the cache dict was created (even if empty — ffmpeg not available here)
         self.assertIsInstance(v._video_frame_cache, dict)
 
+    def test_video_placeholder_differs_from_image_placeholder(self):
+        """Video placeholder (video=True) should produce a different image than non-video."""
+        v = _make_viewer(self.root, 0)
+        ph_image = v._get_placeholder(120, "#FFFFFF", video=False)
+        ph_video = v._get_placeholder(120, "#FFFFFF", video=True)
+        # They should be different objects (different cache keys)
+        self.assertIsNot(ph_image, ph_video,
+                         "Video and image placeholders should be cached separately")
+
+    def test_video_placeholder_cached_by_video_flag(self):
+        """Placeholder cache must key on (size, bg, video) triple."""
+        v = _make_viewer(self.root, 0)
+        p1 = v._get_placeholder(120, "#F5F5F5", video=True)
+        p2 = v._get_placeholder(120, "#F5F5F5", video=True)
+        self.assertIs(p1, p2, "Same (size, bg, video=True) should be cached")
+        p3 = v._get_placeholder(120, "#F5F5F5", video=False)
+        self.assertIsNot(p1, p3, "Different video flag should give different cached object")
+
     def test_duration_label_composite_produces_rgb_image(self):
         """_composite_duration_label should return an RGB image of the same size."""
         from PIL import Image as PILImage

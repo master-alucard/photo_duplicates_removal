@@ -697,10 +697,15 @@ class ReportViewer(tk.Frame):
         except Exception:
             pass
 
-    def _get_placeholder(self, size: int, bg: str) -> "ImageTk.PhotoImage":
-        """Return a cached solid-colour placeholder image of the given pixel size.
-        Cached separately from _photo_refs so page changes don't destroy them."""
-        key = (size, bg)
+    def _get_placeholder(self, size: int, bg: str, video: bool = False) -> "ImageTk.PhotoImage":
+        """Return a cached placeholder image of the given pixel size.
+
+        When *video* is True the placeholder has a faint ▶ glyph drawn over it
+        so video tiles are visually distinct from image tiles even before the
+        frame arrives (or when ffmpeg is unavailable).
+        Cached separately from _photo_refs so page changes don't destroy them.
+        """
+        key = (size, bg, video)
         ph = self._placeholder_cache.get(key)
         if ph is not None:
             return ph
@@ -712,6 +717,24 @@ class ReportViewer(tk.Frame):
             except Exception:
                 r, g, b = 240, 240, 240
             img = PILImage.new("RGB", (size, size), (r, g, b))
+            if video:
+                try:
+                    from PIL import ImageDraw
+                    d = ImageDraw.Draw(img)
+                    cx, cy = size // 2, size // 2
+                    tri_r = max(8, size // 4)
+                    pts = [
+                        (cx - tri_r // 2, cy - tri_r),
+                        (cx - tri_r // 2, cy + tri_r),
+                        (cx + tri_r, cy),
+                    ]
+                    # Draw a faint triangle in a contrasting dark/light shade
+                    fill_r = max(0, r - 40)
+                    fill_g = max(0, g - 40)
+                    fill_b = max(0, b - 40)
+                    d.polygon(pts, fill=(fill_r, fill_g, fill_b))
+                except Exception:
+                    pass
             ph = ImageTk.PhotoImage(img)
         else:
             ph = tk.PhotoImage(width=size, height=size)
@@ -1030,13 +1053,17 @@ class ReportViewer(tk.Frame):
         tile.configure(bg=bg)
         tile.grid(row=row, column=col, padx=4, pady=4, sticky=tk.NW)
 
-        # Thumbnail with placeholder image (fixed pixel size prevents layout reflow)
-        _placeholder = self._get_placeholder(max_thumb, bg)
+        # Thumbnail with placeholder image (fixed pixel size prevents layout reflow).
+        # Video records get a placeholder with a faint ▶ glyph so the tile is
+        # recognisable as a video even before the frame arrives (or if ffmpeg
+        # is unavailable and the frame never arrives).
+        _is_video_tile = getattr(rec, "is_video", False)
+        _placeholder = self._get_placeholder(max_thumb, bg, video=_is_video_tile)
         thumb_lbl = tk.Label(tile, image=_placeholder)
         thumb_lbl.configure(bg=bg)
         thumb_lbl.pack()
         self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed,
-                                   is_video=getattr(rec, "is_video", False))
+                                   is_video=_is_video_tile)
 
         if trashed:
             # ── Trashed tile: show badge, gray out, disable checkbox ─────
