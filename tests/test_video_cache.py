@@ -454,3 +454,48 @@ def test_collect_videos_parallel_extraction_no_shared_state_corruption(tmp_path)
     assert len(records) == n
     # Extractor was called once per file
     assert call_count["n"] == n
+
+
+# ── ffmpeg binary resolution ──────────────────────────────────────────────────
+
+def test_ffmpeg_exe_prefers_bundled_imageio_binary():
+    """_ffmpeg_exe() returns the imageio-ffmpeg static binary when available."""
+    import scanner
+    scanner._FFMPEG_EXE_CACHE = None  # reset cache
+    fake_exe = r"C:\fake\imageio\ffmpeg.exe"
+    fake_mod = MagicMock()
+    fake_mod.get_ffmpeg_exe.return_value = fake_exe
+    with patch.dict(sys.modules, {"imageio_ffmpeg": fake_mod}):
+        assert scanner._ffmpeg_exe() == fake_exe
+    scanner._FFMPEG_EXE_CACHE = None
+
+
+def test_ffmpeg_exe_falls_back_to_path_when_package_missing():
+    """_ffmpeg_exe() falls back to 'ffmpeg' on PATH if imageio-ffmpeg is absent."""
+    import builtins
+    import scanner
+    scanner._FFMPEG_EXE_CACHE = None
+    real_import = builtins.__import__
+
+    def _no_imageio(name, *args, **kwargs):
+        if name == "imageio_ffmpeg":
+            raise ImportError("not installed")
+        return real_import(name, *args, **kwargs)
+
+    with patch.object(builtins, "__import__", _no_imageio):
+        assert scanner._ffmpeg_exe() == "ffmpeg"
+    scanner._FFMPEG_EXE_CACHE = None
+
+
+def test_ffmpeg_exe_result_is_cached():
+    """_ffmpeg_exe() resolves once and caches for the process lifetime."""
+    import scanner
+    scanner._FFMPEG_EXE_CACHE = None
+    fake_mod = MagicMock()
+    fake_mod.get_ffmpeg_exe.return_value = r"C:\x\ffmpeg.exe"
+    with patch.dict(sys.modules, {"imageio_ffmpeg": fake_mod}):
+        scanner._ffmpeg_exe()
+        scanner._ffmpeg_exe()
+    # get_ffmpeg_exe called only once despite two _ffmpeg_exe() calls
+    assert fake_mod.get_ffmpeg_exe.call_count == 1
+    scanner._FFMPEG_EXE_CACHE = None

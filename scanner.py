@@ -2062,6 +2062,30 @@ _FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/trunca
 _VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
 
 
+_FFMPEG_EXE_CACHE: "Optional[str]" = None
+
+
+def _ffmpeg_exe() -> str:
+    """Resolve the ffmpeg executable to use for frame extraction.
+
+    Prefers the static binary bundled by the ``imageio-ffmpeg`` package (so the
+    app works without a system ffmpeg install — including inside the PyInstaller
+    .exe), and falls back to ``ffmpeg`` on PATH if the package is unavailable.
+    Resolved once and cached for the process lifetime.
+    """
+    global _FFMPEG_EXE_CACHE
+    if _FFMPEG_EXE_CACHE is not None:
+        return _FFMPEG_EXE_CACHE
+    exe = "ffmpeg"
+    try:
+        import imageio_ffmpeg  # type: ignore
+        exe = imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:
+        pass
+    _FFMPEG_EXE_CACHE = exe
+    return exe
+
+
 def _probe_video_duration(path: Path) -> "Optional[float]":
     """Return video duration in seconds via ffprobe, or None if unavailable.
 
@@ -2119,7 +2143,7 @@ def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
     try:
         result = subprocess.run(
             [
-                "ffmpeg", "-hide_banner", "-loglevel", "error",
+                _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
                 "-ss", seek_str, "-i", str(path),
                 "-frames:v", "1", "-f", "image2pipe",
                 "-vcodec", "png", "-",
