@@ -381,6 +381,12 @@ class ReportViewer(tk.Frame):
         self._photo_refs: list = []
         self._placeholder_cache: dict[tuple, ImageTk.PhotoImage] = {}  # (size, bg) → photo
 
+        # In-memory cache for extracted video frames.  Keyed by Path so paging
+        # back and forth never re-invokes ffmpeg for the same file within a
+        # single viewer session.  Maps path → PIL Image (RGB) or None when
+        # extraction was attempted but failed (avoids repeated failed attempts).
+        self._video_frame_cache: dict[Path, "Optional[PILImage.Image]"] = {}
+
         # Per-group: include checkbox, status, border-frame ref
         # (pre-created for ALL groups so page changes don't lose state)
         self._group_vars: dict[int, tk.BooleanVar] = {}
@@ -1107,34 +1113,44 @@ class ReportViewer(tk.Frame):
                 # ── Decode image/video frame in background — no Tk calls here ──
                 img_copy = None
                 try:
-                    # Check if this is a video file (try PIL first; fall back to
-                    # video frame extraction when PIL raises an exception)
-                    _opened_as_image = False
-                    try:
-                        with PILImage.open(path) as img:
-                            img.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                            if grayscale:
-                                img = img.convert("L").convert("RGB")
-                            elif img.mode not in ("RGB", "RGBA"):
-                                img = img.convert("RGB")
-                            img_copy = img.copy()
-                            _opened_as_image = True
-                    except Exception:
-                        pass
+                    if is_video:
+                        # For known video records skip PIL entirely — it will
+                        # always fail for .mp4/.mov/etc. and trying it first wastes
+                        # 5-50 ms per tile on the UnidentifiedImageError path.
+                        # Use the per-session in-memory cache so paging back and
+                        # forth never re-invokes ffmpeg for the same file.
+                        if path in self._video_frame_cache:
+                            cached = self._video_frame_cache[path]
+                            # None means extraction was tried and failed
+                            frame = cached
+                        else:
+                            try:
+                                from scanner import _extract_video_thumb
+                                frame = _extract_video_thumb(path)
+                            except Exception:
+                                frame = None
+                            # Store result (including None) so we don't retry
+                            self._video_frame_cache[path] = frame
 
-                    if not _opened_as_image and is_video:
-                        # Extract a frame only when this is a known video record.
-                        # Never call ffmpeg for ordinary images that PIL failed to
-                        # open (e.g. truncated files) — that would block the
-                        # semaphore for up to 15 s per file.
+                        if frame is not None:
+                            # Work on a copy — the cached frame must stay unmodified
+                            work = frame.copy()
+                            work.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                            if grayscale:
+                                work = work.convert("L").convert("RGB")
+                            elif work.mode not in ("RGB", "RGBA"):
+                                work = work.convert("RGB")
+                            img_copy = work
+                    else:
+                        # Standard image path — try PIL
                         try:
-                            from scanner import _extract_video_thumb
-                            frame = _extract_video_thumb(path)
-                            if frame is not None:
-                                frame.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                            with PILImage.open(path) as img:
+                                img.thumbnail((max_px, max_px), PILImage.LANCZOS)
                                 if grayscale:
-                                    frame = frame.convert("L").convert("RGB")
-                                img_copy = frame.copy()
+                                    img = img.convert("L").convert("RGB")
+                                elif img.mode not in ("RGB", "RGBA"):
+                                    img = img.convert("RGB")
+                                img_copy = img.copy()
                         except Exception:
                             pass
                 except Exception:
@@ -1142,12 +1158,15 @@ class ReportViewer(tk.Frame):
 
                 # ── All Tk operations on the main thread via after(0) ───────
                 if img_copy is None:
-                    def _set_err(lbl=label, bid=batch_id):
+                    _err_text = "▶ preview\nunavailable" if is_video else "[no preview]"
+                    def _set_err(lbl=label, bid=batch_id, txt=_err_text):
                         if bid != self._thumb_batch_id:
                             return
                         try:
                             if lbl.winfo_exists():
-                                lbl.configure(text="[no preview]", fg=_M_TEXT3)
+                                lbl.configure(text=txt, fg=_M_TEXT3,
+                                              font=("Segoe UI", 8), wraplength=100,
+                                              justify="center")
                         except Exception:
                             pass
                     try:
