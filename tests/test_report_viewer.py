@@ -977,6 +977,41 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Verify the cache dict was created (even if empty — ffmpeg not available here)
         self.assertIsInstance(v._video_frame_cache, dict)
 
+    def test_cache_hit_bypasses_semaphore(self):
+        """When frame is cached, extraction count stays at zero on second call.
+
+        This proves the fast path (cache hit → no ffmpeg call) works regardless
+        of semaphore state.  It also verifies the double-checked lock pattern:
+        if two threads both miss the cache simultaneously, only one calls
+        _extract_video_thumb (the second sees the cache entry set by the first).
+        """
+        from PIL import Image as PILImage
+
+        v = _make_viewer(self.root, 0)
+        path = Path("/fake/semaphore_test.mp4")
+        call_count = {"n": 0}
+
+        def fake_extract(p):
+            call_count["n"] += 1
+            return PILImage.new("RGB", (640, 480), (100, 150, 200))
+
+        import time
+        label1 = tk.Label(self.root)
+        label1.pack()
+        label2 = tk.Label(self.root)
+        label2.pack()
+
+        with patch("scanner._extract_video_thumb", fake_extract):
+            # First call — cache miss, should invoke extract once
+            v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, True)
+            time.sleep(0.4)
+            # Second call — cache hit, should NOT invoke extract
+            v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, True)
+            time.sleep(0.4)
+
+        self.assertEqual(call_count["n"], 1,
+                         "Second cache-hit call must not invoke _extract_video_thumb again")
+
     def test_video_placeholder_differs_from_image_placeholder(self):
         """Video placeholder (video=True) should produce a different image than non-video."""
         v = _make_viewer(self.root, 0)

@@ -1209,94 +1209,60 @@ class ReportViewer(tk.Frame):
         are marshalled to the main thread via label.after(0, ...) so they never
         race against the Tcl interpreter.
         """
-        def _load() -> None:
-            if not _PIL_AVAILABLE:
-                return
-            if batch_id != self._thumb_batch_id:
-                return
-            with _THUMB_SEMAPHORE:
-                if batch_id != self._thumb_batch_id:
-                    return
-                # ── Decode image/video frame in background — no Tk calls here ──
-                img_copy = None
-                try:
-                    if is_video:
-                        # For known video records skip PIL entirely — it will
-                        # always fail for .mp4/.mov/etc. and trying it first wastes
-                        # 5-50 ms per tile on the UnidentifiedImageError path.
-                        # Use the per-session in-memory cache so paging back and
-                        # forth never re-invokes ffmpeg for the same file.
-                        if path in self._video_frame_cache:
-                            cached = self._video_frame_cache[path]
-                            # None means extraction was tried and failed
-                            frame = cached
-                        else:
-                            try:
-                                from scanner import _extract_video_thumb
-                                frame = _extract_video_thumb(path)
-                            except Exception:
-                                frame = None
-                            # Store result (including None) so we don't retry
-                            self._video_frame_cache[path] = frame
+        def _build_video_img(frame: "Optional[PILImage.Image]") -> "Optional[PILImage.Image]":
+            """Resize, color-correct, and composite overlays for a video frame.
 
-                        if frame is not None:
-                            # Work on a copy — the cached frame must stay unmodified
-                            work = frame.copy()
-                            work.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                            if grayscale:
-                                work = work.convert("L").convert("RGB")
-                            elif work.mode not in ("RGB", "RGBA"):
-                                work = work.convert("RGB")
-                            if not grayscale:
-                                # Duration overlay (top-left) — probe once, cache result
-                                if path not in self._video_duration_cache:
-                                    try:
-                                        from scanner import _probe_video_duration
-                                        self._video_duration_cache[path] = (
-                                            _probe_video_duration(path)
-                                        )
-                                    except Exception:
-                                        self._video_duration_cache[path] = None
-                                dur = self._video_duration_cache.get(path)
-                                if dur is not None and dur > 0:
-                                    work = _composite_duration_label(work, dur)
-                                # Play badge (bottom-right)
-                                work = _composite_play_badge(work)
-                            img_copy = work
-                    else:
-                        # Standard image path — try PIL
+            Returns the composited PIL Image, or None when *frame* is None.
+            Always runs in the background thread — no Tk calls.
+            """
+            if frame is None:
+                return None
+            try:
+                work = frame.copy()
+                work.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                if grayscale:
+                    work = work.convert("L").convert("RGB")
+                elif work.mode not in ("RGB", "RGBA"):
+                    work = work.convert("RGB")
+                if not grayscale:
+                    # Duration overlay (top-left) — probe once, cache result
+                    if path not in self._video_duration_cache:
                         try:
-                            with PILImage.open(path) as img:
-                                img.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                                if grayscale:
-                                    img = img.convert("L").convert("RGB")
-                                elif img.mode not in ("RGB", "RGBA"):
-                                    img = img.convert("RGB")
-                                img_copy = img.copy()
+                            from scanner import _probe_video_duration
+                            self._video_duration_cache[path] = _probe_video_duration(path)
                         except Exception:
-                            pass
-                except Exception:
-                    pass
+                            self._video_duration_cache[path] = None
+                    dur = self._video_duration_cache.get(path)
+                    if dur is not None and dur > 0:
+                        work = _composite_duration_label(work, dur)
+                    # Play badge (bottom-right)
+                    work = _composite_play_badge(work)
+                return work
+            except Exception:
+                return None
 
-                # ── All Tk operations on the main thread via after(0) ───────
-                if img_copy is None:
-                    _err_text = "▶ preview\nunavailable" if is_video else "[no preview]"
-                    def _set_err(lbl=label, bid=batch_id, txt=_err_text):
-                        if bid != self._thumb_batch_id:
-                            return
-                        try:
-                            if lbl.winfo_exists():
-                                lbl.configure(text=txt, fg=_M_TEXT3,
-                                              font=("Segoe UI", 8), wraplength=100,
-                                              justify="center")
-                        except Exception:
-                            pass
+        def _dispatch_img(img_copy: "Optional[PILImage.Image]") -> None:
+            """Schedule the appropriate Tk callback (set image or show error text).
+
+            Must only be called from the background thread — uses label.after(0).
+            """
+            if img_copy is None:
+                _err_text = "▶ preview\nunavailable" if is_video else "[no preview]"
+                def _set_err(lbl=label, bid=batch_id, txt=_err_text):
+                    if bid != self._thumb_batch_id:
+                        return
                     try:
-                        label.after(0, _set_err)
+                        if lbl.winfo_exists():
+                            lbl.configure(text=txt, fg=_M_TEXT3,
+                                          font=("Segoe UI", 8), wraplength=100,
+                                          justify="center")
                     except Exception:
                         pass
-                    return
-
+                try:
+                    label.after(0, _set_err)
+                except Exception:
+                    pass
+            else:
                 def _set_img(pil_img=img_copy, lbl=label, bid=batch_id):
                     if bid != self._thumb_batch_id:
                         return
@@ -1312,6 +1278,54 @@ class ReportViewer(tk.Frame):
                     label.after(0, _set_img)
                 except Exception:
                     pass
+
+        def _load() -> None:
+            if not _PIL_AVAILABLE:
+                return
+            if batch_id != self._thumb_batch_id:
+                return
+
+            if is_video:
+                # ── Fast path: cache hit — skip the semaphore entirely ────────
+                # Cache holds the raw extracted frame (or None if extraction failed).
+                # Processing (resize + overlays) is cheap and doesn't need the slot.
+                if path in self._video_frame_cache:
+                    _dispatch_img(_build_video_img(self._video_frame_cache[path]))
+                    return
+
+                # ── Cache miss: acquire semaphore, call ffmpeg/OpenCV ─────────
+                with _THUMB_SEMAPHORE:
+                    if batch_id != self._thumb_batch_id:
+                        return
+                    # Double-check after acquiring the lock in case a concurrent
+                    # thread for the same path already ran extraction.
+                    if path in self._video_frame_cache:
+                        frame = self._video_frame_cache[path]
+                    else:
+                        try:
+                            from scanner import _extract_video_thumb
+                            frame = _extract_video_thumb(path)
+                        except Exception:
+                            frame = None
+                        self._video_frame_cache[path] = frame
+                    _dispatch_img(_build_video_img(frame))
+            else:
+                # ── Standard image path — always needs the semaphore ─────────
+                with _THUMB_SEMAPHORE:
+                    if batch_id != self._thumb_batch_id:
+                        return
+                    img_copy = None
+                    try:
+                        with PILImage.open(path) as img:
+                            img.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                            if grayscale:
+                                img = img.convert("L").convert("RGB")
+                            elif img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGB")
+                            img_copy = img.copy()
+                    except Exception:
+                        pass
+                    _dispatch_img(img_copy)
 
         threading.Thread(target=_load, daemon=True).start()
 
