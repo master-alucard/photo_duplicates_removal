@@ -338,6 +338,45 @@ def _darken_color(hex_color: str) -> str:
         return hex_color
 
 
+def _composite_play_badge(img: "PILImage.Image") -> "PILImage.Image":
+    """Draw a semi-transparent ▶ play badge in the bottom-right corner of *img*.
+
+    Returns the composited image.  Never raises; returns *img* unchanged on any
+    error (e.g. when Pillow ImageDraw is unavailable).
+    """
+    try:
+        from PIL import ImageDraw, ImageFont
+        w, h = img.size
+        badge_size = max(18, min(w, h) // 5)
+        margin = max(4, badge_size // 4)
+        bx = w - badge_size - margin
+        by = h - badge_size - margin
+
+        # Semi-transparent dark circle
+        overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        d.ellipse(
+            [bx, by, bx + badge_size, by + badge_size],
+            fill=(0, 0, 0, 140),
+        )
+        # ▶ triangle: centred inside the circle
+        cx = bx + badge_size // 2
+        cy = by + badge_size // 2
+        r = badge_size // 3
+        pts = [
+            (cx - r // 2, cy - r),
+            (cx - r // 2, cy + r),
+            (cx + r, cy),
+        ]
+        d.polygon(pts, fill=(255, 255, 255, 220))
+
+        base = img.convert("RGBA")
+        base.alpha_composite(overlay)
+        return base.convert("RGB")
+    except Exception:
+        return img
+
+
 def _info_btn(parent: tk.Widget, key: str, bg: str = _M_SURFACE) -> tk.Button:
     """Small ⓘ info button (Material-style, same bg as parent)."""
     btn = tk.Button(
@@ -1140,6 +1179,10 @@ class ReportViewer(tk.Frame):
                                 work = work.convert("L").convert("RGB")
                             elif work.mode not in ("RGB", "RGBA"):
                                 work = work.convert("RGB")
+                            # Composite a ▶ play badge so video tiles are visually
+                            # distinct from image tiles even without the group badge
+                            if not grayscale:
+                                work = _composite_play_badge(work)
                             img_copy = work
                     else:
                         # Standard image path — try PIL

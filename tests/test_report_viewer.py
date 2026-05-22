@@ -977,6 +977,29 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Verify the cache dict was created (even if empty — ffmpeg not available here)
         self.assertIsInstance(v._video_frame_cache, dict)
 
+    def test_play_badge_composite_produces_rgb_image(self):
+        """_composite_play_badge should return an RGB image of the same size."""
+        from PIL import Image as PILImage
+        from report_viewer import _composite_play_badge
+
+        img = PILImage.new("RGB", (120, 90), (50, 100, 150))
+        result = _composite_play_badge(img)
+        self.assertEqual(result.mode, "RGB")
+        self.assertEqual(result.size, (120, 90))
+
+    def test_play_badge_composite_modifies_pixels(self):
+        """The badge composite must change at least one pixel from the original."""
+        from PIL import Image as PILImage
+        from report_viewer import _composite_play_badge
+
+        img = PILImage.new("RGB", (120, 90), (50, 100, 150))
+        result = _composite_play_badge(img)
+        # At least some pixels should differ (the badge area)
+        diff = sum(
+            1 for a, b in zip(img.getdata(), result.getdata()) if a != b
+        )
+        self.assertGreater(diff, 0, "Play badge should modify at least one pixel")
+
     def test_stale_batch_id_prevents_label_update(self):
         """If batch_id changes before extraction completes, label must not be updated."""
         from PIL import Image as PILImage
