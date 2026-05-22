@@ -338,6 +338,43 @@ def _darken_color(hex_color: str) -> str:
         return hex_color
 
 
+def _composite_duration_label(
+    img: "PILImage.Image", duration_s: float
+) -> "PILImage.Image":
+    """Draw a semi-transparent duration label (e.g. '0:42') in the top-left corner.
+
+    Returns the composited image.  Never raises; returns *img* unchanged on any
+    error (e.g. when Pillow ImageDraw is unavailable).
+    """
+    try:
+        from PIL import ImageDraw
+        w, h = img.size
+        minutes = int(duration_s // 60)
+        seconds = int(duration_s % 60)
+        label = f"{minutes}:{seconds:02d}"
+
+        font_size = max(10, min(w, h) // 8)
+        # Approximate char width to size the pill background
+        char_w = int(font_size * 0.6)
+        pad_x, pad_y = 4, 2
+        pill_w = len(label) * char_w + pad_x * 2
+        pill_h = font_size + pad_y * 2
+
+        overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        d.rounded_rectangle(
+            [4, 4, 4 + pill_w, 4 + pill_h],
+            radius=3, fill=(0, 0, 0, 160),
+        )
+        d.text((4 + pad_x, 4 + pad_y), label, fill=(255, 255, 255, 230))
+
+        base = img.convert("RGBA")
+        base.alpha_composite(overlay)
+        return base.convert("RGB")
+    except Exception:
+        return img
+
+
 def _composite_play_badge(img: "PILImage.Image") -> "PILImage.Image":
     """Draw a semi-transparent ▶ play badge in the bottom-right corner of *img*.
 
@@ -425,6 +462,10 @@ class ReportViewer(tk.Frame):
         # single viewer session.  Maps path → PIL Image (RGB) or None when
         # extraction was attempted but failed (avoids repeated failed attempts).
         self._video_frame_cache: dict[Path, "Optional[PILImage.Image]"] = {}
+
+        # In-memory cache for video durations (seconds).  Maps path → float or
+        # None when ffprobe failed / was not called.
+        self._video_duration_cache: dict[Path, "Optional[float]"] = {}
 
         # Per-group: include checkbox, status, border-frame ref
         # (pre-created for ALL groups so page changes don't lose state)
@@ -1179,9 +1220,20 @@ class ReportViewer(tk.Frame):
                                 work = work.convert("L").convert("RGB")
                             elif work.mode not in ("RGB", "RGBA"):
                                 work = work.convert("RGB")
-                            # Composite a ▶ play badge so video tiles are visually
-                            # distinct from image tiles even without the group badge
                             if not grayscale:
+                                # Duration overlay (top-left) — probe once, cache result
+                                if path not in self._video_duration_cache:
+                                    try:
+                                        from scanner import _probe_video_duration
+                                        self._video_duration_cache[path] = (
+                                            _probe_video_duration(path)
+                                        )
+                                    except Exception:
+                                        self._video_duration_cache[path] = None
+                                dur = self._video_duration_cache.get(path)
+                                if dur is not None and dur > 0:
+                                    work = _composite_duration_label(work, dur)
+                                # Play badge (bottom-right)
                                 work = _composite_play_badge(work)
                             img_copy = work
                     else:

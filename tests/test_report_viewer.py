@@ -977,6 +977,27 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Verify the cache dict was created (even if empty — ffmpeg not available here)
         self.assertIsInstance(v._video_frame_cache, dict)
 
+    def test_duration_label_composite_produces_rgb_image(self):
+        """_composite_duration_label should return an RGB image of the same size."""
+        from PIL import Image as PILImage
+        from report_viewer import _composite_duration_label
+
+        img = PILImage.new("RGB", (120, 90), (60, 80, 100))
+        result = _composite_duration_label(img, 93.5)  # 1:33
+        self.assertEqual(result.mode, "RGB")
+        self.assertEqual(result.size, (120, 90))
+
+    def test_duration_label_formats_correctly(self):
+        """Duration label helper should produce MM:SS strings."""
+        # 93 seconds = 1:33
+        minutes, seconds = divmod(int(93), 60)
+        label = f"{minutes}:{seconds:02d}"
+        self.assertEqual(label, "1:33")
+        # 65 seconds = 1:05
+        minutes, seconds = divmod(int(65), 60)
+        label = f"{minutes}:{seconds:02d}"
+        self.assertEqual(label, "1:05")
+
     def test_play_badge_composite_produces_rgb_image(self):
         """_composite_play_badge should return an RGB image of the same size."""
         from PIL import Image as PILImage
