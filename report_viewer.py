@@ -837,6 +837,17 @@ class ReportViewer(tk.Frame):
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
 
+        if getattr(group, "is_ambiguous", False):
+            _amb_text = (
+                " ≈ SIZE MATCH — verify " if _is_video_group
+                else " ≈ UNCERTAIN — verify "
+            )
+            _tklabel(
+                head, bg=_M_WARNING, fg="#FFFFFF", text=_amb_text,
+                font=("Segoe UI", 8, "bold"),
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+
         # Applied state badge
         if apply_state == "full":
             _tklabel(
@@ -1119,9 +1130,14 @@ class ReportViewer(tk.Frame):
 
                 _info_btn(cb_frame, "different_image", bg=bg).pack(side=tk.LEFT, padx=0)
 
-                # "Different image" badge (shown when unchecked)
+                # "Different image" badge (shown when unchecked).
+                # For video tiles, clarify that the match was by file size only.
+                _diff_text = (
+                    "≠ different video" if getattr(rec, "is_video", False)
+                    else "≠ different image"
+                )
                 diff_badge = _tklabel(
-                    tile, bg=bg, fg=_M_WARNING, text="≠ different image",
+                    tile, bg=bg, fg=_M_WARNING, text=_diff_text,
                     font=("Segoe UI", 8, "italic"),
                 )
                 def _toggle_badge(*_):

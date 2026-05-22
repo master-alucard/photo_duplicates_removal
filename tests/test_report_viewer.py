@@ -977,6 +977,20 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Verify the cache dict was created (even if empty — ffmpeg not available here)
         self.assertIsInstance(v._video_frame_cache, dict)
 
+    def test_ambiguous_video_group_renders_without_crash(self):
+        """A video group with is_ambiguous=True must render without exception."""
+        vg = _make_video_group(n_orig=1, n_prev=1, idx=0)
+        vg.is_ambiguous = True
+        v = _make_viewer(self.root, groups=[vg])
+        self.assertIn(0, v._group_vars)
+
+    def test_ambiguous_image_group_renders_without_crash(self):
+        """A non-video group with is_ambiguous=True must render without exception."""
+        g = _make_group(n_orig=1, n_prev=2, idx=0)
+        g.is_ambiguous = True
+        v = _make_viewer(self.root, groups=[g])
+        self.assertIn(0, v._group_vars)
+
     def test_cache_hit_bypasses_semaphore(self):
         """When frame is cached, extraction count stays at zero on second call.
 
