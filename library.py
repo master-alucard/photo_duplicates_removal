@@ -204,28 +204,44 @@ class FileRecord:
 
 # ── VideoRecord ───────────────────────────────────────────────────────────────
 
-_VIDEO_CACHE_VERSION = 1
+_VIDEO_CACHE_VERSION = 2  # bumped: added duration + frame_hashes fields
 
 
 @dataclass
 class VideoRecord:
     """Serialisable per-file cache record for a video file.
 
-    Stores the thumbnail pHash so repeated scans of a folder skip re-extracting
-    frames with ffmpeg/OpenCV for unchanged files (same mtime + size).
+    Stores the thumbnail pHash and (v2) multi-frame fingerprint so repeated
+    scans of a folder skip re-extracting frames with ffmpeg/OpenCV for unchanged
+    files (same mtime + size).
+
+    Cache version history:
+      v1 — path, mtime, size, phash (single-frame thumb hash)
+      v2 — adds duration (float, seconds) and frame_hashes (list of hex strings,
+            one per sampled position).  Old v1 cache entries are read back with
+            duration=None and frame_hashes=[], which triggers re-extraction on
+            next scan so the new fields are populated.
     """
-    path:   str
-    mtime:  float   # stat.st_mtime
-    size:   int     # st_size in bytes
-    phash:  str     # imagehash hex string; "" means extraction failed
+    path:         str
+    mtime:        float          # stat.st_mtime
+    size:         int            # st_size in bytes
+    phash:        str            # imagehash hex string; "" means extraction failed
+    duration:     "float | None" = None   # video duration in seconds; None = unknown
+    frame_hashes: "list[str]"    = None   # type: ignore[assignment]  # multi-frame pHash hex strings
+
+    def __post_init__(self) -> None:
+        if self.frame_hashes is None:
+            self.frame_hashes = []
 
     @classmethod
     def from_dict(cls, d: dict) -> "VideoRecord":
         return cls(
-            path  = d["path"],
-            mtime = d["mtime"],
-            size  = d["size"],
-            phash = d.get("phash", ""),
+            path         = d["path"],
+            mtime        = d["mtime"],
+            size         = d["size"],
+            phash        = d.get("phash", ""),
+            duration     = d.get("duration"),        # None for v1 entries
+            frame_hashes = d.get("frame_hashes", []),
         )
 
     def is_stale(self, path: Path) -> bool:
@@ -235,6 +251,10 @@ class VideoRecord:
             return st.st_mtime != self.mtime or st.st_size != self.size
         except (FileNotFoundError, OSError):
             return True
+
+    def needs_content_fields(self) -> bool:
+        """Return True if duration or frame_hashes are missing (v1 cache entry)."""
+        return self.duration is None or len(self.frame_hashes) == 0
 
 
 # ── Library directory ──────────────────────────────────────────────────────────

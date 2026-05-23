@@ -3447,6 +3447,18 @@ class App:
         self._custom_progress_bar["mode"]  = "determinate"
         self._custom_progress_bar["value"] = 100 if (success and not paused) else self._custom_progress_bar["value"]
         self._scanning = False
+        # Drop any in-flight progress update and cancel the 50 ms poll so a
+        # late "Generating report…" tick can't overwrite the final done state.
+        # On large scans the report-phase progress callback could drain AFTER
+        # this handler ran, leaving the bar at 96% and the label stuck on
+        # "Generating report…" even though buttons were already unlocked.
+        self._custom_pending_progress = None
+        if self._custom_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._custom_progress_tick_after_id)
+            except Exception:
+                pass
+            self._custom_progress_tick_after_id = None
         # Stop pulsing dot
         try:
             self._custom_pulse_dot.hide()
@@ -3509,6 +3521,13 @@ class App:
         self._custom_progress_bar.stop()
         self._custom_phase_label.set("Scan failed — see error message.")
         self._scanning = False
+        self._custom_pending_progress = None
+        if self._custom_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._custom_progress_tick_after_id)
+            except Exception:
+                pass
+            self._custom_progress_tick_after_id = None
         self._unlock_settings()
         self._custom_active_frame.pack_forget()
         self._custom_idle_frame.pack(fill=tk.X, padx=4)
@@ -5250,6 +5269,17 @@ class App:
         self._progress_bar["mode"]  = "determinate"
         self._progress_bar["value"] = 100 if (success and not paused) else self._progress_bar["value"]
         self._scanning = False
+        # Drop any in-flight progress update and cancel the 50 ms poll so a
+        # late "Generating report…" tick can't overwrite the final done state
+        # (stale 96% bar / "Generating report…" label after buttons unlock on
+        # large scans).
+        self._pending_progress = None
+        if self._progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._progress_tick_after_id)
+            except Exception:
+                pass
+            self._progress_tick_after_id = None
         # Stop pulsing dot
         try:
             self._scan_pulse_dot.hide()
@@ -5320,6 +5350,13 @@ class App:
         self._progress_bar.stop()
         self._phase_label_var.set("Scan failed — see error message.")
         self._scanning = False
+        self._pending_progress = None
+        if self._progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._progress_tick_after_id)
+            except Exception:
+                pass
+            self._progress_tick_after_id = None
         self._unlock_settings()
         self._scan_active_frame.pack_forget()
         self._scan_idle_frame.pack(fill=tk.X, padx=4)
