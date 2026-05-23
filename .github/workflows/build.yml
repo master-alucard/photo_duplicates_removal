@@ -47,21 +47,22 @@ jobs:
         run: pip install pytest pytest-github-actions-annotate-failures
 
       - name: Run tests
-        shell: pwsh
+        shell: bash
         run: |
-          $out = python -m pytest tests/ -q --tb=short 2>&1 | Out-String
-          $code = $LASTEXITCODE
-          Write-Host $out
-          if ($code -ne 0) {
-            # Surface the failing-test summary as a GitHub annotation so it is
-            # visible via the check-runs API without downloading the full log.
-            $lines = $out -split "`r?`n"
-            $fails = $lines | Select-String -Pattern "FAILED|ERROR|Error:|assert|Exception|Traceback" | Select-Object -First 30
-            $tail  = ($lines | Select-Object -Last 40) -join "%0A"
-            $fjoin = ($fails -join "%0A")
-            Write-Host "::error title=pytest failures::$fjoin"
-            Write-Host "::error title=pytest tail::$tail"
-          }
+          set +e
+          python -m pytest tests/ -rA -q --tb=short 2>&1 | tee pytest-out.txt
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            # Emit one GitHub annotation per failing/erroring test so the cause
+            # is visible via the check-runs API without the full log. (pwsh
+            # mangled native stderr; bash handles it cleanly.)
+            grep -E "^(FAILED|ERROR)" pytest-out.txt | head -40 | while IFS= read -r line; do
+              echo "::error::${line}"
+            done
+            echo "::group::pytest tail"
+            tail -50 pytest-out.txt
+            echo "::endgroup::"
+          fi
           exit $code
 
       # ── 5. Bundle with PyInstaller ───────────────────────────────────────────
