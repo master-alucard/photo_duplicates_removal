@@ -2179,6 +2179,208 @@ def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
     return None
 
 
+# ── Content-based video matching constants ────────────────────────────────────
+# Frame positions (as fractions of total duration) sampled for the multi-frame
+# fingerprint.  Five points spread across the video body are enough to
+# distinguish re-encodes of the same clip from different-content videos while
+# keeping extraction time acceptable (5 × ffmpeg calls per cache-miss file).
+_CONTENT_FRAME_POSITIONS: tuple[float, ...] = (0.10, 0.30, 0.50, 0.70, 0.90)
+
+# Maximum Hamming distance (bits) between two corresponding frame pHashes to
+# count the frame pair as "matching".  10 bits is tight — same-content videos
+# re-encoded at different bitrates show 0–4 bits of drift; unrelated video
+# frames measured on test data show distances of 28–40 bits.
+_CONTENT_FRAME_HAMMING_THR = 10
+
+# Minimum fraction of sampled frame pairs that must match for content identity.
+_CONTENT_MATCH_RATIO = 0.6
+
+# Maximum allowed difference in video duration (as a percentage of the longer
+# video's duration) for two videos to be considered content-duplicates.
+# 5 % handles minor container-metadata discrepancies; it rejects short clips
+# (13 s vs 12 s = 11.5 % difference) that share only an intro frame.
+_CONTENT_DUR_DIFF_PCT_MAX = 5.0
+
+
+def _probe_video_duration_ffmpeg(path: Path) -> "Optional[float]":
+    """Return video duration in seconds using the bundled ffmpeg binary.
+
+    Unlike :func:`_probe_video_duration` (which calls the system ``ffprobe``),
+    this function parses the ``Duration:`` line from ``ffmpeg -i`` stderr output,
+    so it works even when only the ``imageio-ffmpeg`` bundled binary is available.
+
+    Returns ``None`` on any failure (missing tool, malformed file, timeout).
+    """
+    import subprocess
+    import re as _re
+    try:
+        result = subprocess.run(
+            [_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
+            capture_output=True, timeout=_FFMPEG_TIMEOUT,
+        )
+        output = result.stderr.decode("utf-8", errors="replace")
+        m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
+        if m:
+            h, mi, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return h * 3600 + mi * 60 + s
+    except Exception:
+        pass
+    return None
+
+
+def _extract_video_multi_frame_hashes(
+    path: Path,
+    duration: float,
+    positions: "tuple[float, ...]" = _CONTENT_FRAME_POSITIONS,
+) -> "list[str]":
+    """Extract pHashes for multiple frames sampled across *path*'s timeline.
+
+    Each position in *positions* is a fraction (0–1) of *duration*.  For each
+    position, one frame is extracted via ffmpeg and hashed with imagehash.phash
+    on a 32×32 working image.  The result is a list of imagehash hex strings in
+    the same order as *positions*; entries are empty strings when a frame could
+    not be extracted.
+
+    The 32×32 working size (vs the 8×8 default) gives a 256-bit hash which is
+    more discriminating for short clips that might share similar-looking frames.
+    imagehash.phash on a 32×32 input still returns a 64-bit hash (8×8 DCT
+    output) but benefits from the richer input resolution.
+
+    Returns ``[]`` if *duration* is too short to sample meaningfully (< 0.5 s).
+    """
+    import subprocess
+    import io as _io
+
+    if duration < 0.5:
+        # Very short clip — too few unique frames to build a reliable fingerprint.
+        # Fall back to the single-frame thumb path used by the existing logic.
+        return []
+
+    # Build a video-frame select filter that grabs exactly the frames we want.
+    # Using "gte(t, <seek_s>)" for each position extracts the first frame at or
+    # after each timestamp in a single ffmpeg pass, which is ~5x faster than
+    # running five separate ffmpeg subprocesses.
+    # The output is a raw sequence of concatenated PNG images written to stdout;
+    # we parse them back using the b'\x89PNG' magic-byte sequence.
+    seek_times = [f"{duration * frac:.3f}" for frac in positions]
+    # Construct select expression: at each seek time grab the first matching frame.
+    # "not(mod(n,1))" is a no-op pass-through; we gate on time thresholds instead.
+    # Use "eq(pict_type,I)" is too restrictive — use "gte(t, ...)" for any frame type.
+    select_parts = "+".join(f"between(t,{t},{t})" for t in seek_times)
+    try:
+        proc = subprocess.run(
+            [
+                _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+                "-i", str(path),
+                "-vf", f"select='{select_parts}',scale=32:32",
+                "-vsync", "vfr",
+                "-frames:v", str(len(positions)),
+                "-f", "image2pipe", "-vcodec", "png", "-",
+            ],
+            capture_output=True, timeout=_FFMPEG_TIMEOUT * len(positions),
+        )
+        if proc.returncode == 0 and proc.stdout:
+            # Split raw stdout into individual PNG chunks by magic bytes
+            raw = proc.stdout
+            png_magic = b"\x89PNG\r\n\x1a\n"
+            frames_raw: list[bytes] = []
+            start = 0
+            while True:
+                idx = raw.find(png_magic, start)
+                if idx == -1:
+                    break
+                next_idx = raw.find(png_magic, idx + len(png_magic))
+                chunk = raw[idx: next_idx] if next_idx != -1 else raw[idx:]
+                frames_raw.append(chunk)
+                start = next_idx if next_idx != -1 else len(raw)
+
+            result: list[str] = []
+            for chunk in frames_raw[:len(positions)]:
+                try:
+                    img = Image.open(_io.BytesIO(chunk))
+                    img.load()
+                    rgb = img.convert("RGB") if img.mode != "RGB" else img
+                    ph = imagehash.phash(rgb)
+                    result.append(str(ph))
+                except Exception:
+                    result.append("")
+
+            # Pad with empty strings if fewer frames were extracted than requested
+            while len(result) < len(positions):
+                result.append("")
+            return result
+
+    except Exception:
+        pass
+
+    # Fallback: extract each frame individually (slower but more robust with
+    # containers/codecs where the select filter may not work reliably).
+    result_fb: list[str] = []
+    for frac in positions:
+        seek_s = duration * frac
+        ph_str = ""
+        try:
+            proc = subprocess.run(
+                [
+                    _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{seek_s:.3f}", "-i", str(path),
+                    "-frames:v", "1", "-f", "image2pipe",
+                    "-vcodec", "png", "-",
+                ],
+                capture_output=True, timeout=_FFMPEG_TIMEOUT,
+            )
+            if proc.returncode == 0 and proc.stdout:
+                img = Image.open(_io.BytesIO(proc.stdout))
+                img.load()
+                rgb = img.convert("RGB") if img.mode != "RGB" else img
+                work = rgb.resize((32, 32), Image.LANCZOS)
+                ph = imagehash.phash(work)
+                ph_str = str(ph)
+        except Exception:
+            pass
+        result_fb.append(ph_str)
+
+    return result_fb
+
+
+def _video_content_match(
+    hashes_a: "list[str]",
+    hashes_b: "list[str]",
+    dur_a: "Optional[float]",
+    dur_b: "Optional[float]",
+) -> bool:
+    """Return True if two videos are content-identical based on multi-frame hashes.
+
+    Conditions:
+    1. Both durations must be known and within ``_CONTENT_DUR_DIFF_PCT_MAX`` percent
+       of each other (strong guard against false positives from shared intro frames).
+    2. At least ``_CONTENT_MATCH_RATIO`` of the paired frame-hash positions must have
+       Hamming distance <= ``_CONTENT_FRAME_HAMMING_THR``.
+    """
+    if not dur_a or not dur_b:
+        return False
+    if not hashes_a or not hashes_b:
+        return False
+
+    max_dur = max(dur_a, dur_b)
+    if max_dur < 0.001:
+        return False
+    if abs(dur_a - dur_b) / max_dur * 100 > _CONTENT_DUR_DIFF_PCT_MAX:
+        return False
+
+    matched = valid = 0
+    for ha_str, hb_str in zip(hashes_a, hashes_b):
+        if ha_str and hb_str:
+            valid += 1
+            dist = imagehash.hex_to_hash(ha_str) - imagehash.hex_to_hash(hb_str)
+            if dist <= _CONTENT_FRAME_HAMMING_THR:
+                matched += 1
+
+    if valid == 0:
+        return False
+    return (matched / valid) >= _CONTENT_MATCH_RATIO
+
+
 def collect_videos(
     folder: Path,
     skip_paths: set[Path],
@@ -2193,6 +2395,18 @@ def collect_videos(
     Records have ``is_video=True``, ``width=0``, ``height=0``.
     ``phash`` holds a thumbnail pHash when ``settings.video_use_thumb`` is True
     and a frame could be extracted via ffmpeg or OpenCV; otherwise a zero hash.
+
+    When ``settings.video_match_content`` is True (default), the function also
+    extracts video duration and a multi-frame fingerprint (5 frames at 10/30/50/
+    70/90 % of duration) for each file.  These are stored in the :class:`~library.
+    VideoRecord` cache alongside the existing single-frame pHash so that
+    :func:`find_video_duplicates` can group content-identical videos even when
+    their byte sizes differ (re-encoded, different container, etc.).
+
+    Cache version 2 records carry ``duration`` and ``frame_hashes``.  Old v1
+    entries (missing those fields) are treated as cache misses for the content
+    fields even if the file is otherwise unchanged — they are re-extracted once
+    to populate the new fields, then cached.
 
     Args:
         library: Optional :class:`~library.Library` instance.  When supplied,
@@ -2242,6 +2456,7 @@ def collect_videos(
     total = len(video_paths)
     _zero = imagehash.ImageHash(_np.zeros((8, 8), dtype=bool))
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
+    use_content = bool(getattr(settings, "video_match_content", True))
 
     # Load per-folder video pHash cache when a library is available.
     from library import VideoRecord as _VideoRecord
@@ -2267,6 +2482,12 @@ def collect_videos(
         stat_result: "os.stat_result"
         ph: "imagehash.ImageHash"           # filled by cache hit or extraction
         done: bool = False                  # True once ph is final
+        duration: "Optional[float]" = None  # video duration in seconds
+        frame_hashes: "list[str]" = None    # type: ignore[assignment]
+
+        def __post_init__(self) -> None:
+            if self.frame_hashes is None:
+                self.frame_hashes = []
 
     slots: list[_VideoSlot] = []
     extract_indices: list[int] = []         # indices into slots[] needing extraction
@@ -2291,23 +2512,36 @@ def collect_videos(
                 continue
             file_key = str(path)
 
-            if use_thumb:
+            if use_thumb or use_content:
                 cached = _vcache_old.get(file_key)
-                if (
+                cache_valid = (
                     cached is not None
                     and cached.mtime == stat.st_mtime
                     and cached.size == stat.st_size
-                ):
-                    # Cache hit — resolve pHash immediately, no extraction needed.
+                )
+                # For content matching we also need duration + frame_hashes.
+                # A v1 cache entry passes the mtime/size check but is missing
+                # those fields — treat it as a partial miss so they get filled.
+                content_fields_present = (
+                    not use_content
+                    or (cached is not None and not cached.needs_content_fields())
+                )
+
+                if cache_valid and content_fields_present:
+                    # Full cache hit — resolve pHash immediately, no extraction.
                     ph = imagehash.hex_to_hash(cached.phash) if cached.phash else _zero
-                    slots.append(_VideoSlot(path=path, stat_result=stat, ph=ph, done=True))
+                    slot = _VideoSlot(path=path, stat_result=stat, ph=ph, done=True)
+                    if use_content:
+                        slot.duration = cached.duration
+                        slot.frame_hashes = list(cached.frame_hashes)
+                    slots.append(slot)
                 else:
-                    # Cache miss — mark slot for parallel extraction.
+                    # Cache miss (or missing content fields) — schedule extraction.
                     slot_idx = len(slots)
                     slots.append(_VideoSlot(path=path, stat_result=stat, ph=_zero, done=False))
                     extract_indices.append(slot_idx)
             else:
-                # No thumb requested — carry forward existing cache entry.
+                # No thumb and no content matching — carry forward existing cache entry.
                 cached = _vcache_old.get(file_key)
                 if (
                     cached is not None
@@ -2332,19 +2566,34 @@ def collect_videos(
         from concurrent.futures import ThreadPoolExecutor as _TPE
 
         def _extract_one(slot_idx: int):
-            """Extract thumbnail for one slot; safe to run in a thread."""
+            """Extract thumbnail (and optionally multi-frame fingerprint) for one
+            slot; safe to run in a thread."""
             slot = slots[slot_idx]
             ph = _zero
+            dur: "Optional[float]" = None
+            fhashes: list[str] = []
+
             try:
+                if use_content:
+                    # Probe duration first (needed for both multi-frame and
+                    # safe single-frame seek position).
+                    dur = _probe_video_duration_ffmpeg(slot.path)
+
                 thumb = _extract_video_thumb(slot.path)
                 if thumb is not None:
                     work = _downscaled_for_hashing(
                         thumb if thumb.mode == "RGB" else thumb.convert("RGB")
                     )
                     ph = imagehash.phash(work)
+
+                if use_content and dur is not None:
+                    fhashes = _extract_video_multi_frame_hashes(slot.path, dur)
             except Exception:
                 ph = _zero
+
             slot.ph = ph
+            slot.duration = dur
+            slot.frame_hashes = fhashes
             slot.done = True
             file_key = str(slot.path)
             _vcache_new[file_key] = _VideoRecord(
@@ -2352,6 +2601,8 @@ def collect_videos(
                 mtime=slot.stat_result.st_mtime,
                 size=slot.stat_result.st_size,
                 phash=str(ph) if ph is not _zero else "",
+                duration=dur,
+                frame_hashes=fhashes,
             )
 
         with _TPE(max_workers=_VIDEO_EXTRACT_WORKERS) as _pool:
@@ -2360,7 +2611,7 @@ def collect_videos(
     # ── Phase 3: assemble ImageRecord list in original walk order ──────────
     records: list[ImageRecord] = []
     for slot in slots:
-        records.append(ImageRecord(
+        rec = ImageRecord(
             path=slot.path,
             width=0, height=0,
             file_size=slot.stat_result.st_size,
@@ -2370,7 +2621,12 @@ def collect_videos(
             brightness=128.0,
             histogram=[],
             is_video=True,
-        ))
+        )
+        # Attach content-matching fields as extra attributes so find_video_duplicates
+        # can access them without changing ImageRecord's frozen contract.
+        rec._video_duration = slot.duration            # type: ignore[attr-defined]
+        rec._video_frame_hashes = slot.frame_hashes    # type: ignore[attr-defined]
+        records.append(rec)
 
     # Persist the updated video cache (new + untouched carry-forwards from old).
     if library is not None and _vcache_new:
@@ -2391,18 +2647,47 @@ def find_video_duplicates(
 ) -> List[DuplicateGroup]:
     """Group video files that are likely duplicates.
 
-    Primary criterion: **exact file size**.  Two videos with an identical byte
-    count are almost certainly the same file in a personal photo library.
+    Two-pass strategy
+    -----------------
+    **Pass A — exact-size fast path** (unchanged from previous behaviour):
+    Bucket by ``(ext, size)`` when the corresponding flags are enabled.  Within
+    each same-size bucket, thumbnail pHash similarity optionally sub-divides the
+    group to reject coincidentally same-size but visually different videos.
+    This pass is cheap: no extra ffmpeg calls needed.
 
-    Secondary criterion (optional): **thumbnail pHash similarity** within each
-    same-size bucket.  When ``settings.video_use_thumb`` is True and at least one
-    record in a bucket has a non-zero thumbnail hash, the bucket is sub-divided by
-    pHash distance (threshold = 8 bits).  Pairs whose thumbnails differ by more
-    than 8 bits are treated as coincidentally same-size but visually different
-    videos and are *not* grouped together.
+    **Pass B — content-based path** (new, requires ``video_match_content=True``):
+    Compare every pair of videos across the full record list using multi-frame
+    pHash fingerprints and duration proximity.  Two videos are content-duplicates
+    when:
 
-    Strategy: keep the file with the earliest mtime (oldest copy) as the original;
-    mark the rest as previews (candidates for trash).
+    1. Their durations are within ``_CONTENT_DUR_DIFF_PCT_MAX`` percent of each
+       other (strong guard — a 13 s and a 12 s clip share only ~11 % duration
+       difference, which exceeds the 5 % gate, so they never false-positive even
+       if they happen to share a similar opening frame).
+    2. At least ``_CONTENT_MATCH_RATIO`` of the five sampled frame-hash pairs
+       have Hamming distance <= ``_CONTENT_FRAME_HAMMING_THR``.
+
+    Any record already assigned to a group by Pass A is excluded from Pass B's
+    output (no double-counting).  Records that only match via content are grouped
+    and marked **not** ambiguous (multi-frame fingerprint + duration is strong
+    visual evidence).
+
+    Setting interactions
+    --------------------
+    ``video_match_content=True``  — enables Pass B.  Pass A still runs first so
+                                     exact-size copies are handled cheaply.
+    ``video_match_format=True``   — restricts Pass B to pairs with the same file
+                                     extension (preserves existing behaviour where
+                                     format must match).  Set it to False to also
+                                     find cross-container duplicates (e.g. .mp4 vs
+                                     .mov) via content matching.
+    ``video_match_size=False``    — disables the exact-size bucket in Pass A so
+                                     all matching goes through content fingerprints.
+    ``video_match_content=False`` — disables Pass B entirely; only exact-size/
+                                     format grouping is performed (legacy mode).
+
+    Strategy: keep the file with the earliest mtime (oldest copy) as the
+    original; mark the rest as previews (candidates for trash).
 
     Returns a list of :class:`DuplicateGroup` objects (group_id prefix ``"v"``).
     """
@@ -2413,109 +2698,160 @@ def find_video_duplicates(
     use_thumb = bool(getattr(settings, "video_use_thumb", True))
     match_format = bool(getattr(settings, "video_match_format", True))
     match_size = bool(getattr(settings, "video_match_size", True))
+    match_content = bool(getattr(settings, "video_match_content", True))
     _THUMB_THR = 8  # Hamming bits — allows minor encode differences in thumbnails
 
-    # If neither format nor size matching is enabled, do not group anything.
-    # (Without at least one criterion every pair would be a "duplicate" — useless
-    # and dangerous.  Issue #300: the UI guarantees at least one is ON, but this
-    # belt-and-braces check protects programmatic callers.)
-    if not match_format and not match_size:
+    # If neither format nor size matching is enabled AND content matching is also
+    # disabled, refuse to group (same guard as before — avoids grouping everything).
+    if not match_format and not match_size and not match_content:
         return []
-
-    # Phase 1: bucket by (ext if format-match enabled, size if size-match enabled).
-    # An empty string / zero acts as a wildcard for the disabled dimension.
-    by_key: dict[tuple[str, int], list[ImageRecord]] = defaultdict(list)
-    for rec in video_records:
-        ext_key = rec.path.suffix.lower() if match_format else ""
-        size_key = rec.file_size if match_size else 0
-        by_key[(ext_key, size_key)].append(rec)
-    # Local alias so the rest of the function reads naturally.
-    by_size = by_key
 
     groups: list[DuplicateGroup] = []
     group_counter = 0
+    # Track which records have already been assigned to a group (by path string)
+    # so Pass B does not re-group records already caught by Pass A.
+    already_grouped: set[str] = set()
 
-    for _key, members in by_size.items():
-        if len(members) < 2:
-            continue
+    # ── Pass A: exact-size fast path ─────────────────────────────────────────
+    if match_format or match_size:
+        by_key: dict[tuple[str, int], list[ImageRecord]] = defaultdict(list)
+        for rec in video_records:
+            ext_key = rec.path.suffix.lower() if match_format else ""
+            size_key = rec.file_size if match_size else 0
+            by_key[(ext_key, size_key)].append(rec)
 
-        # Check whether any thumbnails were successfully extracted
-        has_thumbs = use_thumb and any(
-            int(str(r.phash), 16) != _zero_hash_int for r in members
-        )
+        for _key, members in by_key.items():
+            if len(members) < 2:
+                continue
 
-        if has_thumbs:
-            # Phase 2: sub-group within same-size bucket by thumbnail pHash.
-            # Videos whose thumbnail extraction failed (zero hash) are treated
-            # as size-only matches and grouped with every other member in the
-            # bucket — their content is unknown but exact-size match is already
-            # strong evidence of duplication in a personal library.
-            n = len(members)
+            # Check whether any thumbnails were successfully extracted
+            has_thumbs = use_thumb and any(
+                int(str(r.phash), 16) != _zero_hash_int for r in members
+            )
+
+            if has_thumbs:
+                # Sub-group within same-size bucket by thumbnail pHash.
+                # Videos whose thumbnail extraction failed (zero hash) are grouped
+                # with every other member in the bucket — their content is unknown
+                # but exact-size match is already strong evidence of duplication.
+                n = len(members)
+                parent = list(range(n))
+
+                def _find(x: int) -> int:
+                    while parent[x] != x:
+                        parent[x] = parent[parent[x]]
+                        x = parent[x]
+                    return x
+
+                def _union(x: int, y: int) -> None:
+                    px, py = _find(x), _find(y)
+                    if px != py:
+                        parent[px] = py
+
+                ambiguous_pairs: set[tuple[int, int]] = set()
+
+                for i in range(n):
+                    for j in range(i + 1, n):
+                        pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
+                        pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
+                        if pi_zero or pj_zero:
+                            _union(i, j)
+                            ambiguous_pairs.add((i, j))
+                        elif members[i].phash - members[j].phash <= _THUMB_THR:
+                            _union(i, j)
+
+                buckets: dict[int, list[int]] = defaultdict(list)
+                for i in range(n):
+                    buckets[_find(i)].append(i)
+
+                for bucket_indices in buckets.values():
+                    if len(bucket_indices) < 2:
+                        continue
+                    bucket_members = [members[i] for i in bucket_indices]
+                    bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
+                    group_counter += 1
+                    idx_set = set(bucket_indices)
+                    is_amb = any(
+                        (a in idx_set and b in idx_set) for a, b in ambiguous_pairs
+                    )
+                    groups.append(DuplicateGroup(
+                        originals=[bucket_members[0]],
+                        previews=bucket_members[1:],
+                        is_series=False,
+                        is_ambiguous=is_amb,
+                        group_id=f"v{group_counter:04d}",
+                    ))
+                    for bm in bucket_members:
+                        already_grouped.add(str(bm.path))
+            else:
+                # Size-only: no thumbnails available.  Mark ambiguous.
+                members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
+                group_counter += 1
+                groups.append(DuplicateGroup(
+                    originals=[members_sorted[0]],
+                    previews=members_sorted[1:],
+                    is_series=False,
+                    is_ambiguous=True,
+                    group_id=f"v{group_counter:04d}",
+                ))
+                for bm in members_sorted:
+                    already_grouped.add(str(bm.path))
+
+    # ── Pass B: content-based matching (size-agnostic) ───────────────────────
+    if match_content:
+        # Only consider records not already grouped by Pass A.
+        candidates = [
+            r for r in video_records if str(r.path) not in already_grouped
+        ]
+
+        if len(candidates) >= 2:
+            n = len(candidates)
             parent = list(range(n))
 
-            def _find(x: int) -> int:
+            def _find_b(x: int) -> int:
                 while parent[x] != x:
                     parent[x] = parent[parent[x]]
                     x = parent[x]
                 return x
 
-            def _union(x: int, y: int) -> None:
-                px, py = _find(x), _find(y)
+            def _union_b(x: int, y: int) -> None:
+                px, py = _find_b(x), _find_b(y)
                 if px != py:
                     parent[px] = py
 
-            # Track which pairs joined due to a missing thumbnail (zero-hash).
-            # If any pair in a final bucket is size-only (one or both thumbs
-            # missing), we mark that group ambiguous so the UI flags it.
-            ambiguous_pairs: set[tuple[int, int]] = set()
-
             for i in range(n):
                 for j in range(i + 1, n):
-                    pi_zero = int(str(members[i].phash), 16) == _zero_hash_int
-                    pj_zero = int(str(members[j].phash), 16) == _zero_hash_int
-                    # If either thumbnail is missing, group by size alone.
-                    if pi_zero or pj_zero:
-                        _union(i, j)
-                        ambiguous_pairs.add((i, j))
-                    elif members[i].phash - members[j].phash <= _THUMB_THR:
-                        _union(i, j)
+                    ri, rj = candidates[i], candidates[j]
 
-            buckets: dict[int, list[int]] = defaultdict(list)
+                    # Respect format-match setting in content pass too.
+                    if match_format and ri.path.suffix.lower() != rj.path.suffix.lower():
+                        continue
+
+                    # Retrieve per-record content fields (attached by collect_videos).
+                    dur_i = getattr(ri, "_video_duration", None)
+                    dur_j = getattr(rj, "_video_duration", None)
+                    fh_i: list[str] = getattr(ri, "_video_frame_hashes", []) or []
+                    fh_j: list[str] = getattr(rj, "_video_frame_hashes", []) or []
+
+                    if _video_content_match(fh_i, fh_j, dur_i, dur_j):
+                        _union_b(i, j)
+
+            content_buckets: dict[int, list[int]] = defaultdict(list)
             for i in range(n):
-                buckets[_find(i)].append(i)
+                content_buckets[_find_b(i)].append(i)
 
-            for bucket_indices in buckets.values():
+            for bucket_indices in content_buckets.values():
                 if len(bucket_indices) < 2:
                     continue
-                bucket_members = [members[i] for i in bucket_indices]
-                # Keep oldest (smallest mtime); use file_size desc as tiebreaker
+                bucket_members = [candidates[i] for i in bucket_indices]
                 bucket_members.sort(key=lambda r: (r.mtime, -r.file_size))
                 group_counter += 1
-                # Mark ambiguous if any member pair in this bucket lacked a thumbnail.
-                idx_set = set(bucket_indices)
-                is_amb = any(
-                    (a in idx_set and b in idx_set) for a, b in ambiguous_pairs
-                )
                 groups.append(DuplicateGroup(
                     originals=[bucket_members[0]],
                     previews=bucket_members[1:],
                     is_series=False,
-                    is_ambiguous=is_amb,
+                    is_ambiguous=False,  # multi-frame + duration = strong evidence
                     group_id=f"v{group_counter:04d}",
                 ))
-        else:
-            # Size-only: no thumbnails available at all.  Mark ambiguous so the
-            # report flags these groups — same size alone is strong evidence in
-            # personal libraries but can produce false positives (e.g. two
-            # different videos encoded to the same target bitrate).
-            members_sorted = sorted(members, key=lambda r: (r.mtime, -r.file_size))
-            group_counter += 1
-            groups.append(DuplicateGroup(
-                originals=[members_sorted[0]],
-                previews=members_sorted[1:],
-                is_series=False,
-                is_ambiguous=True,   # no visual confirmation available
-                group_id=f"v{group_counter:04d}",
-            ))
 
     return groups

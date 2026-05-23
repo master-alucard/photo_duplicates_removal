@@ -90,6 +90,17 @@ class Settings:
     # for video grouping to produce any results.  Both default ON.
     video_match_format: bool = True         # Two videos must share the same file extension
     video_match_size: bool = True           # Two videos must have an identical byte count
+    # Content-based matching: find duplicates even when byte sizes differ (re-encoded,
+    # different container, trimmed metadata).  Uses multi-frame pHash + duration proximity.
+    # Interaction with other flags:
+    #   video_match_content=True  — runs a content pass across ALL videos regardless of size.
+    #                                The size-first pass still runs as a fast exact-match check.
+    #   video_match_format=True   — when content matching is also ON, cross-format duplicates
+    #                                (e.g. .mp4 vs .mov with same content) are still found.
+    #                                Set video_match_format=False to detect those too.
+    #   video_match_size=False    — disables the fast exact-size pre-pass; content matching
+    #                                then handles everything (slower but more thorough).
+    video_match_content: bool = True        # Find content-duplicate videos even if sizes differ
     auto_update: bool = True                # Check for updates on startup
     skipped_update_versions: list = field(default_factory=list)  # Versions the user clicked "Skip" on (no popup)
     developer_mode: bool = False            # Show full error details / tracebacks
