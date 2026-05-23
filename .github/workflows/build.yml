@@ -124,27 +124,18 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🎯 Major Accuracy Overhaul — Far Fewer False Matches
-            - **Night-sky and low-detail photos no longer wrongly grouped** — images that are mostly one colour (night shots, dark frames, near-blank scans) used to chain together because the perceptual hash collapses on them. A new low-detail detector switches to gradient comparison and disables rotation matching for these images, so visually different shots (the moon in different positions, for example) stay in separate groups.
-            - **Burst sequences split correctly** — consecutive shots of the same scene taken seconds apart are no longer merged into one oversized group; each shot keeps its own true duplicate.
-            - **RAW + JPEG pairing rebuilt** — cross-format duplicate detection is tighter and more accurate. RAW files now hash from the camera's embedded preview by default, which is dramatically faster and matches the companion JPEG precisely.
-            - **Automatic settings repair** — stale internal settings from older versions that could silently weaken detection are now corrected automatically on first launch.
+            ### 🎬 Video Previews & Smarter Video Matching
+            - **Video thumbnails now display everywhere** — the app bundles its own ffmpeg, so a real frame is shown for each video in both the in-app review screen and the HTML report, with no separate install required. Previously videos showed blank tiles unless you happened to have ffmpeg on your system.
+            - **Videos matched by content, not just size** — with frame extraction working, duplicate videos are confirmed by what they actually look like (thumbnail comparison) rather than file size alone. Identical videos saved under different names are correctly grouped.
+            - **Play badge and duration overlay** on video thumbnails, plus a clear "size match — verify" badge for the rare size-only case.
 
-            ### 🎬 Video Scanning
-            - **Much faster re-scans** — video fingerprints are cached, so rescanning a folder skips re-extracting frames from unchanged videos.
-            - **Parallel frame extraction** — videos are processed with bounded concurrency for a clear speed-up.
-            - **Robust against bad files** — corrupt, zero-byte and very short videos are handled gracefully instead of stalling the scan, with a per-file timeout to prevent hangs.
-            - **Video thumbnails in the report** — the HTML report now shows a real frame for each video instead of a placeholder.
+            ### 🎯 Detection & Workflow Fixes
+            - **More accurate cross-format (RAW+JPEG) grouping** — corrected the search radius and tightened the matching guards so fewer unrelated photos are grouped.
+            - **"Keep all formats" is now respected** even when series detection is turned off.
+            - **Trash move fixes** — previews already sitting in the trash folder are no longer re-moved, and the output folder is locked in before the report opens.
+            - **Report responsiveness** — progress feedback while the report is generated, plus a safeguard so a single stuck image can no longer hang report generation.
 
-            ### ✨ UI Polish & Animations
-            - **Live scan feedback** — a subtle pulsing indicator and a phase-transition highlight show the scan is working.
-            - **Smoother results** — the results summary slides in on completion, key stats are colour-tinted, and buttons give press feedback.
-            - **Animated tab indicator** and **keyboard focus rings** for clearer navigation.
-            - **Polished empty states** across the Scan, Compare and History tabs.
-
-            ### 🐛 Fixes
-            - Fixed a crash when the "update available" prompt appeared on startup.
-            - Scan progress row now renders correctly in both light and dark themes.
+            > Builds on the v1.1.30 accuracy overhaul (low-entropy night-sky fix, burst splitting, RAW+JPEG embedded-thumb pairing) and UI animation pass.
 
             ---
 
