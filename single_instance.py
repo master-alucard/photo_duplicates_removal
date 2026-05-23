@@ -309,12 +309,27 @@ class SingleInstance:
                     continue
                 except OSError:
                     break   # socket was closed by cleanup()
+                except Exception as exc:
+                    # Defensive: catch unexpected errors (e.g. SSL wrappers on
+                    # some AV products) so the listener thread never silently dies.
+                    logger.warning(
+                        "SingleInstance listener: unexpected error in accept() (%s); "
+                        "continuing.",
+                        exc,
+                    )
+                    continue
                 try:
                     data = conn.recv(64)
                     if _RAISE_MSG.strip() in data:
                         root.after(0, callback)
                 except OSError:
                     pass
+                except Exception as exc:
+                    logger.debug(
+                        "SingleInstance listener: unexpected error processing "
+                        "connection (%s).",
+                        exc,
+                    )
                 finally:
                     try:
                         conn.close()

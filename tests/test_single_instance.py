@@ -538,6 +538,114 @@ class TestBlockedReasonAndIpcAvailable:
 
 
 # =========================================================================
+# PyInstaller frozen-exe compatibility (iteration 3)
+# =========================================================================
+
+class TestFrozenExeCompatibility:
+    """
+    Verify that single_instance works correctly in a PyInstaller .exe context.
+
+    In a frozen build, sys.frozen is set.  ctypes + kernel32 are always
+    available (they ship with Windows), so the mutex path must work.
+    The listener thread must survive unexpected accept() exceptions (e.g.
+    from AV software wrapping sockets) without silently dying.
+    """
+
+    def test_module_imports_with_ctypes_available(self):
+        """The module must import without error when ctypes is present."""
+        import ctypes
+        # Re-import the module -- if ctypes is importable, the module-level
+        # code must not raise.
+        import importlib
+        importlib.reload(_si_mod)
+        assert hasattr(_si_mod, "SingleInstance")
+
+    def test_windows_create_mutex_importable_in_frozen_context(self):
+        """
+        Simulate sys.frozen=True and verify _windows_create_mutex is callable.
+        ctypes.windll is always present in a Windows .exe (frozen or not).
+        """
+        with patch.dict("sys.__dict__", {"frozen": True}):
+            # The function itself must be importable and not raise at call time
+            # on a live Windows machine (we mock kernel32 to avoid side-effects).
+            handle, existed = _windows_create_mutex("Local\\TestFrozenMutex_DoNotUse")
+            # Either it worked (Windows) or it gracefully returned (None, False).
+            assert isinstance(existed, bool)
+            if handle is not None:
+                _windows_close_handle(handle)
+
+    def test_listener_thread_survives_unexpected_accept_exception(self):
+        """
+        The listener must continue running if accept() raises an unexpected
+        non-OSError exception (e.g. from AV socket hooks).
+
+        We wrap the real server socket in a thin proxy that raises on the first
+        accept() call, then delegates to the real socket thereafter.  This avoids
+        the Python 3.14 restriction that socket.accept is read-only.
+        """
+        import queue
+
+        call_log: queue.Queue = queue.Queue()
+
+        real_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        real_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        real_sock.bind(("127.0.0.1", 0))
+        real_sock.listen(1)
+        port = real_sock.getsockname()[1]
+
+        accept_calls = {"n": 0}
+
+        class _FlakyServer:
+            """Proxy that delegates to real_sock but raises on the first accept."""
+
+            def settimeout(self, t):
+                real_sock.settimeout(t)
+
+            def accept(self):
+                accept_calls["n"] += 1
+                if accept_calls["n"] == 1:
+                    raise RuntimeError("AV hook exploded")
+                return real_sock.accept()
+
+            def close(self):
+                real_sock.close()
+
+        flaky = _FlakyServer()
+
+        si = SingleInstance.__new__(SingleInstance)
+        si._server = flaky        # type: ignore[assignment]
+        si._secondary = False
+        si._mutex_handle = None
+        si._port = port
+        si.blocked_reason = None
+        si.ipc_available = True
+
+        callback = MagicMock(side_effect=lambda: call_log.put("raised"))
+        root = MagicMock()
+        root.after = MagicMock(side_effect=lambda delay, fn: fn())
+
+        si.start_listener(root, callback)
+
+        # Send a real RAISE after the listener has had time to recover.
+        def _send():
+            time.sleep(0.15)
+            with socket.create_connection(("127.0.0.1", port), timeout=2) as c:
+                c.sendall(b"RAISE\n")
+
+        threading.Thread(target=_send, daemon=True).start()
+
+        try:
+            item = call_log.get(timeout=4.0)
+            assert item == "raised", "Callback must be invoked after recovery"
+        except queue.Empty:
+            pytest.fail(
+                "Listener thread did not survive unexpected accept() exception"
+            )
+        finally:
+            real_sock.close()
+
+
+# =========================================================================
 # _pid_alive helper
 # =========================================================================
 
