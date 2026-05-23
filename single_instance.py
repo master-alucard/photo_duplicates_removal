@@ -76,15 +76,23 @@ def _windows_create_mutex(name: str):
     try:
         import ctypes
         import ctypes.wintypes as wt
-        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        # use_last_error=True captures GetLastError reliably; calling
+        # kernel32.GetLastError() directly is unreliable because ctypes' own
+        # internal calls can reset the thread's last-error value first.
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
         ERROR_ALREADY_EXISTS = 0xB7
+
+        # Declare the signature so the 64-bit HANDLE return value is not
+        # truncated to a 32-bit c_int (the ctypes default restype).
+        kernel32.CreateMutexW.restype = wt.HANDLE
+        kernel32.CreateMutexW.argtypes = [wt.LPVOID, wt.BOOL, wt.LPCWSTR]
 
         handle = kernel32.CreateMutexW(
             None,    # default security attributes
             False,   # we don't take initial ownership
             name,
         )
-        last_err = kernel32.GetLastError()
+        last_err = ctypes.get_last_error()
 
         if handle == 0 or handle is None:
             # CreateMutexW failed entirely — log and let the app proceed.
@@ -113,7 +121,11 @@ def _windows_close_handle(handle) -> None:
         return
     try:
         import ctypes
-        ctypes.windll.kernel32.CloseHandle(handle)  # type: ignore[attr-defined]
+        import ctypes.wintypes as wt
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)  # type: ignore[attr-defined]
+        kernel32.CloseHandle.argtypes = [wt.HANDLE]
+        kernel32.CloseHandle.restype = wt.BOOL
+        kernel32.CloseHandle(handle)
     except Exception:
         pass
 

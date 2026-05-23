@@ -47,7 +47,22 @@ jobs:
         run: pip install pytest pytest-github-actions-annotate-failures
 
       - name: Run tests
-        run: python -m pytest tests/ -q --tb=short
+        shell: pwsh
+        run: |
+          $out = python -m pytest tests/ -q --tb=short 2>&1 | Out-String
+          $code = $LASTEXITCODE
+          Write-Host $out
+          if ($code -ne 0) {
+            # Surface the failing-test summary as a GitHub annotation so it is
+            # visible via the check-runs API without downloading the full log.
+            $lines = $out -split "`r?`n"
+            $fails = $lines | Select-String -Pattern "FAILED|ERROR|Error:|assert|Exception|Traceback" | Select-Object -First 30
+            $tail  = ($lines | Select-Object -Last 40) -join "%0A"
+            $fjoin = ($fails -join "%0A")
+            Write-Host "::error title=pytest failures::$fjoin"
+            Write-Host "::error title=pytest tail::$tail"
+          }
+          exit $code
 
       # ── 5. Bundle with PyInstaller ───────────────────────────────────────────
       - name: Build EXE with PyInstaller
