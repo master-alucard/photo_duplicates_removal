@@ -532,3 +532,141 @@ def test_ffmpeg_exe_result_is_cached():
     # get_ffmpeg_exe called only once despite two _ffmpeg_exe() calls
     assert fake_mod.get_ffmpeg_exe.call_count == 1
     scanner._FFMPEG_EXE_CACHE = None
+
+
+# ── _probe_video_duration_ffmpeg ──────────────────────────────────────────────
+
+def test_probe_duration_ffmpeg_parses_duration_from_stderr():
+    """_probe_video_duration_ffmpeg must parse the Duration line from ffmpeg stderr."""
+    from scanner import _probe_video_duration_ffmpeg
+
+    fake_result = MagicMock()
+    fake_result.returncode = 1  # ffmpeg -i always returns 1 (no output file)
+    fake_result.stderr = b"  Duration: 00:01:23.45, start: 0.000000, bitrate: 1234 kb/s\n"
+
+    with patch("subprocess.run", return_value=fake_result):
+        dur = _probe_video_duration_ffmpeg(Path("any.mp4"))
+
+    assert dur is not None
+    assert abs(dur - 83.45) < 0.01  # 1 min 23.45 s = 83.45 s
+
+
+def test_probe_duration_ffmpeg_returns_none_when_no_duration_line():
+    """Must return None when ffmpeg output has no Duration field."""
+    from scanner import _probe_video_duration_ffmpeg
+
+    fake_result = MagicMock()
+    fake_result.returncode = 1
+    fake_result.stderr = b"Invalid data found when processing input\n"
+
+    with patch("subprocess.run", return_value=fake_result):
+        dur = _probe_video_duration_ffmpeg(Path("bad.mp4"))
+
+    assert dur is None
+
+
+def test_probe_duration_ffmpeg_returns_none_on_exception():
+    """Must return None gracefully when ffmpeg subprocess raises."""
+    from scanner import _probe_video_duration_ffmpeg
+
+    with patch("subprocess.run", side_effect=FileNotFoundError):
+        dur = _probe_video_duration_ffmpeg(Path("any.mp4"))
+
+    assert dur is None
+
+
+# ── _extract_video_multi_frame_hashes ────────────────────────────────────────
+
+def test_extract_multi_frame_hashes_short_video_returns_empty():
+    """Videos shorter than 0.5 s must return [] (not enough frames to sample)."""
+    from scanner import _extract_video_multi_frame_hashes
+
+    result = _extract_video_multi_frame_hashes(Path("clip.mp4"), duration=0.3)
+    assert result == []
+
+
+def test_extract_multi_frame_hashes_returns_correct_count():
+    """Returns exactly len(positions) entries when batch extraction succeeds."""
+    from scanner import _extract_video_multi_frame_hashes
+    from PIL import Image as _PIL
+
+    # Return a small valid PNG image for every subprocess call
+    import io as _io
+    img = _PIL.new("RGB", (32, 32), (128, 64, 32))
+    buf = _io.BytesIO()
+    img.save(buf, format="PNG")
+    png_bytes = buf.getvalue()
+
+    # Simulate ffmpeg returning 5 concatenated PNG images
+    fake_result = MagicMock()
+    fake_result.returncode = 0
+    fake_result.stdout = png_bytes * 5  # 5 copies of the same PNG
+
+    with patch("subprocess.run", return_value=fake_result):
+        result = _extract_video_multi_frame_hashes(Path("clip.mp4"), duration=10.0)
+
+    # Should have extracted 5 non-empty hash strings
+    assert len(result) == 5
+    assert all(isinstance(h, str) for h in result)
+    assert all(h != "" for h in result)
+
+
+def test_extract_multi_frame_hashes_fallback_on_empty_stdout():
+    """When batch ffmpeg returns no bytes, fallback path is tried for each frame."""
+    from scanner import _extract_video_multi_frame_hashes
+
+    call_count = [0]
+
+    def _fake_run(args, **kwargs):
+        call_count[0] += 1
+        r = MagicMock()
+        r.returncode = 0
+        r.stdout = b""  # empty stdout triggers fallback on first call
+        return r
+
+    with patch("subprocess.run", side_effect=_fake_run):
+        result = _extract_video_multi_frame_hashes(Path("clip.mp4"), duration=10.0)
+
+    # Batch call + 5 fallback calls = 6 total
+    assert call_count[0] >= 1
+    # All entries are empty strings (no valid PNG data)
+    assert all(h == "" for h in result)
+
+
+def test_collect_videos_content_fields_attached_to_records(tmp_path):
+    """After collect_videos with video_match_content=True, records must carry
+    _video_duration and _video_frame_hashes attributes."""
+    from config import Settings
+    from scanner import collect_videos
+
+    vid = _make_fake_video(tmp_path, "clip.mp4")
+    settings = Settings(include_videos=True, video_use_thumb=True,
+                        video_match_content=True, recursive=False)
+
+    with patch("scanner._extract_video_thumb", return_value=None):
+        with patch("scanner._probe_video_duration_ffmpeg", return_value=5.0):
+            with patch("scanner._extract_video_multi_frame_hashes", return_value=["aabb"] * 5):
+                records = collect_videos(tmp_path, set(), settings)
+
+    assert len(records) == 1
+    rec = records[0]
+    assert getattr(rec, "_video_duration", "MISSING") == 5.0
+    assert getattr(rec, "_video_frame_hashes", "MISSING") == ["aabb"] * 5
+
+
+def test_collect_videos_content_fields_absent_when_content_disabled(tmp_path):
+    """With video_match_content=False, _video_frame_hashes should be empty (not extracted)."""
+    from config import Settings
+    from scanner import collect_videos
+
+    _make_fake_video(tmp_path, "clip.mp4")
+    settings = Settings(include_videos=True, video_use_thumb=True,
+                        video_match_content=False, recursive=False)
+
+    with patch("scanner._extract_video_thumb", return_value=None):
+        with patch("scanner._probe_video_duration_ffmpeg", return_value=5.0) as mock_dur:
+            records = collect_videos(tmp_path, set(), settings)
+
+    # Duration probe must NOT be called when content matching is disabled
+    mock_dur.assert_not_called()
+    assert len(records) == 1

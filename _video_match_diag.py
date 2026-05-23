@@ -1,7 +1,7 @@
 """
-_video_match_diag.py — Diagnostic script for video duplicate matching.
+_video_match_diag.py -- Diagnostic script for video duplicate matching.
 
-Scans E:\MEDIA\test\video and shows, for every pair:
+Scans E:/MEDIA/test/video and shows, for every pair:
   - file sizes
   - thumbnail pHash distance (single-frame, current logic)
   - duration (via bundled ffmpeg)
