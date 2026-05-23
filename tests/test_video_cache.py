@@ -111,7 +111,7 @@ def _make_fake_video(tmp_path: Path, name: str, size: int = 100) -> Path:
 
 
 def test_collect_videos_uses_cache_hit(tmp_path):
-    """Cache hit: _extract_video_thumb must NOT be called for an unchanged file."""
+    """Cache hit (v2 record with content fields): _extract_video_thumb must NOT be called."""
     from config import Settings
     from scanner import collect_videos
 
@@ -120,9 +120,14 @@ def test_collect_videos_uses_cache_hit(tmp_path):
     stored_hash = str(_nonzero_hash())
 
     lib = Library(tmp_path / "lib")
+    # Store a v2 cache entry that already has duration and frame_hashes populated.
     lib.save_video_cache(
         str(tmp_path),
-        {str(vid): VideoRecord(str(vid), st.st_mtime, st.st_size, stored_hash)},
+        {str(vid): VideoRecord(
+            str(vid), st.st_mtime, st.st_size, stored_hash,
+            duration=5.0,
+            frame_hashes=["aabbccdd11223344", "aabbccdd11223344"],
+        )},
     )
 
     settings = Settings(include_videos=True, video_use_thumb=True, recursive=False)
@@ -133,6 +138,34 @@ def test_collect_videos_uses_cache_hit(tmp_path):
     assert len(records) == 1
     # pHash must match the stored hash, not a zero hash
     assert str(records[0].phash) == stored_hash
+
+
+def test_collect_videos_v1_cache_triggers_reextraction(tmp_path):
+    """A v1 cache entry (no duration/frame_hashes) triggers re-extraction so
+    content fields are populated for content-based matching."""
+    from config import Settings
+    from scanner import collect_videos
+
+    vid = _make_fake_video(tmp_path, "test.mp4")
+    st = vid.stat()
+    stored_hash = str(_nonzero_hash())
+
+    lib = Library(tmp_path / "lib")
+    # v1-style entry: no duration or frame_hashes
+    lib.save_video_cache(
+        str(tmp_path),
+        {str(vid): VideoRecord(str(vid), st.st_mtime, st.st_size, stored_hash)},
+    )
+
+    settings = Settings(include_videos=True, video_use_thumb=True,
+                        video_match_content=True, recursive=False)
+    with patch("scanner._extract_video_thumb", return_value=None) as mock_extract:
+        with patch("scanner._probe_video_duration_ffmpeg", return_value=None):
+            records = collect_videos(tmp_path, set(), settings, library=lib)
+
+    # v1 entry lacks content fields → extraction must be triggered
+    mock_extract.assert_called_once()
+    assert len(records) == 1
 
 
 def test_collect_videos_cache_miss_calls_extraction(tmp_path):
