@@ -338,6 +338,82 @@ def _darken_color(hex_color: str) -> str:
         return hex_color
 
 
+def _composite_duration_label(
+    img: "PILImage.Image", duration_s: float
+) -> "PILImage.Image":
+    """Draw a semi-transparent duration label (e.g. '0:42') in the top-left corner.
+
+    Returns the composited image.  Never raises; returns *img* unchanged on any
+    error (e.g. when Pillow ImageDraw is unavailable).
+    """
+    try:
+        from PIL import ImageDraw
+        w, h = img.size
+        minutes = int(duration_s // 60)
+        seconds = int(duration_s % 60)
+        label = f"{minutes}:{seconds:02d}"
+
+        font_size = max(10, min(w, h) // 8)
+        # Approximate char width to size the pill background
+        char_w = int(font_size * 0.6)
+        pad_x, pad_y = 4, 2
+        pill_w = len(label) * char_w + pad_x * 2
+        pill_h = font_size + pad_y * 2
+
+        overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        d.rounded_rectangle(
+            [4, 4, 4 + pill_w, 4 + pill_h],
+            radius=3, fill=(0, 0, 0, 160),
+        )
+        d.text((4 + pad_x, 4 + pad_y), label, fill=(255, 255, 255, 230))
+
+        base = img.convert("RGBA")
+        base.alpha_composite(overlay)
+        return base.convert("RGB")
+    except Exception:
+        return img
+
+
+def _composite_play_badge(img: "PILImage.Image") -> "PILImage.Image":
+    """Draw a semi-transparent ▶ play badge in the bottom-right corner of *img*.
+
+    Returns the composited image.  Never raises; returns *img* unchanged on any
+    error (e.g. when Pillow ImageDraw is unavailable).
+    """
+    try:
+        from PIL import ImageDraw, ImageFont
+        w, h = img.size
+        badge_size = max(18, min(w, h) // 5)
+        margin = max(4, badge_size // 4)
+        bx = w - badge_size - margin
+        by = h - badge_size - margin
+
+        # Semi-transparent dark circle
+        overlay = PILImage.new("RGBA", (w, h), (0, 0, 0, 0))
+        d = ImageDraw.Draw(overlay)
+        d.ellipse(
+            [bx, by, bx + badge_size, by + badge_size],
+            fill=(0, 0, 0, 140),
+        )
+        # ▶ triangle: centred inside the circle
+        cx = bx + badge_size // 2
+        cy = by + badge_size // 2
+        r = badge_size // 3
+        pts = [
+            (cx - r // 2, cy - r),
+            (cx - r // 2, cy + r),
+            (cx + r, cy),
+        ]
+        d.polygon(pts, fill=(255, 255, 255, 220))
+
+        base = img.convert("RGBA")
+        base.alpha_composite(overlay)
+        return base.convert("RGB")
+    except Exception:
+        return img
+
+
 def _info_btn(parent: tk.Widget, key: str, bg: str = _M_SURFACE) -> tk.Button:
     """Small ⓘ info button (Material-style, same bg as parent)."""
     btn = tk.Button(
@@ -380,6 +456,16 @@ class ReportViewer(tk.Frame):
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
         self._placeholder_cache: dict[tuple, ImageTk.PhotoImage] = {}  # (size, bg) → photo
+
+        # In-memory cache for extracted video frames.  Keyed by Path so paging
+        # back and forth never re-invokes ffmpeg for the same file within a
+        # single viewer session.  Maps path → PIL Image (RGB) or None when
+        # extraction was attempted but failed (avoids repeated failed attempts).
+        self._video_frame_cache: dict[Path, "Optional[PILImage.Image]"] = {}
+
+        # In-memory cache for video durations (seconds).  Maps path → float or
+        # None when ffprobe failed / was not called.
+        self._video_duration_cache: dict[Path, "Optional[float]"] = {}
 
         # Per-group: include checkbox, status, border-frame ref
         # (pre-created for ALL groups so page changes don't lose state)
@@ -611,10 +697,15 @@ class ReportViewer(tk.Frame):
         except Exception:
             pass
 
-    def _get_placeholder(self, size: int, bg: str) -> "ImageTk.PhotoImage":
-        """Return a cached solid-colour placeholder image of the given pixel size.
-        Cached separately from _photo_refs so page changes don't destroy them."""
-        key = (size, bg)
+    def _get_placeholder(self, size: int, bg: str, video: bool = False) -> "ImageTk.PhotoImage":
+        """Return a cached placeholder image of the given pixel size.
+
+        When *video* is True the placeholder has a faint ▶ glyph drawn over it
+        so video tiles are visually distinct from image tiles even before the
+        frame arrives (or when ffmpeg is unavailable).
+        Cached separately from _photo_refs so page changes don't destroy them.
+        """
+        key = (size, bg, video)
         ph = self._placeholder_cache.get(key)
         if ph is not None:
             return ph
@@ -626,6 +717,24 @@ class ReportViewer(tk.Frame):
             except Exception:
                 r, g, b = 240, 240, 240
             img = PILImage.new("RGB", (size, size), (r, g, b))
+            if video:
+                try:
+                    from PIL import ImageDraw
+                    d = ImageDraw.Draw(img)
+                    cx, cy = size // 2, size // 2
+                    tri_r = max(8, size // 4)
+                    pts = [
+                        (cx - tri_r // 2, cy - tri_r),
+                        (cx - tri_r // 2, cy + tri_r),
+                        (cx + tri_r, cy),
+                    ]
+                    # Draw a faint triangle in a contrasting dark/light shade
+                    fill_r = max(0, r - 40)
+                    fill_g = max(0, g - 40)
+                    fill_b = max(0, b - 40)
+                    d.polygon(pts, fill=(fill_r, fill_g, fill_b))
+                except Exception:
+                    pass
             ph = ImageTk.PhotoImage(img)
         else:
             ph = tk.PhotoImage(width=size, height=size)
@@ -724,6 +833,17 @@ class ReportViewer(tk.Frame):
         if group.is_series:
             _tklabel(
                 head, bg=_M_PURPLE, fg="#FFFFFF", text=" SERIES — all kept ",
+                font=("Segoe UI", 8, "bold"),
+                padx=6, pady=2,
+            ).pack(side=tk.LEFT, padx=4)
+
+        if getattr(group, "is_ambiguous", False):
+            _amb_text = (
+                " ≈ SIZE MATCH — verify " if _is_video_group
+                else " ≈ UNCERTAIN — verify "
+            )
+            _tklabel(
+                head, bg=_M_WARNING, fg="#FFFFFF", text=_amb_text,
                 font=("Segoe UI", 8, "bold"),
                 padx=6, pady=2,
             ).pack(side=tk.LEFT, padx=4)
@@ -944,13 +1064,17 @@ class ReportViewer(tk.Frame):
         tile.configure(bg=bg)
         tile.grid(row=row, column=col, padx=4, pady=4, sticky=tk.NW)
 
-        # Thumbnail with placeholder image (fixed pixel size prevents layout reflow)
-        _placeholder = self._get_placeholder(max_thumb, bg)
+        # Thumbnail with placeholder image (fixed pixel size prevents layout reflow).
+        # Video records get a placeholder with a faint ▶ glyph so the tile is
+        # recognisable as a video even before the frame arrives (or if ffmpeg
+        # is unavailable and the frame never arrives).
+        _is_video_tile = getattr(rec, "is_video", False)
+        _placeholder = self._get_placeholder(max_thumb, bg, video=_is_video_tile)
         thumb_lbl = tk.Label(tile, image=_placeholder)
         thumb_lbl.configure(bg=bg)
         thumb_lbl.pack()
         self._load_thumbnail_async(rec.path, thumb_lbl, max_thumb, grayscale=trashed,
-                                   is_video=getattr(rec, "is_video", False))
+                                   is_video=_is_video_tile)
 
         if trashed:
             # ── Trashed tile: show badge, gray out, disable checkbox ─────
@@ -1006,9 +1130,14 @@ class ReportViewer(tk.Frame):
 
                 _info_btn(cb_frame, "different_image", bg=bg).pack(side=tk.LEFT, padx=0)
 
-                # "Different image" badge (shown when unchecked)
+                # "Different image" badge (shown when unchecked).
+                # For video tiles, clarify that the match was by file size only.
+                _diff_text = (
+                    "≠ different video" if getattr(rec, "is_video", False)
+                    else "≠ different image"
+                )
                 diff_badge = _tklabel(
-                    tile, bg=bg, fg=_M_WARNING, text="≠ different image",
+                    tile, bg=bg, fg=_M_WARNING, text=_diff_text,
                     font=("Segoe UI", 8, "italic"),
                 )
                 def _toggle_badge(*_):
@@ -1096,66 +1225,60 @@ class ReportViewer(tk.Frame):
         are marshalled to the main thread via label.after(0, ...) so they never
         race against the Tcl interpreter.
         """
-        def _load() -> None:
-            if not _PIL_AVAILABLE:
-                return
-            if batch_id != self._thumb_batch_id:
-                return
-            with _THUMB_SEMAPHORE:
-                if batch_id != self._thumb_batch_id:
-                    return
-                # ── Decode image/video frame in background — no Tk calls here ──
-                img_copy = None
-                try:
-                    # Check if this is a video file (try PIL first; fall back to
-                    # video frame extraction when PIL raises an exception)
-                    _opened_as_image = False
+        def _build_video_img(frame: "Optional[PILImage.Image]") -> "Optional[PILImage.Image]":
+            """Resize, color-correct, and composite overlays for a video frame.
+
+            Returns the composited PIL Image, or None when *frame* is None.
+            Always runs in the background thread — no Tk calls.
+            """
+            if frame is None:
+                return None
+            try:
+                work = frame.copy()
+                work.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                if grayscale:
+                    work = work.convert("L").convert("RGB")
+                elif work.mode not in ("RGB", "RGBA"):
+                    work = work.convert("RGB")
+                if not grayscale:
+                    # Duration overlay (top-left) — probe once, cache result
+                    if path not in self._video_duration_cache:
+                        try:
+                            from scanner import _probe_video_duration
+                            self._video_duration_cache[path] = _probe_video_duration(path)
+                        except Exception:
+                            self._video_duration_cache[path] = None
+                    dur = self._video_duration_cache.get(path)
+                    if dur is not None and dur > 0:
+                        work = _composite_duration_label(work, dur)
+                    # Play badge (bottom-right)
+                    work = _composite_play_badge(work)
+                return work
+            except Exception:
+                return None
+
+        def _dispatch_img(img_copy: "Optional[PILImage.Image]") -> None:
+            """Schedule the appropriate Tk callback (set image or show error text).
+
+            Must only be called from the background thread — uses label.after(0).
+            """
+            if img_copy is None:
+                _err_text = "▶ preview\nunavailable" if is_video else "[no preview]"
+                def _set_err(lbl=label, bid=batch_id, txt=_err_text):
+                    if bid != self._thumb_batch_id:
+                        return
                     try:
-                        with PILImage.open(path) as img:
-                            img.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                            if grayscale:
-                                img = img.convert("L").convert("RGB")
-                            elif img.mode not in ("RGB", "RGBA"):
-                                img = img.convert("RGB")
-                            img_copy = img.copy()
-                            _opened_as_image = True
+                        if lbl.winfo_exists():
+                            lbl.configure(text=txt, fg=_M_TEXT3,
+                                          font=("Segoe UI", 8), wraplength=100,
+                                          justify="center")
                     except Exception:
                         pass
-
-                    if not _opened_as_image and is_video:
-                        # Extract a frame only when this is a known video record.
-                        # Never call ffmpeg for ordinary images that PIL failed to
-                        # open (e.g. truncated files) — that would block the
-                        # semaphore for up to 15 s per file.
-                        try:
-                            from scanner import _extract_video_thumb
-                            frame = _extract_video_thumb(path)
-                            if frame is not None:
-                                frame.thumbnail((max_px, max_px), PILImage.LANCZOS)
-                                if grayscale:
-                                    frame = frame.convert("L").convert("RGB")
-                                img_copy = frame.copy()
-                        except Exception:
-                            pass
+                try:
+                    label.after(0, _set_err)
                 except Exception:
                     pass
-
-                # ── All Tk operations on the main thread via after(0) ───────
-                if img_copy is None:
-                    def _set_err(lbl=label, bid=batch_id):
-                        if bid != self._thumb_batch_id:
-                            return
-                        try:
-                            if lbl.winfo_exists():
-                                lbl.configure(text="[no preview]", fg=_M_TEXT3)
-                        except Exception:
-                            pass
-                    try:
-                        label.after(0, _set_err)
-                    except Exception:
-                        pass
-                    return
-
+            else:
                 def _set_img(pil_img=img_copy, lbl=label, bid=batch_id):
                     if bid != self._thumb_batch_id:
                         return
@@ -1171,6 +1294,54 @@ class ReportViewer(tk.Frame):
                     label.after(0, _set_img)
                 except Exception:
                     pass
+
+        def _load() -> None:
+            if not _PIL_AVAILABLE:
+                return
+            if batch_id != self._thumb_batch_id:
+                return
+
+            if is_video:
+                # ── Fast path: cache hit — skip the semaphore entirely ────────
+                # Cache holds the raw extracted frame (or None if extraction failed).
+                # Processing (resize + overlays) is cheap and doesn't need the slot.
+                if path in self._video_frame_cache:
+                    _dispatch_img(_build_video_img(self._video_frame_cache[path]))
+                    return
+
+                # ── Cache miss: acquire semaphore, call ffmpeg/OpenCV ─────────
+                with _THUMB_SEMAPHORE:
+                    if batch_id != self._thumb_batch_id:
+                        return
+                    # Double-check after acquiring the lock in case a concurrent
+                    # thread for the same path already ran extraction.
+                    if path in self._video_frame_cache:
+                        frame = self._video_frame_cache[path]
+                    else:
+                        try:
+                            from scanner import _extract_video_thumb
+                            frame = _extract_video_thumb(path)
+                        except Exception:
+                            frame = None
+                        self._video_frame_cache[path] = frame
+                    _dispatch_img(_build_video_img(frame))
+            else:
+                # ── Standard image path — always needs the semaphore ─────────
+                with _THUMB_SEMAPHORE:
+                    if batch_id != self._thumb_batch_id:
+                        return
+                    img_copy = None
+                    try:
+                        with PILImage.open(path) as img:
+                            img.thumbnail((max_px, max_px), PILImage.LANCZOS)
+                            if grayscale:
+                                img = img.convert("L").convert("RGB")
+                            elif img.mode not in ("RGB", "RGBA"):
+                                img = img.convert("RGB")
+                            img_copy = img.copy()
+                    except Exception:
+                        pass
+                    _dispatch_img(img_copy)
 
         threading.Thread(target=_load, daemon=True).start()
 
@@ -1359,6 +1530,24 @@ class ReportViewer(tk.Frame):
             trash_dir = Path(out) / "trash"
         else:
             trash_dir = paths_to_trash[0].parent / "trash"
+
+        # Filter out files already inside trash_dir — they were moved by move_groups()
+        # during a non-dry-run scan (preview.path is mutated in-place by mover.py).
+        # Moving them again would re-trash already-trashed files to trash/_1 etc.
+        try:
+            _trash_dir_resolved = trash_dir.resolve()
+            paths_to_trash = [
+                p for p in paths_to_trash
+                if not p.resolve().is_relative_to(_trash_dir_resolved)
+            ]
+        except Exception:
+            pass  # is_relative_to is Python 3.9+; skip guard on older builds
+
+        if not paths_to_trash:
+            self._show_results_panel(0, 0, [],
+                note="Files were already moved to trash during the scan.\n"
+                     "Nothing left to move.")
+            return
 
         # Validate that the output drive is accessible before starting the move
         _anchor = trash_dir.anchor  # e.g. "G:\\" on Windows, "/" on Unix

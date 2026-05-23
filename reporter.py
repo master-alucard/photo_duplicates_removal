@@ -8,7 +8,8 @@ from __future__ import annotations
 import base64
 import html
 import io
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout
+import time as _time
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FutTimeout, wait as _wait, FIRST_COMPLETED as _FIRST_COMPLETED
 from pathlib import Path
 from typing import List
 
@@ -120,6 +121,7 @@ def generate_report(
     source_folder: Path,
     total_scanned: int,
     settings: Settings,
+    progress_cb=None,   # Optional[Callable[[str, int, int, str], None]]
 ) -> Path:
     report_path = output_folder / "report.html"
 
@@ -147,15 +149,46 @@ def generate_report(
         _orig_jobs = [(r.path, 280) for g in groups for r in g.originals]
         _prev_jobs = [(r.path, 160) for g in groups for r in g.previews]
         _all_jobs: list[tuple[Path, int]] = _orig_jobs + _prev_jobs
+        _total_thumbs = len(_all_jobs)
+
+        if progress_cb and _total_thumbs > 0:
+            progress_cb("Generating thumbnails…", 0, _total_thumbs, "Report")
 
         _pool = ThreadPoolExecutor(max_workers=4)
-        _futs = {_pool.submit(_any_thumb_b64, p, px): (p, px) for p, px in _all_jobs}
-        for _fut, _key in _futs.items():
-            try:
-                _b64[_key] = _fut.result(timeout=_THUMB_TIMEOUT_S)
-            except Exception:
-                # TimeoutError (hung PIL) or any other failure → blank placeholder
-                _b64[_key] = ""
+        # Map future → (path, max_px) key so results can be stored as futures finish.
+        _futs: dict = {_pool.submit(_any_thumb_b64, p, px): (p, px) for p, px in _all_jobs}
+
+        # Drain futures using wait(FIRST_COMPLETED, timeout=_THUMB_TIMEOUT_S) so:
+        #   a) futures that finish quickly return immediately without waiting 10 s;
+        #   b) a single stuck PIL decode (e.g. corrupted TIFF) causes at most one
+        #      _THUMB_TIMEOUT_S stall before we move on — not a per-future chain.
+        _pending = set(_futs.keys())
+        _done_count = 0
+        while _pending:
+            _done, _pending = _wait(_pending, timeout=_THUMB_TIMEOUT_S,
+                                    return_when=_FIRST_COMPLETED)
+            if not _done:
+                # Nothing finished within the timeout window → cancel remaining stubs
+                # (best-effort; stuck threads cannot be interrupted but we stop waiting)
+                for _f in _pending:
+                    _f.cancel()
+                    _b64[_futs[_f]] = ""
+                _done_count += len(_pending)
+                _pending = set()
+            for _fut in _done:
+                _key = _futs[_fut]
+                try:
+                    _b64[_key] = _fut.result(timeout=0)
+                except Exception:
+                    _b64[_key] = ""
+                _done_count += 1
+                if progress_cb and _total_thumbs > 0 and (
+                    _done_count % 10 == 0 or _done_count == _total_thumbs
+                ):
+                    progress_cb(
+                        f"Generating thumbnails… {_done_count}/{_total_thumbs}",
+                        _done_count, _total_thumbs, "Report",
+                    )
         # Don't wait for threads that timed out; they'll be GC'd with the pool.
         _pool.shutdown(wait=False)
 

@@ -20,6 +20,14 @@ try:
 except Exception:
     ttkb_datas = []
 
+# ── imageio-ffmpeg: bundle the static ffmpeg.exe used for video frame extraction
+# Without this the shipped app cannot decode video frames (no previews, video
+# duplicate detection falls back to size-only matching).
+try:
+    ffmpeg_datas = collect_data_files('imageio_ffmpeg')
+except Exception:
+    ffmpeg_datas = []
+
 # ── Analysis ──────────────────────────────────────────────────────────────────
 a = Analysis(
     ['main.py'],
@@ -28,6 +36,7 @@ a = Analysis(
     datas=[
         *rawpy_datas,
         *ttkb_datas,
+        *ffmpeg_datas,
         ('assets/app.ico', 'assets'),   # app icon used by the About tab / installer
     ],
     hiddenimports=[
@@ -46,6 +55,8 @@ a = Analysis(
         'rawpy._rawpy',
         # ttkbootstrap theme engine
         'ttkbootstrap',
+        # imageio-ffmpeg — resolves the bundled ffmpeg.exe for video frames
+        'imageio_ffmpeg',
         # scipy / numpy sub-modules sometimes missed by the auto-analyser
         'scipy.special._ufuncs_cxx',
         'scipy.linalg.cython_blas',
