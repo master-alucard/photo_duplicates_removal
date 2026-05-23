@@ -124,18 +124,17 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🎬 Video Previews & Smarter Video Matching
-            - **Video thumbnails now display everywhere** — the app bundles its own ffmpeg, so a real frame is shown for each video in both the in-app review screen and the HTML report, with no separate install required. Previously videos showed blank tiles unless you happened to have ffmpeg on your system.
-            - **Videos matched by content, not just size** — with frame extraction working, duplicate videos are confirmed by what they actually look like (thumbnail comparison) rather than file size alone. Identical videos saved under different names are correctly grouped.
-            - **Play badge and duration overlay** on video thumbnails, plus a clear "size match — verify" badge for the rare size-only case.
+            ### 🎬 Find Re-encoded & Resized Duplicate Videos
+            - **Content-based video matching** — duplicate videos are now found even when their file sizes differ (re-encoded, different container, trimmed metadata). The app samples several frames across each video and matches on what they actually look like, gated by a duration check to avoid false positives. Previously only byte-identical copies were detected.
+            - **Faster re-scans** — video fingerprints are cached, and the sampled frames are extracted in a single pass per file.
 
-            ### 🎯 Detection & Workflow Fixes
-            - **More accurate cross-format (RAW+JPEG) grouping** — corrected the search radius and tightened the matching guards so fewer unrelated photos are grouped.
-            - **"Keep all formats" is now respected** even when series detection is turned off.
-            - **Trash move fixes** — previews already sitting in the trash folder are no longer re-moved, and the output folder is locked in before the report opens.
-            - **Report responsiveness** — progress feedback while the report is generated, plus a safeguard so a single stuck image can no longer hang report generation.
+            ### 🛡️ Reliable Single-Instance
+            - **No more stacked windows** — launching the app again now reliably focuses the existing window instead of opening another copy. The previous guard could be defeated by a firewall or security product blocking a local socket; it now uses a Windows kernel mutex that doesn't depend on networking.
 
-            > Builds on the v1.1.30 accuracy overhaul (low-entropy night-sky fix, burst splitting, RAW+JPEG embedded-thumb pairing) and UI animation pass.
+            ### 🐛 Fixes
+            - **Progress no longer looks stuck after a large scan** — on big folders the progress bar and label could stay on "Generating report…" at ~96% even though the scan had finished and the buttons were unlocked. The final "done" state now sticks.
+
+            > Builds on v1.1.31 (in-app video thumbnails, bundled ffmpeg) and the v1.1.30 accuracy overhaul.
 
             ---
 
