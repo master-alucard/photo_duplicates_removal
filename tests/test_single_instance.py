@@ -58,6 +58,8 @@ def _build_si_detect_only(platform: str, mutex_factory=None, posix_first: bool =
     si._server = None
     si._secondary = False
     si._mutex_handle = None
+    si.blocked_reason = None
+    si.ipc_available = False
 
     with ExitStack() as stack:
         stack.enter_context(patch("sys.platform", platform))
@@ -120,6 +122,8 @@ class TestWindowsMutexDetection:
             si_a._server = None
             si_a._secondary = False
             si_a._mutex_handle = None
+            si_a.blocked_reason = None
+            si_a.ipc_available = False
             with patch("sys.platform", "win32"), patch.object(si_a, "_try_bind"):
                 si_a._detect()
 
@@ -131,6 +135,8 @@ class TestWindowsMutexDetection:
             si_c._server = None
             si_c._secondary = False
             si_c._mutex_handle = None
+            si_c.blocked_reason = None
+            si_c.ipc_available = False
             with patch("sys.platform", "win32"), patch.object(si_c, "_try_bind"):
                 si_c._detect()
 
@@ -295,6 +301,8 @@ class TestSignalAndExit:
         si._server = None
         si._secondary = True
         si._mutex_handle = None
+        si.blocked_reason = "named mutex already held"
+        si.ipc_available = False
         return si
 
     def test_exits_with_code_0_when_socket_blocked(self):
@@ -439,6 +447,94 @@ class TestRaiseWindowIPC:
 
         server_sock.close()
         assert callback.called, "Callback must be invoked after receiving RAISE signal"
+
+
+# =========================================================================
+# blocked_reason and ipc_available attributes (iteration 2)
+# =========================================================================
+
+class TestBlockedReasonAndIpcAvailable:
+
+    def test_first_instance_has_no_blocked_reason(self):
+        si = _build_si_detect_only("win32", mutex_factory=_make_mutex_factory(False, 1))
+        assert si.blocked_reason is None
+
+    def test_secondary_instance_has_blocked_reason(self):
+        si = _build_si_detect_only("win32", mutex_factory=_make_mutex_factory(True, 1))
+        assert si.blocked_reason is not None
+        assert "mutex" in si.blocked_reason.lower() or "already" in si.blocked_reason.lower()
+
+    def test_posix_secondary_blocked_reason_mentions_lock_file(self):
+        si = _build_si_detect_only("linux", posix_first=False)
+        assert si.blocked_reason is not None
+        assert "lock" in si.blocked_reason.lower() or "process" in si.blocked_reason.lower()
+
+    def test_ipc_available_false_when_bind_fails(self):
+        firewall_err = OSError(errno.EACCES, "Permission denied")
+        with (
+            patch("sys.platform", "win32"),
+            patch.object(
+                _si_mod, "_windows_create_mutex",
+                side_effect=_make_mutex_factory(False, handle=1),
+            ),
+            patch("socket.socket.bind", side_effect=firewall_err),
+        ):
+            si = SingleInstance(port=51423)
+
+        assert si.ipc_available is False
+
+    def test_ipc_available_true_when_bind_succeeds(self):
+        # Use port=0 to let the OS pick a free ephemeral port.
+        with (
+            patch("sys.platform", "win32"),
+            patch.object(
+                _si_mod, "_windows_create_mutex",
+                side_effect=_make_mutex_factory(False, handle=1),
+            ),
+        ):
+            si = SingleInstance(port=0)
+
+        assert si.ipc_available is True
+        si.cleanup()
+
+    def test_signal_and_exit_logs_blocked_reason(self, caplog):
+        """blocked_reason should appear in the WARNING log when exiting."""
+        import logging
+
+        si = SingleInstance.__new__(SingleInstance)
+        si._port = 51423
+        si._server = None
+        si._secondary = True
+        si._mutex_handle = None
+        si.blocked_reason = "named mutex 'Local\\Test' is already held by another process"
+        si.ipc_available = False
+
+        with (
+            patch("socket.create_connection", side_effect=OSError("blocked")),
+            caplog.at_level(logging.WARNING, logger="single_instance"),
+            pytest.raises(SystemExit),
+        ):
+            si.signal_and_exit()
+
+        assert any("named mutex" in r.message for r in caplog.records), (
+            "blocked_reason text should appear in the WARNING log"
+        )
+
+    def test_start_listener_logs_info_when_socket_unavailable(self, caplog):
+        """When IPC is unavailable, start_listener logs at INFO level."""
+        import logging
+
+        si = SingleInstance.__new__(SingleInstance)
+        si._server = None
+        si._secondary = False
+        si._mutex_handle = None
+        si.ipc_available = False
+        si.blocked_reason = None
+
+        with caplog.at_level(logging.INFO, logger="single_instance"):
+            si.start_listener(MagicMock(), MagicMock())
+
+        assert any("IPC listener not started" in r.message for r in caplog.records)
 
 
 # =========================================================================

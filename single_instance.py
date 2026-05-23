@@ -222,13 +222,26 @@ class SingleInstance:
     The loopback TCP socket is retained as a best-effort IPC channel to raise
     the existing window when a second launch is attempted.  A socket failure
     does not affect detection — the mutex/lock-file result is authoritative.
+
+    Attributes
+    ----------
+    blocked_reason : str | None
+        Human-readable explanation of why this instance is considered secondary
+        (set only when is_secondary() is True).  Callers may display this in a
+        messagebox or log it before calling signal_and_exit().
+    ipc_available : bool
+        True when the raise-window IPC socket is bound and listening.  False
+        means the first window will not auto-raise on a second launch attempt
+        (acceptable degradation — does not affect single-instance correctness).
     """
 
     def __init__(self, port: int = _PORT) -> None:
-        self._port        = port
+        self._port          = port
         self._server: Optional[socket.socket] = None
-        self._secondary   = False
-        self._mutex_handle = None   # Windows only
+        self._secondary     = False
+        self._mutex_handle  = None   # Windows only
+        self.blocked_reason: Optional[str] = None
+        self.ipc_available  = False
 
         self._detect()     # sets self._secondary via mutex / lock file
         self._try_bind()   # best-effort IPC socket (does NOT affect _secondary)
@@ -248,12 +261,16 @@ class SingleInstance:
         The signal (loopback TCP) is best-effort.  If it fails for any reason
         (Firewall, socket error, listener not yet up) we still exit cleanly.
         """
-        logger.info(
-            "SingleInstance: secondary instance detected — signalling first instance."
+        reason = self.blocked_reason or "another instance is already running"
+        logger.warning(
+            "SingleInstance: blocked — %s. "
+            "Attempting to raise the existing window and exiting.",
+            reason,
         )
         try:
             with socket.create_connection((_HOST, self._port), timeout=_TIMEOUT) as s:
                 s.sendall(_RAISE_MSG)
+            logger.debug("SingleInstance: raise-signal sent to first instance.")
         except OSError as exc:
             # Firewall/socket unavailable — first window won't auto-raise, but
             # this is acceptable degradation.  We still exit below.
@@ -269,8 +286,18 @@ class SingleInstance:
         root,                      # tkinter.Tk root window
         callback: Callable,        # called on the main thread when signal arrives
     ) -> None:
-        """Start a daemon thread that calls *callback* via root.after when signalled."""
+        """Start a daemon thread that calls *callback* via root.after when signalled.
+
+        If the IPC socket is unavailable (bind failed at startup), this method
+        logs a diagnostic at INFO level and returns without error.  Single-instance
+        detection is still active; only the auto-raise behaviour is disabled.
+        """
         if self._server is None:
+            logger.info(
+                "SingleInstance: IPC listener not started (socket unavailable). "
+                "The existing window will not be raised automatically on a second "
+                "launch attempt, but duplicate instances will still be blocked."
+            )
             return
 
         def _listen() -> None:
@@ -326,17 +353,18 @@ class SingleInstance:
         """
         Determine whether this is the first or a secondary instance.
 
-        Sets self._secondary.  Does not touch the IPC socket.
+        Sets self._secondary and self.blocked_reason.  Does not touch the IPC socket.
         """
         if sys.platform == "win32":
             handle, already_existed = _windows_create_mutex(_MUTEX_NAME)
             self._mutex_handle = handle
             if already_existed:
                 self._secondary = True
-                logger.info(
-                    "SingleInstance: mutex '%s' already owned — this is a secondary "
-                    "instance.",
-                    _MUTEX_NAME,
+                self.blocked_reason = (
+                    f"named mutex '{_MUTEX_NAME}' is already held by another process"
+                )
+                logger.warning(
+                    "SingleInstance: %s.", self.blocked_reason
                 )
             else:
                 logger.debug(
@@ -354,10 +382,11 @@ class SingleInstance:
 
             if not is_first:
                 self._secondary = True
-                logger.info(
-                    "SingleInstance: lock file '%s' held by another process — "
-                    "this is a secondary instance.",
-                    lock_path,
+                self.blocked_reason = (
+                    f"lock file '{lock_path}' is held by another process"
+                )
+                logger.warning(
+                    "SingleInstance: %s.", self.blocked_reason
                 )
 
     def _try_bind(self) -> None:
@@ -379,8 +408,14 @@ class SingleInstance:
             sock.bind((_HOST, self._port))
             sock.listen(5)
             self._server = sock
+            self.ipc_available = True
+            logger.debug(
+                "SingleInstance: IPC socket bound on %s:%d.",
+                _HOST, self._port,
+            )
         except OSError as exc:
             sock.close()
+            self.ipc_available = False
             logger.warning(
                 "SingleInstance: IPC socket bind failed (%s). "
                 "Raise-window signalling unavailable; single-instance detection "
