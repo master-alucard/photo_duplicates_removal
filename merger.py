@@ -124,8 +124,6 @@ def build_merge_plan(
     mode: str,
     keep_subfolder: bool,
     keep_strategy: str,
-    move_sidecars: bool = True,
-    settings=None,
 ) -> MergePlan:
     """Pure-logic planner: produces a MergePlan from records and options.
 
@@ -167,7 +165,10 @@ def build_merge_plan(
         else:
             candidate = main_folder / src_path.name
 
-        norm = str(candidate.resolve())
+        # Use pure-string normalisation rather than Path.resolve() — the only
+        # consumer is the in-memory `claimed` set, and resolve() on a not-yet-
+        # existing path still does parent traversal I/O on Windows.
+        norm = os.path.normcase(os.path.normpath(str(candidate)))
         if norm not in claimed:
             claimed.add(norm)
             return candidate, False
@@ -176,7 +177,7 @@ def build_merge_plan(
         counter = 1
         while True:
             new_cand = parent / f"{stem}_{counter}{suffix}"
-            norm2 = str(new_cand.resolve())
+            norm2 = os.path.normcase(os.path.normpath(str(new_cand)))
             if norm2 not in claimed:
                 claimed.add(norm2)
                 return new_cand, True

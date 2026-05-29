@@ -115,6 +115,7 @@ _M_DISABLED_FG  = "#838387"
 # Tint backgrounds for stat cells
 _M_ERROR_TINT   = "#FFCDD2"
 _M_SUCCESS_TINT = "#DCEDC8"
+_M_WARNING_TINT = "#FFE0B2"
 # Button backgrounds — always saturated for white text
 _BTN_PRIMARY    = "#1565C0"
 _BTN_SUCCESS    = "#2E7D32"
@@ -143,7 +144,7 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
     global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
     global _SL_REC_BAND, _SL_TRACK, _SL_THUMB, _SL_THUMB_OL
-    global _M_ERROR_TINT, _M_SUCCESS_TINT
+    global _M_ERROR_TINT, _M_SUCCESS_TINT, _M_WARNING_TINT
 
     p = _theme_mod.get_palette(dark)
     _ACCENT        = p["ACCENT"]
@@ -192,6 +193,7 @@ def _apply_theme(dark: bool = False) -> None:
     _SL_THUMB_OL    = p["SLIDER_THUMB_OL"]
     _M_ERROR_TINT   = p["ERROR_TINT"]
     _M_SUCCESS_TINT = p["SUCCESS_TINT"]
+    _M_WARNING_TINT = p["WARNING_TINT"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -4690,8 +4692,6 @@ class App:
             mode=mode,
             keep_subfolder=keep_subfolder,
             keep_strategy=settings.keep_strategy,
-            move_sidecars=move_sidecars,
-            settings=settings,
         )
 
         self.root.after(0, lambda: self._on_merge_scan_done(plan, all_records, groups, library_cache))
@@ -5090,7 +5090,7 @@ class App:
                    tint=_ACCENT_TINT if n_to_main > 0 else None)
         _stat_cell(stats_row, n_renames, "suffix renames",
                    _M_WARNING if n_renames > 0 else _M_TEXT1,
-                   tint="#FFF3E0" if n_renames > 0 else None)
+                   tint=_M_WARNING_TINT if n_renames > 0 else None)
         _stat_cell(stats_row, n_groups, "dup groups",
                    _M_ERROR if n_groups > 0 else _M_TEXT1,
                    tint=_M_ERROR_TINT if n_groups > 0 else None)
