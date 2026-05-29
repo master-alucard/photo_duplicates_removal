@@ -101,6 +101,16 @@ class Settings:
     #   video_match_size=False    — disables the fast exact-size pre-pass; content matching
     #                                then handles everything (slower but more thorough).
     video_match_content: bool = True        # Find content-duplicate videos even if sizes differ
+    # ── Merge tab ─────────────────────────────────────────────────────────────
+    # All merge_* fields are owned by the Merge tab and are completely independent
+    # of the duplicate-removal scan pipeline.
+    merge_main_folder: str = ""               # consolidation target folder
+    merge_source_folders: list = field(default_factory=list)  # list of source folder strings
+    merge_mode: str = "destructive"           # "destructive" | "nondestructive"
+    merge_keep_subfolder: bool = False        # True = preserve relative path structure
+    merge_recursive: bool = True              # scan source subfolders recursively
+    merge_include_videos: bool = False        # include video files in merge scan
+    merge_move_sidecars: bool = True          # co-locate .xmp/.aae companions
     auto_update: bool = True                # Check for updates on startup
     skipped_update_versions: list = field(default_factory=list)  # Versions the user clicked "Skip" on (no popup)
     developer_mode: bool = False            # Show full error details / tracebacks
