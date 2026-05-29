@@ -4381,16 +4381,19 @@ class App:
         ks_r0.pack(fill=tk.X, pady=2)
         ttk.Checkbutton(ks_r0, text="Keep subfolder structure (preserve relative paths)",
                         variable=self._merge_subfolder_var).pack(side=tk.LEFT)
+        _info_btn(ks_r0, "merge_keep_subfolder").pack(side=tk.LEFT, padx=4)
 
         ks_r1 = ttk.Frame(ks)
         ks_r1.pack(fill=tk.X, pady=2)
         ttk.Checkbutton(ks_r1, text="Scan source subfolders recursively",
                         variable=self._merge_recursive_var).pack(side=tk.LEFT)
+        _info_btn(ks_r1, "recursive").pack(side=tk.LEFT, padx=4)
 
         ks_r2 = ttk.Frame(ks)
         ks_r2.pack(fill=tk.X, pady=2)
         ttk.Checkbutton(ks_r2, text="Move sidecar files alongside primaries (.xmp / .aae)",
                         variable=self._merge_sidecars_var).pack(side=tk.LEFT)
+        _info_btn(ks_r2, "date_org_move_sidecars").pack(side=tk.LEFT, padx=4)
 
         ks_r3 = ttk.Frame(ks)
         ks_r3.pack(fill=tk.X, pady=2)
@@ -4417,6 +4420,10 @@ class App:
             _mphase_row, textvariable=self._merge_phase_label,
             font=("Segoe UI", 9, "bold"))
         self._merge_phase_lbl_widget.pack(side=tk.LEFT, anchor=tk.W)
+        # Phase transition flash — mirrors the Scan tab pattern so phase
+        # changes are visible during long merge runs.
+        self._merge_phase_flash = _anim.PhaseFlash(
+            self._merge_phase_lbl_widget, accent_color=_ACCENT, normal_color=_M_TEXT1)
         self._merge_progress_bar = ttk.Progressbar(
             self._merge_prog_frame, mode="determinate", maximum=100)
         self._merge_progress_bar.pack(fill=tk.X, pady=(6, 3))
@@ -4430,7 +4437,9 @@ class App:
         m_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
         tk.Frame(m_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
 
-        _GR = "#757575"
+        # Match the Scan tab convention (#616161) — the merge tab is a
+        # primary-action tab like Scan, not a secondary tab.
+        _GR = "#616161"
 
         self._merge_idle_frame = tk.Frame(m_btn_bar, bg=_M3_SURFACE2)
         self._merge_idle_frame.pack(fill=tk.X, padx=4)
@@ -4614,7 +4623,10 @@ class App:
             _progress(msg, done, total, phase)
 
         # ── Discovery: collect all folders ────────────────────────────────
-        self.root.after(0, lambda: self._merge_phase_label.set("Discovery: scanning folders…"))
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Discovery: scanning folders…"),
+            self._merge_phase_flash.trigger(),
+        ))
 
         all_folders = [main_folder] + source_folders
         all_records = []
@@ -4651,7 +4663,10 @@ class App:
             return
 
         _progress("Detecting duplicates…", 0, 1)
-        self.root.after(0, lambda: self._merge_phase_label.set("Comparing files…"))
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Comparing files…"),
+            self._merge_phase_flash.trigger(),
+        ))
 
         groups, _ = find_groups(
             all_records, settings,
@@ -4662,7 +4677,10 @@ class App:
         if self._merge_stop_flag[0]:
             return
 
-        self.root.after(0, lambda: self._merge_phase_label.set("Building merge plan…"))
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Building merge plan…"),
+            self._merge_phase_flash.trigger(),
+        ))
 
         plan = build_merge_plan(
             records=all_records,
@@ -4721,12 +4739,9 @@ class App:
         self._merge_active_frame.pack_forget()
         self._merge_idle_frame.pack(fill=tk.X, padx=4)
 
-        n = plan.n_to_main
-        g = plan.n_groups
-        r = plan.n_suffix_renames
-        summary = (f"Scan complete: {n} file(s) will be moved/copied to main, "
-                   f"{g} duplicate group(s) found, {r} name collision(s).")
-        self._merge_phase_label.set(summary)
+        # Short status only — the results card directly above carries the
+        # full breakdown (files, dup groups, suffix renames, space delta).
+        self._merge_phase_label.set("Scan complete.")
 
         # Populate and show the results info card
         self._merge_show_results_card(plan, all_records, groups)
@@ -4852,6 +4867,10 @@ class App:
         self._merge_idle_frame.pack_forget()
         self._merge_active_frame.pack(fill=tk.X, padx=4)
         self._merge_phase_label.set("Applying merge…")
+        try:
+            self._merge_phase_flash.trigger()
+        except Exception:
+            pass
         self._merge_progress_bar["mode"] = "indeterminate"
         self._merge_progress_bar.start(12)
         try:
@@ -4961,6 +4980,10 @@ class App:
         self._merge_idle_frame.pack_forget()
         self._merge_active_frame.pack(fill=tk.X, padx=4)
         self._merge_phase_label.set("Trashing duplicates…")
+        try:
+            self._merge_phase_flash.trigger()
+        except Exception:
+            pass
         self._merge_progress_bar["mode"] = "indeterminate"
         self._merge_progress_bar.start(12)
         try:
