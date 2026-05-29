@@ -155,6 +155,25 @@ def build_merge_plan(
         has_img = bool(exts - RAW_EXTENSIONS)
         return has_raw and has_img
 
+    def _pick_cross_format_originals(group_paths: List[Path]) -> set:
+        """Pick one RAW + one non-RAW original from a cross-format group.
+
+        The previous slice `group_paths[:2]` assumed the first two members
+        were the RAW+JPEG pair, but member ordering is just enumeration
+        order over (originals, previews) — a group with two JPEGs and one
+        RAW could pick both JPEGs and drop the RAW entirely.  Partition
+        explicitly by extension so the cross-format invariant ("both
+        formats go to main") holds regardless of group size or ordering.
+        """
+        raw_members = [p for p in group_paths if p.suffix.lower() in RAW_EXTENSIONS]
+        img_members = [p for p in group_paths if p.suffix.lower() not in RAW_EXTENSIONS]
+        picks = set()
+        if raw_members:
+            picks.add(str(_pick_original(raw_members, main_folder, keep_strategy, records_by_path)))
+        if img_members:
+            picks.add(str(_pick_original(img_members, main_folder, keep_strategy, records_by_path)))
+        return picks
+
     def _compute_target(src_path: Path, src_root: Path) -> tuple:
         if keep_subfolder:
             try:
@@ -210,8 +229,9 @@ def build_merge_plan(
         n_groups_with_source_members += 1
 
         if _is_cross_format_group(grp):
-            # Both originals go to main
-            originals_set = set(str(p) for p in all_member_paths[:2])
+            # Both formats go to main — pick one RAW and one non-RAW
+            # explicitly, not whichever two happen to be enumerated first.
+            originals_set = _pick_cross_format_originals(all_member_paths)
         else:
             orig = _pick_original(all_member_paths, main_folder, keep_strategy, records_by_path)
             originals_set = {str(orig)}

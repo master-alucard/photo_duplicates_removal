@@ -558,6 +558,40 @@ class TestCrossFormatPairs:
         assert "photo.jpg" in orig_paths
         assert "photo.cr2" in orig_paths
 
+    def test_three_member_cross_format_picks_one_per_format(self, tmp_path):
+        """A group with 2 JPEGs + 1 RAW must pick exactly one RAW and one
+        non-RAW.  The previous slice `members[:2]` could pick both JPEGs
+        (depending on enumeration order) and drop the RAW entirely,
+        defeating the cross-format "both formats go to main" invariant.
+        """
+        main = tmp_path / "main"
+        src  = tmp_path / "src"
+        main.mkdir(); src.mkdir()
+
+        # Two JPEGs (same shot, different resolutions) + one CR2 of that shot
+        jpeg_a = _FakeRecord(src / "shot_hi.jpg", width=6000, height=4000)
+        jpeg_b = _FakeRecord(src / "shot_lo.jpg", width=3000, height=2000)
+        raw    = _FakeRecord(src / "shot.cr2",    width=6000, height=4000)
+
+        grp = _FakeGroup("cf2", originals=[jpeg_a, jpeg_b], previews=[raw])
+
+        plan = build_merge_plan(
+            records=[jpeg_a, jpeg_b, raw], groups=[grp],
+            main_folder=main, source_folders=[src],
+            mode="destructive", keep_subfolder=False, keep_strategy="pixels",
+        )
+
+        orig_ops = [op for op in plan.ops if op.role == "original"]
+        orig_names = {op.src.name for op in orig_ops}
+
+        raw_count = sum(1 for n in orig_names if n.endswith(".cr2"))
+        jpeg_count = sum(1 for n in orig_names if n.endswith(".jpg"))
+        assert raw_count == 1, f"expected exactly 1 RAW original, got {orig_names}"
+        assert jpeg_count == 1, f"expected exactly 1 JPEG original, got {orig_names}"
+        # Largest JPEG (keep_strategy=pixels) wins between the two JPEGs.
+        assert "shot_hi.jpg" in orig_names
+        assert "shot.cr2" in orig_names
+
 
 # ---------------------------------------------------------------------------
 # AC12: Subfolder structure ON
