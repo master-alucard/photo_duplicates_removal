@@ -902,7 +902,6 @@ class App:
         self._merge_recursive_var  = tk.BooleanVar(value=getattr(s2, "merge_recursive", True))
         self._merge_sidecars_var   = tk.BooleanVar(value=getattr(s2, "merge_move_sidecars", True))
         self._merge_phase_label    = tk.StringVar(value="Ready.")
-        self._merge_eta_var        = tk.StringVar(value="")
         self._merge_tracker: "PhaseTracker | None" = None
         self._merge_source_folders: list = list(getattr(s2, "merge_source_folders", []))
         # Merge runtime state — completely independent from scan pipeline
@@ -4408,8 +4407,6 @@ class App:
         self._merge_progress_bar = ttk.Progressbar(
             self._merge_prog_frame, mode="determinate", maximum=100)
         self._merge_progress_bar.pack(fill=tk.X, pady=(6, 3))
-        ttk.Label(self._merge_prog_frame, textvariable=self._merge_eta_var,
-                  foreground=_M_TEXT2, font=("Segoe UI", 8)).pack(anchor=tk.W)
 
         # Host frame for the embedded ReportViewer (shown on "Review In-App")
         self._merge_viewer_host = tk.Frame(tab, bg=_BG)
@@ -4610,8 +4607,15 @@ class App:
                     stop_flag=self._merge_stop_flag,
                 )
                 all_records.extend(recs)
-            except Exception:
-                pass
+            except Exception as _exc:
+                # A failed source folder (permission denied, drive vanished
+                # mid-walk, etc.) shouldn't silently disappear from the merge
+                # plan — surface the failure so the user can investigate.
+                import sys as _sys
+                print(
+                    f"[merge-scan] collect_images failed for {folder}: {_exc}",
+                    file=_sys.stderr,
+                )
 
         if self._merge_stop_flag[0]:
             return
@@ -4750,6 +4754,11 @@ class App:
     def _merge_apply(self) -> None:
         if self._merge_plan is None:
             return
+        # Re-entry guard: if another scan/merge is already running (e.g. a
+        # double-click slipped through the button disable during a modal),
+        # refuse to start a second worker that would race on shared state.
+        if self._scanning or self._merging:
+            return
         plan = self._merge_plan
         n = plan.n_to_main
         mode_label = "Destructive (move)" if plan.mode == "destructive" else "Non-destructive (copy)"
@@ -4853,6 +4862,8 @@ class App:
 
     def _merge_trash(self) -> None:
         if self._merge_plan is None:
+            return
+        if self._scanning or self._merging:
             return
         plan = self._merge_plan
         mode_desc = ("duplicates left in source folders" if plan.mode == "destructive"

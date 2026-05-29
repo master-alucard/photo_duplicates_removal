@@ -9,10 +9,11 @@ library cache, writes operations_log.json, and honours drive-disconnect pause.
 """
 from __future__ import annotations
 
-import copy as _copy
 import json
 import os
 import shutil
+import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -323,8 +324,7 @@ class MergeExecutor:
 
             # Drive-disconnect pause
             while self._pause_flag[0]:
-                import time as _time
-                _time.sleep(0.2)
+                time.sleep(0.2)
                 if self._stop_flag[0]:
                     break
             if self._stop_flag[0]:
@@ -386,8 +386,7 @@ class MergeExecutor:
                 if self._stop_flag[0]:
                     break
                 while self._pause_flag[0]:
-                    import time as _time
-                    _time.sleep(0.2)
+                    time.sleep(0.2)
                     if self._stop_flag[0]:
                         break
                 if self._stop_flag[0]:
@@ -422,8 +421,7 @@ class MergeExecutor:
                     if self._stop_flag[0]:
                         break
                     while self._pause_flag[0]:
-                        import time as _time
-                        _time.sleep(0.2)
+                        time.sleep(0.2)
                         if self._stop_flag[0]:
                             break
                     if self._stop_flag[0]:
@@ -471,8 +469,13 @@ class MergeExecutor:
                             shutil.move(str(sib), str(sib_dst))
                         else:
                             shutil.copy2(str(sib), str(sib_dst))
-                    except Exception:
-                        pass
+                    except Exception as _exc:
+                        # Sidecar failure is non-fatal but should be visible —
+                        # the primary file already moved/copied successfully.
+                        print(
+                            f"[merger] sidecar {op.action} failed for {sib.name}: {_exc}",
+                            file=sys.stderr,
+                        )
                     break
 
     def _log_op(self, op: MergeFileOp, status: str) -> None:
@@ -499,8 +502,14 @@ class MergeExecutor:
                 json.dumps(log, indent=2, ensure_ascii=False),
                 encoding="utf-8",
             )
-        except Exception:
-            pass
+        except Exception as _exc:
+            # The operations log is the spec's resume-from-last-action source
+            # of truth; a silent failure here would defeat drive-disconnect
+            # safety on resume.  Make it visible.
+            print(
+                f"[merger] failed to write operations log at {log_path}: {_exc}",
+                file=sys.stderr,
+            )
 
 
 def _unique_sidecar_path(path: Path) -> Path:
