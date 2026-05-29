@@ -4343,9 +4343,11 @@ class App:
         mode_card.pack(fill=tk.X, pady=(0, 8))
         for val, lbl, desc in (
             ("destructive", "Destructive (default)",
-             "Originals are physically moved to main; duplicates stay in source then can be trashed."),
+             "Originals are physically moved to main; duplicates stay in source. "
+             "Trash step removes those leftover source duplicates."),
             ("nondestructive", "Non-destructive",
-             "Originals are copied to main; source folders are not depleted."),
+             "Originals are copied to main; source folders are not depleted. "
+             "Trash step removes only intra-folder duplicates; main is untouched."),
         ):
             rb = tk.Radiobutton(
                 mode_card, text=lbl, variable=self._merge_mode_var, value=val,
@@ -4422,7 +4424,9 @@ class App:
         self._merge_idle_frame = tk.Frame(m_btn_bar, bg=_M3_SURFACE2)
         self._merge_idle_frame.pack(fill=tk.X, padx=4)
 
-        _mat_btn(self._merge_idle_frame, "Reset Sources",
+        # Button label says "Folders" because the action clears both main and
+        # the source list (see _merge_reset_sources implementation).
+        _mat_btn(self._merge_idle_frame, "Reset Folders",
                  self._merge_reset_sources, _GR).pack(side=tk.LEFT, padx=(4, 4))
 
         self._merge_scan_btn = _mat_btn(
@@ -4538,7 +4542,7 @@ class App:
         self._merge_progress_bar["mode"] = "indeterminate"
         self._merge_progress_bar.start(12)
         try:
-            self._merge_pulse_dot.show()
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
         except Exception:
             pass
         _set_sleep_prevention(True)
@@ -4701,10 +4705,25 @@ class App:
         # Populate and show the results info card
         self._merge_show_results_card(plan, all_records, groups)
 
-        # Enable action buttons
-        _mat_enable(self._merge_apply_btn)
-        _mat_enable(self._merge_browser_btn)
-        _mat_enable(self._merge_inapp_btn)
+        # Enable action buttons — only when there's actually something to do.
+        # A scan that finds no files to move and no duplicate groups means the
+        # sources are already a subset of main; surface that explicitly rather
+        # than letting the user click Apply on an empty plan.
+        if plan.n_to_main == 0 and plan.n_groups == 0:
+            self._merge_phase_label.set(
+                "Nothing to merge — sources contain only files already in main."
+            )
+        else:
+            _mat_enable(self._merge_apply_btn)
+            _mat_enable(self._merge_browser_btn)
+            _mat_enable(self._merge_inapp_btn)
+            # Dynamic Apply label so the user knows whether this click moves
+            # or copies (driven by the selected mode).
+            verb = "move" if plan.mode == "destructive" else "copy"
+            try:
+                self._merge_apply_btn.configure(text=f"✓  Apply Merge ({verb})")
+            except Exception:
+                pass
 
         # Generate HTML report in background so Browser Report is ready quickly
         def _gen_report():
@@ -4761,12 +4780,27 @@ class App:
             return
         plan = self._merge_plan
         n = plan.n_to_main
+        verb = "move" if plan.mode == "destructive" else "copy"
         mode_label = "Destructive (move)" if plan.mode == "destructive" else "Non-destructive (copy)"
+        # Human-readable size delta (matches the results card formatting).
+        space_b = getattr(plan, "space_delta", 0) or 0
+        space_mb = space_b / (1024 * 1024)
+        if space_mb >= 1024:
+            size_str = f"{space_mb / 1024:.1f} GB"
+        elif space_mb >= 1:
+            size_str = f"{space_mb:.1f} MB"
+        else:
+            size_str = f"{space_b / 1024:.0f} KB"
+        # Originals-strategy label (matches Scan tab wording).
+        strat = getattr(self.settings, "keep_strategy", "pixels")
+        strat_label = "Largest resolution" if strat == "pixels" else "Oldest file date"
         confirm = messagebox.askyesno(
             "Apply Merge",
-            f"This will {('move' if plan.mode == 'destructive' else 'copy')} {n} file(s) to:\n"
+            f"This will {verb} {n} file(s) to:\n"
             f"  {plan.main_folder}\n\n"
             f"Mode: {mode_label}\n"
+            f"Total size: {size_str}\n"
+            f"Original selection: {strat_label}\n"
             f"Duplicate groups detected: {plan.n_groups}\n"
             f"Name collisions (will be renamed): {plan.n_suffix_renames}\n\n"
             "Proceed?",
@@ -4795,7 +4829,7 @@ class App:
         self._merge_progress_bar["mode"] = "indeterminate"
         self._merge_progress_bar.start(12)
         try:
-            self._merge_pulse_dot.show()
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
         except Exception:
             pass
         _set_sleep_prevention(True)
@@ -4866,11 +4900,24 @@ class App:
         if self._scanning or self._merging:
             return
         plan = self._merge_plan
-        mode_desc = ("duplicates left in source folders" if plan.mode == "destructive"
-                     else "intra-folder duplicates in each source folder")
+        # Count the trashable files per mode so the user knows what they're
+        # about to remove before they click yes.
+        if plan.mode == "destructive":
+            mode_desc = "duplicates left in source folders"
+            # Mode A duplicates are recorded as ops with src == dst (see
+            # merger.py comment "dst unused for trash").
+            trash_count = sum(
+                1 for op in plan.ops
+                if getattr(op, "action", None) == "move"
+                and getattr(op, "src", None) == getattr(op, "dst", None)
+            )
+        else:
+            mode_desc = "intra-folder duplicates in each source folder"
+            trash_count = sum(len(v) for v in plan.source_trash.values())
         confirm = messagebox.askyesno(
             "Move Duplicates to Trash",
-            f"This will move {mode_desc} to a trash subfolder.\n\nProceed?",
+            f"This will move {trash_count} file(s) — {mode_desc} — to a 'trash'\n"
+            f"subfolder next to each source file.\n\nProceed?",
             parent=self.root,
         )
         if not confirm:
@@ -4891,7 +4938,7 @@ class App:
         self._merge_progress_bar["mode"] = "indeterminate"
         self._merge_progress_bar.start(12)
         try:
-            self._merge_pulse_dot.show()
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
         except Exception:
             pass
         _set_sleep_prevention(True)
