@@ -4337,6 +4337,14 @@ class App:
         self._merge_src_listbox.pack(fill=tk.X, pady=(0, 4))
         for sf in self._merge_source_folders:
             self._merge_src_listbox.insert(tk.END, sf)
+        # Inline empty-state hint shown only while the listbox is empty so
+        # the user knows the next action is "Add Source".
+        self._merge_src_hint_lbl = tk.Label(
+            self._merge_folders_section,
+            text="No source folders yet — click Add Source to pick one.",
+            bg=_BG, fg=_M_HINT2, font=("Segoe UI", 8, "italic"),
+        )
+        self._merge_refresh_src_hint()
 
         # ── Mode ─────────────────────────────────────────────────────────
         mode_card = ttk.LabelFrame(body, text="Merge Mode", padding=(12, 8, 12, 10))
@@ -4358,8 +4366,11 @@ class App:
                 bd=0, pady=5,
             )
             rb.pack(side=tk.LEFT, padx=2)
+            # bg matches the surrounding ttk.LabelFrame (_M3_SURFACE2) rather
+            # than _CARD_BG so the caption doesn't sit on a white rectangle
+            # inside the grey card — and so it flips correctly under dark theme.
             tk.Label(mode_card, text=f"  {desc}",
-                     bg=_CARD_BG, fg=_M_HINT2,
+                     bg=_M3_SURFACE2, fg=_M_HINT2,
                      font=("Segoe UI", 8), wraplength=400, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
 
         # ── Key settings ──────────────────────────────────────────────────
@@ -4473,6 +4484,18 @@ class App:
 
     # ── Merge source folder management ────────────────────────────────────────
 
+    def _merge_refresh_src_hint(self) -> None:
+        """Show the empty-state hint only while the source listbox is empty."""
+        try:
+            if not self._merge_source_folders:
+                self._merge_src_hint_lbl.pack(anchor=tk.W, pady=(0, 4))
+            else:
+                self._merge_src_hint_lbl.pack_forget()
+        except Exception:
+            # The hint label is created during _build_merge_tab; tolerate
+            # being called before that runs (e.g. early settings restore).
+            pass
+
     def _merge_add_source(self) -> None:
         folder = filedialog.askdirectory(
             title="Add source folder",
@@ -4484,6 +4507,7 @@ class App:
         if folder not in self._merge_source_folders:
             self._merge_source_folders.append(folder)
             self._merge_src_listbox.insert(tk.END, folder)
+            self._merge_refresh_src_hint()
             self._on_setting_change()
 
     def _merge_remove_source(self) -> None:
@@ -4494,12 +4518,14 @@ class App:
         self._merge_src_listbox.delete(idx)
         if 0 <= idx < len(self._merge_source_folders):
             self._merge_source_folders.pop(idx)
+        self._merge_refresh_src_hint()
         self._on_setting_change()
 
     def _merge_reset_sources(self) -> None:
         self._merge_source_folders.clear()
         self._merge_src_listbox.delete(0, tk.END)
         self._merge_main_var.set("")
+        self._merge_refresh_src_hint()
         self._on_setting_change()
 
     # ── Merge scan ────────────────────────────────────────────────────────────

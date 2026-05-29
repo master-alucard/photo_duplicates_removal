@@ -994,10 +994,10 @@ class ReportViewer(tk.Frame):
         that folder instead.
         """
         if not self._folder_labels:
-            tk.Label(
-                self._inner_frame,
+            _tklabel(
+                self._inner_frame, bg=_M_BG, fg=_M_TEXT3,
                 text="No source folders in merge plan.",
-                font=("Segoe UI", 13), bg=_M_BG, fg=_M_TEXT3,
+                font=("Segoe UI", 13),
             ).pack(pady=40)
             return
 
@@ -1066,27 +1066,25 @@ class ReportViewer(tk.Frame):
         }
 
         if not folder_grps:
-            tk.Label(
-                self._inner_frame,
+            _tklabel(
+                self._inner_frame, bg=_M_BG, fg=_M_TEXT3,
                 text="No duplicate groups in this source folder.",
-                font=("Segoe UI", 11), bg=_M_BG, fg=_M_TEXT3,
+                font=("Segoe UI", 11),
             ).pack(pady=20)
         else:
             for grp in folder_grps:
+                # grp_id_to_global is keyed by id(grp), which IS the `is`
+                # comparison — if the lookup misses, no linear fallback would
+                # succeed either.  Skip groups that aren't in the global list.
                 global_idx = grp_id_to_global.get(id(grp))
-                if global_idx is None:
-                    # Fallback: linear search by equality (slower but safe)
-                    for i, g in enumerate(self._groups):
-                        if g is grp:
-                            global_idx = i
-                            break
                 if global_idx is None:
                     continue
                 try:
                     self._build_group_card(global_idx, grp)
                 except Exception as exc:
                     import traceback
-                    traceback.print_exc()
+                    tb_str = traceback.format_exc()
+                    print(tb_str)
                     try:
                         err_frame = _tkframe(self._inner_frame, bg="#FFEBEE",
                                              pady=8, padx=12)
