@@ -910,6 +910,9 @@ class App:
         self._merge_stop_flag:   list = [False]
         self._merge_pause_flag:  list = [False]
         self._merge_plan = None          # set after scan phase
+        self._merge_groups: list = []    # groups from last scan
+        self._merge_all_records: list = []  # all records from last scan
+        self._merge_report_path: "Path | None" = None  # last generated HTML report
         self._merge_pending_progress: "tuple | None" = None
         self._merge_progress_tick_after_id: "int | None" = None
         for _mv in (self._merge_main_var, self._merge_mode_var,
@@ -4385,6 +4388,11 @@ class App:
         ttk.Radiobutton(ks_r3, text="Oldest file date",
                         variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=4)
 
+        # ── Results info card (hidden until scan completes) ───────────────
+        # Packed into the scrollable body by _merge_show_results_card().
+        self._merge_results_card = tk.Frame(body, bg=_CARD_BG, bd=0, relief=tk.FLAT,
+                                            highlightthickness=0)
+
         # ── Progress panel (fixed bottom of tab) ──────────────────────────
         self._merge_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
         self._merge_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
@@ -4402,6 +4410,9 @@ class App:
         self._merge_progress_bar.pack(fill=tk.X, pady=(6, 3))
         ttk.Label(self._merge_prog_frame, textvariable=self._merge_eta_var,
                   foreground=_M_TEXT2, font=("Segoe UI", 8)).pack(anchor=tk.W)
+
+        # Host frame for the embedded ReportViewer (shown on "Review In-App")
+        self._merge_viewer_host = tk.Frame(tab, bg=_BG)
 
         # ── Button bar (fixed very bottom) ────────────────────────────────
         self._merge_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
@@ -4433,6 +4444,18 @@ class App:
             self._merge_trash, _BTN_WARNING)
         self._merge_trash_btn.pack(side=tk.RIGHT, padx=4)
         _mat_disable(self._merge_trash_btn)
+
+        self._merge_inapp_btn = _mat_btn(
+            self._merge_idle_frame, "📋  Review In-App",
+            self._merge_open_inapp_report, _BTN_PRIMARY)
+        self._merge_inapp_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_inapp_btn)
+
+        self._merge_browser_btn = _mat_btn(
+            self._merge_idle_frame, "🌐  Browser Report",
+            self._merge_open_browser_report, _BTN_SECONDARY)
+        self._merge_browser_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_browser_btn)
 
         # Active (scanning) button frame
         self._merge_active_frame = tk.Frame(m_btn_bar, bg=_M3_SURFACE2)
@@ -4657,6 +4680,8 @@ class App:
 
         self._merge_plan = plan
         self._merge_library_cache = library_cache
+        self._merge_groups = groups
+        self._merge_all_records = all_records
 
         # Restore idle frame
         self._merge_active_frame.pack_forget()
@@ -4669,8 +4694,28 @@ class App:
                    f"{g} duplicate group(s) found, {r} name collision(s).")
         self._merge_phase_label.set(summary)
 
-        # Enable Apply Merge
+        # Populate and show the results info card
+        self._merge_show_results_card(plan, all_records, groups)
+
+        # Enable action buttons
         _mat_enable(self._merge_apply_btn)
+        _mat_enable(self._merge_browser_btn)
+        _mat_enable(self._merge_inapp_btn)
+
+        # Generate HTML report in background so Browser Report is ready quickly
+        def _gen_report():
+            try:
+                rpt = generate_report(
+                    groups,
+                    plan.main_folder,
+                    plan.main_folder,
+                    len(all_records),
+                    self.settings,
+                )
+                self._merge_report_path = rpt
+            except Exception:
+                self._merge_report_path = None
+        threading.Thread(target=_gen_report, daemon=True).start()
 
         # Refresh Library tab
         if hasattr(self, "_library_ctrl"):
@@ -4879,6 +4924,183 @@ class App:
         self._merge_idle_frame.pack(fill=tk.X, padx=4)
         n = result["trashed"]
         self._merge_phase_label.set(f"Trash complete: {n} file(s) moved to trash.")
+
+    # ── Merge results card ────────────────────────────────────────────────────
+
+    def _merge_show_results_card(self, plan, all_records, groups) -> None:
+        """Populate and show the merge results info card (mirrors _update_results_tab_ui)."""
+        card = self._merge_results_card
+
+        # Rebuild card contents
+        for w in card.winfo_children():
+            w.destroy()
+
+        mode = plan.mode
+        n_to_main    = plan.n_to_main
+        n_groups     = plan.n_groups
+        n_renames    = plan.n_suffix_renames
+        space_b      = plan.space_delta
+        total_files  = len(all_records)
+        action_word  = "move" if mode == "destructive" else "copy"
+
+        # Colour bar: green if there are groups, accent otherwise
+        bar_col = _M_SUCCESS if n_groups > 0 else _ACCENT
+        tk.Frame(card, height=4, bg=bar_col).pack(fill=tk.X)
+
+        # Header
+        hdr = tk.Frame(card, bg=_CARD_BG)
+        hdr.pack(fill=tk.X, padx=16, pady=(12, 4))
+        title = "Scan Complete — Review the plan below"
+        tk.Label(hdr, text=title,
+                 font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
+
+        # Main folder path
+        tk.Label(card,
+                 text=f"Target: {plan.main_folder}",
+                 font=("Segoe UI", 9), bg=_CARD_BG, fg=_M_TEXT2,
+                 anchor=tk.W, wraplength=900).pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        tk.Frame(card, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        # Stat cells
+        stats_row = tk.Frame(card, bg=_CARD_BG)
+        stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _stat_cell(parent, value, label, fg=_M_TEXT1, tint=None):
+            cell_bg = tint if tint else _CARD_BG
+            cell = tk.Frame(parent, bg=cell_bg, padx=8 if tint else 0, pady=4 if tint else 0)
+            cell.pack(side=tk.LEFT, padx=(0, 16))
+            vstr = f"{value:,}" if isinstance(value, int) else str(value)
+            tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
+                     bg=cell_bg, fg=fg).pack(anchor=tk.W)
+            tk.Label(cell, text=label, font=("Segoe UI", 8),
+                     bg=cell_bg, fg=_M_HINT5).pack(anchor=tk.W)
+
+        _stat_cell(stats_row, total_files, "files scanned")
+        _to_main_lbl = f"files to {action_word} to main"
+        _stat_cell(stats_row, n_to_main, _to_main_lbl,
+                   _ACCENT if n_to_main > 0 else _M_TEXT1,
+                   tint=_ACCENT_TINT if n_to_main > 0 else None)
+        _stat_cell(stats_row, n_renames, "suffix renames",
+                   _M_WARNING if n_renames > 0 else _M_TEXT1,
+                   tint="#FFF3E0" if n_renames > 0 else None)
+        _stat_cell(stats_row, n_groups, "dup groups",
+                   _M_ERROR if n_groups > 0 else _M_TEXT1,
+                   tint=_M_ERROR_TINT if n_groups > 0 else None)
+
+        # Space delta
+        space_mb = space_b / (1024 * 1024) if space_b else 0.0
+        if space_mb >= 1024:
+            space_lbl = f"+{space_mb / 1024:.1f} GB"
+        elif space_mb >= 1:
+            space_lbl = f"+{space_mb:.1f} MB"
+        elif space_b > 0:
+            space_lbl = f"+{space_b // 1024} KB"
+        else:
+            space_lbl = "–"
+        _stat_cell(stats_row, space_lbl, "space added to main",
+                   _ACCENT if space_b > 0 else _M_TEXT1,
+                   tint=_ACCENT_TINT if space_b > 0 else None)
+
+        # Mode label
+        mode_desc = "Destructive (move originals)" if mode == "destructive" else "Non-destructive (copy originals)"
+        tk.Label(card,
+                 text=f"Mode: {mode_desc}",
+                 font=("Segoe UI", 8), bg=_CARD_BG,
+                 fg=_M_HINT5, anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
+
+        card.pack(fill=tk.X, padx=16, pady=(16, 8))
+        try:
+            _anim.SlideDownReveal(card, duration_ms=350).play()
+        except Exception:
+            pass
+
+    # ── Merge report actions ──────────────────────────────────────────────────
+
+    def _merge_open_browser_report(self) -> None:
+        """Open the HTML merge report in the system browser."""
+        if not self._merge_groups and not self._merge_plan:
+            messagebox.showinfo("No Results", "No merge scan results yet.", parent=self.root)
+            return
+
+        # If report was pre-generated on scan-done, open it directly
+        if self._merge_report_path and self._merge_report_path.exists():
+            webbrowser.open(self._merge_report_path.as_uri())
+            return
+
+        # Generate on demand
+        if not self._merge_plan:
+            return
+        try:
+            rpt = generate_report(
+                self._merge_groups,
+                self._merge_plan.main_folder,
+                self._merge_plan.main_folder,
+                len(self._merge_all_records),
+                self.settings,
+            )
+            self._merge_report_path = rpt
+            webbrowser.open(rpt.as_uri())
+        except Exception as exc:
+            messagebox.showerror("Report Error",
+                                 f"Could not generate HTML report:\n{exc}",
+                                 parent=self.root)
+
+    def _merge_open_inapp_report(self) -> None:
+        """Open the embedded merge report viewer inside the Merge tab."""
+        if not self._merge_groups and not self._merge_plan:
+            messagebox.showinfo("No Results", "No merge scan results yet.", parent=self.root)
+            return
+
+        # Build folder_groups dict for Mode B per-folder pagination
+        mode = self._merge_plan.mode if self._merge_plan else "destructive"
+        pagination_mode = "groups"
+        folder_groups = None
+
+        if mode == "nondestructive" and self._merge_plan:
+            # Map each source folder to its groups
+            from merger import _is_in_folder
+            source_folders = self._merge_plan.source_folders
+            fg: dict = {}
+            for sf in source_folders:
+                sf_grps = []
+                for grp in self._merge_groups:
+                    all_paths = [r.path for r in (grp.originals or [])] + \
+                                [r.path for r in (grp.previews or [])]
+                    if any(_is_in_folder(p, sf) for p in all_paths):
+                        sf_grps.append(grp)
+                if sf_grps:
+                    fg[str(sf)] = sf_grps
+            if fg:
+                pagination_mode = "per_folder"
+                folder_groups = fg
+
+        # Show the merge form and switch tab
+        if not self._merge_viewer_host.winfo_ismapped():
+            self._merge_form_outer.pack_forget()
+            self._merge_viewer_host.pack(fill=tk.BOTH, expand=True)
+
+        # Clear any previous viewer
+        for w in self._merge_viewer_host.winfo_children():
+            w.destroy()
+
+        self._nb.select(self._tab_merge)
+
+        def _on_close():
+            self._merge_viewer_host.pack_forget()
+            for w in self._merge_viewer_host.winfo_children():
+                w.destroy()
+            self._merge_form_outer.pack(fill=tk.BOTH, expand=True)
+
+        viewer = ReportViewer(
+            self._merge_viewer_host,
+            self._merge_groups,
+            settings=self.settings,
+            on_close_cb=_on_close,
+            pagination_mode=pagination_mode,
+            folder_groups=folder_groups,
+        )
+        viewer.pack(fill=tk.BOTH, expand=True)
 
     # ── Merge stop/pause ──────────────────────────────────────────────────────
 

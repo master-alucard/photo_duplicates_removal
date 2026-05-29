@@ -441,7 +441,29 @@ class ReportViewer(tk.Frame):
         settings=None,
         on_close_cb: Optional[Callable] = None,
         selection_cache: Optional[dict] = None,
+        pagination_mode: str = "groups",
+        folder_groups: "Optional[dict]" = None,
     ) -> None:
+        """Create the viewer.
+
+        Parameters
+        ----------
+        pagination_mode : str
+            ``"groups"`` (default) — standard N-groups-per-page pagination used by
+            Scan and Compare Scan.  All existing behaviour is unchanged.
+
+            ``"per_folder"`` — one page per source folder.  Each page shows a
+            folder header with summary statistics followed by the duplicate groups
+            that belong to that folder.  Pass the source-folder mapping via
+            *folder_groups*.
+
+        folder_groups : dict[str, list[DuplicateGroup]] | None
+            Required when *pagination_mode* is ``"per_folder"``.  Maps a
+            human-readable folder label (the source-folder path string, or any
+            label) to the list of ``DuplicateGroup`` objects for that folder.
+            The ``groups`` positional argument should be the flat union of all
+            groups in this dict (needed for ``_ensure_group_vars`` bookkeeping).
+        """
         super().__init__(parent, bg=_M_BG)
 
         self._groups          = groups
@@ -452,6 +474,17 @@ class ReportViewer(tk.Frame):
         self._settings        = settings
         self._on_close_cb     = on_close_cb
         self._selection_cache = selection_cache  # restored selection state (or None)
+
+        # ── per-folder pagination (Mode B in-app report) ──────────────────
+        self._pagination_mode: str = pagination_mode  # "groups" | "per_folder"
+        # folder_groups: ordered dict  label → [DuplicateGroup, ...]
+        # Built from the caller-supplied mapping (or empty in "groups" mode).
+        if pagination_mode == "per_folder" and folder_groups:
+            self._folder_labels: list = list(folder_groups.keys())
+            self._folder_group_map: dict = dict(folder_groups)
+        else:
+            self._folder_labels = []
+            self._folder_group_map = {}
 
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
@@ -946,6 +979,123 @@ class ReportViewer(tk.Frame):
             tile_bg = "#E0E0E0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
                                    bg=tile_bg, max_thumb=120, trashed=trashed, group_idx=idx)
+
+    # ── per-folder page (Mode B in-app report) ────────────────────────────────
+
+    def _build_per_folder_page(self, page: int) -> None:
+        """Render one source-folder page for Mode B per-folder pagination.
+
+        Each page shows:
+        - A folder-header card with the source path and a summary line
+          (N files to copy to main, M internal duplicates to trash).
+        - All DuplicateGroup cards that belong to that source folder.
+
+        When a folder has no groups, shows a "no duplicate groups" message for
+        that folder instead.
+        """
+        if not self._folder_labels:
+            tk.Label(
+                self._inner_frame,
+                text="No source folders in merge plan.",
+                font=("Segoe UI", 13), bg=_M_BG, fg=_M_TEXT3,
+            ).pack(pady=40)
+            return
+
+        page = max(0, min(page, len(self._folder_labels) - 1))
+        folder_label = self._folder_labels[page]
+        folder_grps  = self._folder_group_map.get(folder_label, [])
+
+        # ── Folder header card ────────────────────────────────────────────
+        hdr_outer = _tkframe(self._inner_frame, bg=_M_BG, padx=12, pady=8)
+        hdr_outer.pack(fill=tk.X)
+
+        hdr_card_wrap = _tkframe(hdr_outer, bg=_M_SURFACE, highlightthickness=0)
+        hdr_card_wrap.pack(fill=tk.X)
+
+        # Accent left border
+        _tkframe(hdr_card_wrap, bg=_M_PRIMARY, width=4).pack(side=tk.LEFT, fill=tk.Y)
+
+        hdr_card = _tkframe(hdr_card_wrap, bg=_M_PRIMARY_TINT)
+        hdr_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        _hdr_row = _tkframe(hdr_card, bg=_M_PRIMARY_TINT)
+        _hdr_row.pack(fill=tk.X, padx=12, pady=(8, 2))
+
+        _tklabel(
+            _hdr_row, bg=_M_PRIMARY_TINT, fg=_M_PRIMARY,
+            text=f"Source folder  ·  page {page + 1} of {len(self._folder_labels)}",
+            font=("Segoe UI", 8, "bold"),
+        ).pack(side=tk.LEFT)
+
+        _tklabel(
+            hdr_card, bg=_M_PRIMARY_TINT, fg=_M_TEXT1,
+            text=folder_label,
+            font=("Segoe UI", 9, "bold"),
+            anchor=tk.W, wraplength=900,
+        ).pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        # Summary: count originals-to-copy and duplicates-to-trash
+        n_groups = len(folder_grps)
+        # originals = groups[i].originals (files to copy to main)
+        # previews  = groups[i].previews (internal duplicates to trash in Mode B)
+        n_to_copy = sum(len(g.originals or []) for g in folder_grps)
+        n_internal_dups = sum(len(g.previews or []) for g in folder_grps)
+
+        parts = []
+        if n_to_copy:
+            parts.append(f"{n_to_copy} file(s) to copy to main")
+        if n_internal_dups:
+            parts.append(f"{n_internal_dups} internal duplicate(s) to trash")
+        if n_groups == 0:
+            parts.append("No duplicate groups")
+        summary_text = "  ·  ".join(parts) if parts else "No files"
+
+        _tklabel(
+            hdr_card, bg=_M_PRIMARY_TINT, fg=_M_TEXT2,
+            text=summary_text,
+            font=("Segoe UI", 8),
+            anchor=tk.W,
+        ).pack(fill=tk.X, padx=12, pady=(0, 8))
+
+        # ── Group cards for this folder ───────────────────────────────────
+        # We need to map these folder-local groups to their global indices in
+        # self._groups so that _ensure_group_vars / _build_group_card work correctly.
+        # Build a lookup: group object id → global index (built once per render).
+        grp_id_to_global: dict[int, int] = {
+            id(g): i for i, g in enumerate(self._groups)
+        }
+
+        if not folder_grps:
+            tk.Label(
+                self._inner_frame,
+                text="No duplicate groups in this source folder.",
+                font=("Segoe UI", 11), bg=_M_BG, fg=_M_TEXT3,
+            ).pack(pady=20)
+        else:
+            for grp in folder_grps:
+                global_idx = grp_id_to_global.get(id(grp))
+                if global_idx is None:
+                    # Fallback: linear search by equality (slower but safe)
+                    for i, g in enumerate(self._groups):
+                        if g is grp:
+                            global_idx = i
+                            break
+                if global_idx is None:
+                    continue
+                try:
+                    self._build_group_card(global_idx, grp)
+                except Exception as exc:
+                    import traceback
+                    traceback.print_exc()
+                    try:
+                        err_frame = _tkframe(self._inner_frame, bg="#FFEBEE",
+                                             pady=8, padx=12)
+                        err_frame.pack(fill=tk.X, padx=12, pady=4)
+                        _tklabel(err_frame, bg="#FFEBEE", fg="#C62828",
+                                 text=f"Group failed to render: {exc}",
+                                 font=("Segoe UI", 9)).pack(anchor=tk.W)
+                    except Exception:
+                        pass
 
     # ── solo & broken sections ────────────────────────────────────────────────
 
@@ -2690,6 +2840,9 @@ class ReportViewer(tk.Frame):
     # ── pagination ────────────────────────────────────────────────────────────
 
     def _total_pages(self) -> int:
+        if self._pagination_mode == "per_folder":
+            # One page per source folder; no unique-images page in this mode
+            return max(1, len(self._folder_labels))
         import math
         group_pages = max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
         # Unique images get their own dedicated page when present
@@ -2698,12 +2851,16 @@ class ReportViewer(tk.Frame):
 
     def _unique_page_index(self) -> int:
         """Return the page index of the dedicated Unique Images page, or -1."""
+        if self._pagination_mode == "per_folder":
+            return -1  # no unique page in per_folder mode
         if not self._solo_originals:
             return -1
         import math
         return max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
 
     def _is_unique_page(self, page: int) -> bool:
+        if self._pagination_mode == "per_folder":
+            return False
         return self._solo_originals and page == self._unique_page_index()
 
     def _render_page(self, page: int) -> None:
@@ -2743,7 +2900,9 @@ class ReportViewer(tk.Frame):
         if canvas_w > 1:
             self._canvas.itemconfig(self._canvas_window, width=canvas_w)
 
-        if self._is_unique_page(self._current_page):
+        if self._pagination_mode == "per_folder":
+            self._build_per_folder_page(self._current_page)
+        elif self._is_unique_page(self._current_page):
             self._build_solo_section()
         else:
             if not self._groups:
@@ -2851,7 +3010,17 @@ class ReportViewer(tk.Frame):
                 activebackground=_darken_color(_ubg), activeforeground=_ufg,
             )
 
-        if self._is_unique_page(page):
+        if self._pagination_mode == "per_folder":
+            if self._folder_labels:
+                folder_label = self._folder_labels[page] if page < len(self._folder_labels) else ""
+                short_label = folder_label
+                if len(short_label) > 60:
+                    short_label = "…" + short_label[-57:]
+                self._page_info_var.set(
+                    f"Folder {page + 1} of {total}  ·  {short_label}")
+            else:
+                self._page_info_var.set(f"Page {page + 1} of {total}")
+        elif self._is_unique_page(page):
             self._page_info_var.set(
                 f"Unique Images  ·  {len(self._solo_originals)} files  ·  page {page + 1} of {total}")
         elif n > 0:

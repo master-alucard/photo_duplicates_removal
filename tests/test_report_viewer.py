@@ -1123,6 +1123,118 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
 
 # ═════════════════════════════════════════════════════════════════════════════
+# 20. per_folder pagination mode  (Mode B in-app Merge report)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_per_folder_viewer(root, folder_names=None, groups_per_folder=2, page_size=100):
+    """Create a ReportViewer in per_folder mode with synthetic groups."""
+    from config import Settings
+    from report_viewer import ReportViewer
+
+    if folder_names is None:
+        folder_names = ["/src/folder_a", "/src/folder_b"]
+
+    folder_groups = {}
+    all_groups = []
+    for name in folder_names:
+        grps = [_make_group(idx=len(all_groups) + i) for i in range(groups_per_folder)]
+        folder_groups[name] = grps
+        all_groups.extend(grps)
+
+    settings = Settings()
+    settings.report_page_size = page_size
+    viewer = ReportViewer(
+        root, all_groups,
+        settings=settings,
+        pagination_mode="per_folder",
+        folder_groups=folder_groups,
+    )
+    viewer.pack()
+    root.update_idletasks()
+    return viewer, folder_groups, all_groups
+
+
+class TestPerFolderPagination(unittest.TestCase):
+    """per_folder pagination mode — one page per source folder."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _get_root()
+
+    def test_total_pages_equals_folder_count(self):
+        """_total_pages() must equal the number of source folders."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b", "/c"])
+        self.assertEqual(viewer._total_pages(), 3)
+
+    def test_single_folder_gives_one_page(self):
+        """One source folder → exactly one page."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/only"])
+        self.assertEqual(viewer._total_pages(), 1)
+
+    def test_no_unique_page_in_per_folder_mode(self):
+        """_unique_page_index() must return -1 in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b"])
+        self.assertEqual(viewer._unique_page_index(), -1)
+        self.assertFalse(viewer._is_unique_page(0))
+        self.assertFalse(viewer._is_unique_page(1))
+
+    def test_page_info_shows_folder_label(self):
+        """Page info var should contain folder label in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/src/alpha", "/src/beta"])
+        viewer._render_page(0)
+        info = viewer._page_info_var.get()
+        self.assertIn("/src/alpha", info)
+        self.assertIn("1 of 2", info)
+
+    def test_second_page_shows_second_folder(self):
+        """Navigating to page 1 must show the second folder label."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/src/alpha", "/src/beta"])
+        viewer._render_page(1)
+        info = viewer._page_info_var.get()
+        self.assertIn("/src/beta", info)
+        self.assertIn("2 of 2", info)
+
+    def test_groups_mode_unchanged(self):
+        """Standard groups mode must still work — per_folder is purely additive."""
+        v = _make_viewer(self.root, 30, page_size=10)
+        self.assertEqual(v._pagination_mode, "groups")
+        self.assertEqual(v._total_pages(), 3)
+        self.assertEqual(v._unique_page_index(), -1)
+
+    def test_per_folder_renders_without_crash(self):
+        """Rendering both pages of a 2-folder viewer must not raise."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b"], groups_per_folder=1)
+        viewer._render_page(0)
+        viewer._render_page(1)
+        self.assertEqual(viewer._current_page, 1)
+
+    def test_empty_folder_groups_shows_fallback(self):
+        """A viewer created in per_folder mode but with no folder_groups must not crash."""
+        from config import Settings
+        from report_viewer import ReportViewer
+        settings = Settings()
+        viewer = ReportViewer(
+            self.root, [],
+            settings=settings,
+            pagination_mode="per_folder",
+            folder_groups=None,
+        )
+        viewer.pack()
+        self.root.update_idletasks()
+        # Should have exactly 1 page (the fallback)
+        self.assertEqual(viewer._total_pages(), 1)
+
+    def test_nav_buttons_update_in_per_folder_mode(self):
+        """Prev/Next navigation must work in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b", "/c"])
+        self.assertEqual(viewer._current_page, 0)
+        viewer._next_page()
+        self.assertEqual(viewer._current_page, 1)
+        viewer._prev_page()
+        self.assertEqual(viewer._current_page, 0)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
