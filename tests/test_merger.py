@@ -1007,6 +1007,120 @@ class TestMergeSettings:
         assert s2.merge_source_folders == ["/test/src1", "/test/src2"]
 
 
+# ---------------------------------------------------------------------------
+# Coverage gap: sidecar handling (.xmp / .aae) — was untested at ship.
+# ---------------------------------------------------------------------------
+
+class TestSidecars:
+    """Sidecar copy/move logic ships alongside the user-visible "Move sidecar
+    files" Settings checkbox; verify the primary's sidecar follows correctly
+    under both move (destructive) and copy (nondestructive) modes."""
+
+    def test_move_primary_carries_xmp_sidecar(self, tmp_path):
+        main = tmp_path / "main"
+        src  = tmp_path / "src"
+        main.mkdir(); src.mkdir()
+
+        primary = _make_image(src / "shot.jpg")
+        sidecar = src / "shot.xmp"
+        sidecar.write_text("<xmp/>", encoding="utf-8")
+
+        op = MergeFileOp(action="move", src=primary, dst=main / "shot.jpg",
+                         group_id="", role="unique")
+        plan = MergePlan(mode="destructive", main_folder=main,
+                         source_folders=[src], ops=[op])
+
+        executor = MergeExecutor(plan=plan, library=None, dry_run=False)
+        result = executor.apply()
+        assert result["completed"] >= 1
+
+        # Primary moved
+        assert (main / "shot.jpg").exists()
+        assert not primary.exists()
+        # Sidecar followed
+        assert (main / "shot.xmp").exists()
+        assert not sidecar.exists()
+
+    def test_copy_primary_copies_xmp_sidecar(self, tmp_path):
+        main = tmp_path / "main"
+        src  = tmp_path / "src"
+        main.mkdir(); src.mkdir()
+
+        primary = _make_image(src / "shot.jpg")
+        sidecar = src / "shot.xmp"
+        sidecar.write_text("<xmp/>", encoding="utf-8")
+
+        op = MergeFileOp(action="copy", src=primary, dst=main / "shot.jpg",
+                         group_id="", role="unique")
+        plan = MergePlan(mode="nondestructive", main_folder=main,
+                         source_folders=[src], ops=[op])
+
+        executor = MergeExecutor(plan=plan, library=None, dry_run=False)
+        executor.apply()
+
+        # Primary in BOTH src and main (copy mode)
+        assert primary.exists()
+        assert (main / "shot.jpg").exists()
+        # Sidecar also in BOTH
+        assert sidecar.exists()
+        assert (main / "shot.xmp").exists()
+
+    def test_primary_without_sidecar_does_not_error(self, tmp_path):
+        main = tmp_path / "main"
+        src  = tmp_path / "src"
+        main.mkdir(); src.mkdir()
+
+        primary = _make_image(src / "shot.jpg")
+        # No sidecar created.
+
+        op = MergeFileOp(action="move", src=primary, dst=main / "shot.jpg",
+                         group_id="", role="unique")
+        plan = MergePlan(mode="destructive", main_folder=main,
+                         source_folders=[src], ops=[op])
+
+        executor = MergeExecutor(plan=plan, library=None, dry_run=False)
+        result = executor.apply()
+
+        assert result.get("errors") == []
+        assert (main / "shot.jpg").exists()
+
+
+# ---------------------------------------------------------------------------
+# Coverage gap: stop/pause during trash phase (symmetric with apply phase)
+# ---------------------------------------------------------------------------
+
+class TestTrashStopPause:
+    """trash_duplicates honours stop/pause flags the same way apply() does."""
+
+    def test_trash_stop_flag_aborts(self, tmp_path):
+        main = tmp_path / "main"
+        src  = tmp_path / "src"
+        main.mkdir(); src.mkdir()
+
+        # 3 duplicate-role ops with src files actually present on disk
+        ops = []
+        for i in range(3):
+            p = _make_image(src / f"dup{i}.jpg")
+            # In Mode A, role='duplicate' ops have src == dst (see comment in
+            # merger.py "dst unused for trash").
+            ops.append(MergeFileOp(action="move", src=p, dst=p,
+                                   group_id=f"g{i}", role="duplicate"))
+        plan = MergePlan(mode="destructive", main_folder=main,
+                         source_folders=[src], ops=ops)
+
+        stop_flag = [True]  # pre-stopped
+        executor = MergeExecutor(plan=plan, library=None, dry_run=False,
+                                 stop_flag=stop_flag)
+        result = executor.trash_duplicates()
+
+        # Nothing trashed; all 3 source files still in place.
+        assert result.get("trashed", 0) == 0
+        for i in range(3):
+            assert (src / f"dup{i}.jpg").exists()
+        # No trash folder created
+        assert not (src / "trash").exists()
+
+
 if __name__ == "__main__":
     import pytest as _pytest
     _pytest.main([__file__, "-v"])

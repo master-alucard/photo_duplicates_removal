@@ -4399,7 +4399,7 @@ class App:
 
         ks_r3 = ttk.Frame(ks)
         ks_r3.pack(fill=tk.X, pady=2)
-        ttk.Label(ks_r3, text="Original selection strategy:", anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Label(ks_r3, text="Prefer to keep:", anchor=tk.W).pack(side=tk.LEFT)
         ttk.Radiobutton(ks_r3, text="Largest resolution",
                         variable=self.strategy_var, value="pixels").pack(side=tk.LEFT, padx=(8, 0))
         ttk.Radiobutton(ks_r3, text="Oldest file date",
@@ -4841,7 +4841,7 @@ class App:
             f"  {plan.main_folder}\n\n"
             f"Mode: {mode_label}\n"
             f"Total size: {size_str}\n"
-            f"Original selection: {strat_label}\n"
+            f"Prefer to keep: {strat_label}\n"
             f"Duplicate groups detected: {plan.n_groups}\n"
             f"Name collisions (will be renamed): {plan.n_suffix_renames}\n\n"
             "Proceed?",
