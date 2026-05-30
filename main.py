@@ -910,6 +910,10 @@ class App:
         self._merging: bool = False
         self._merge_stop_flag:   list = [False]
         self._merge_pause_flag:  list = [False]
+        # MergeExecutor appends here when a drive vanishes mid-merge; the
+        # progress poll consumes it to surface the reconnect modal.
+        self._merge_drive_disconnect_paths: list = []
+        self._merge_drive_modal_open: bool = False
         self._merge_plan = None          # set after scan phase
         self._merge_groups: list = []    # groups from last scan
         self._merge_all_records: list = []  # all records from last scan
@@ -4565,6 +4569,7 @@ class App:
         self._merging = True
         self._merge_stop_flag[0] = False
         self._merge_pause_flag[0] = False
+        self._merge_drive_disconnect_paths.clear()
         self._merge_plan = None
 
         # Disable Apply + Trash until scan completes
@@ -4861,6 +4866,7 @@ class App:
         self._merging = True
         self._merge_stop_flag[0] = False
         self._merge_pause_flag[0] = False
+        self._merge_drive_disconnect_paths.clear()
 
         _mat_disable(self._merge_apply_btn)
         _mat_disable(self._merge_trash_btn)
@@ -4886,6 +4892,7 @@ class App:
                     dry_run=False,
                     stop_flag=self._merge_stop_flag,
                     pause_flag=self._merge_pause_flag,
+                    drive_disconnect_paths=self._merge_drive_disconnect_paths,
                     progress_cb=lambda m, d, t: self._on_merge_progress(m, d, t),
                     move_sidecars=self._merge_sidecars_var.get(),
                 )
@@ -4902,6 +4909,36 @@ class App:
         self._merge_pending_progress = (msg, done, total)
         if self._merge_progress_tick_after_id is None:
             self.root.after(0, self._merge_progress_tick)
+        # Drive-disconnect modal trigger.  The executor appends to
+        # _merge_drive_disconnect_paths from its worker thread; surface the
+        # modal on the main thread the next time progress reports in.
+        if self._merge_drive_disconnect_paths and not self._merge_drive_modal_open:
+            self.root.after(0, self._show_merge_drive_disconnect_modal)
+
+    def _show_merge_drive_disconnect_modal(self) -> None:
+        """Modal shown when the executor reports a vanished drive.
+
+        The merge worker auto-pauses and polls for the drive to come back —
+        all this dialog does is inform the user and offer a Cancel path.
+        On Cancel the merge stop flag is raised.  On OK the dialog closes
+        and the worker resumes naturally as soon as the drive returns.
+        """
+        if self._merge_drive_modal_open or not self._merge_drive_disconnect_paths:
+            return
+        self._merge_drive_modal_open = True
+        try:
+            bad_path = str(self._merge_drive_disconnect_paths[0])
+            cont = messagebox.askokcancel(
+                "Drive Disconnected",
+                f"Drive at:\n  {bad_path}\nis no longer available.\n\n"
+                "Reconnect the drive and the merge will resume automatically.\n\n"
+                "Click Cancel to stop the merge instead.",
+                parent=self.root,
+            )
+            if not cont:
+                self._merge_stop_flag[0] = True
+        finally:
+            self._merge_drive_modal_open = False
 
     def _on_merge_apply_done(self, result: dict) -> None:
         _set_sleep_prevention(False)
@@ -4999,6 +5036,7 @@ class App:
                     dry_run=False,
                     stop_flag=self._merge_stop_flag,
                     pause_flag=self._merge_pause_flag,
+                    drive_disconnect_paths=self._merge_drive_disconnect_paths,
                     move_sidecars=self._merge_sidecars_var.get(),
                 )
                 result = executor.trash_duplicates()

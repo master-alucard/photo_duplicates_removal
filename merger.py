@@ -316,6 +316,12 @@ class MergeExecutor:
         dry_run: bool = False,
         stop_flag: "Optional[list]" = None,
         pause_flag: "Optional[list]" = None,
+        # When a drive becomes unreachable mid-merge the executor appends the
+        # offending path(s) here and sets pause_flag[0] = True.  The UI poll
+        # consumes the list to show a "Reconnect drive X and click Resume"
+        # modal.  Cleared by the executor when the drive returns OR by the UI
+        # when Cancel is clicked.
+        drive_disconnect_paths: "Optional[list]" = None,
         progress_cb: "Optional[Callable]" = None,
         move_sidecars: bool = True,
     ) -> None:
@@ -324,6 +330,9 @@ class MergeExecutor:
         self._dry_run       = dry_run
         self._stop_flag     = stop_flag if stop_flag is not None else [False]
         self._pause_flag    = pause_flag if pause_flag is not None else [False]
+        self._drive_disconnect_paths = (
+            drive_disconnect_paths if drive_disconnect_paths is not None else []
+        )
         self._progress_cb   = progress_cb
         self._move_sidecars = move_sidecars
         self._operations: list[dict] = []
@@ -355,9 +364,15 @@ class MergeExecutor:
                 self._progress_cb(f"Moving {i + 1}/{total}…", i, total)
 
             if not self._drive_ok(op.src) or not self._drive_ok(op.dst):
-                errors.append(f"Drive unavailable for: {op.src.name}")
-                self._log_op(op, status="error: drive unavailable")
-                continue
+                # Auto-pause: wait for the drive(s) to come back instead of
+                # silently skipping the op.  Resumes when both drives return
+                # OR breaks out if stop_flag is set from the UI.
+                if not self._wait_for_drives(op.src, op.dst):
+                    # Stopped before drives returned.
+                    break
+                # Drives back; re-check before executing (file may have been
+                # removed while the drive was offline; the op will then fail
+                # below in the move/copy try-block and surface as an error).
 
             if not self._dry_run:
                 try:
@@ -414,6 +429,11 @@ class MergeExecutor:
                     break
 
                 src = op.src
+                # Drive-disconnect check matches apply() semantics — pause and
+                # wait rather than silently dropping the trash op on the floor.
+                if not self._drive_ok(src):
+                    if not self._wait_for_drives(src):
+                        break
                 if not src.exists():
                     continue
                 trash_dir = src.parent / "trash"
@@ -448,6 +468,9 @@ class MergeExecutor:
                     if self._stop_flag[0]:
                         break
 
+                    if not self._drive_ok(src):
+                        if not self._wait_for_drives(src):
+                            break
                     if not src.exists():
                         continue
                     trash_dir = Path(sf_str) / "trash"
@@ -478,6 +501,38 @@ class MergeExecutor:
     def _drive_ok(path: Path) -> bool:
         from mover import _drive_available
         return _drive_available(path)
+
+    def _wait_for_drives(self, *paths) -> bool:
+        """Block until every path's drive is available again, or stop is set.
+
+        Used when a drive vanishes mid-merge.  Sets pause_flag + records the
+        unreachable paths so the UI can show the reconnect modal; auto-resumes
+        when the drive returns.
+
+        Returns True when drives are back, False when stop_flag was set.
+        """
+        # Tell the UI which drives are missing (first one is enough; modal
+        # will show the drive letter from the path).
+        for p in paths:
+            try:
+                self._drive_disconnect_paths.append(p)
+            except Exception:
+                pass
+        self._pause_flag[0] = True
+        while self._pause_flag[0]:
+            if self._stop_flag[0]:
+                return False
+            if all(self._drive_ok(p) for p in paths):
+                # Drives are back — auto-resume (don't wait for UI).
+                self._pause_flag[0] = False
+                # Drain any echoes the UI hasn't consumed yet.
+                try:
+                    self._drive_disconnect_paths.clear()
+                except Exception:
+                    pass
+                return True
+            time.sleep(0.5)
+        return not self._stop_flag[0]
 
     def _handle_sidecars(self, op: MergeFileOp) -> None:
         for ext in SIDECAR_EXTENSIONS:

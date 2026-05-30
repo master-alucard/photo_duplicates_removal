@@ -729,23 +729,41 @@ class TestPreviewFirst:
 # ---------------------------------------------------------------------------
 
 class TestDriveDisconnectPause:
-    def test_drive_unavailable_skips_op(self, tmp_path):
+    def test_drive_unavailable_pauses_then_retries(self, tmp_path):
+        """AC17: drive disconnect must pause + retry on resume, not skip.
+
+        Earlier the executor logged a "drive unavailable" error and moved on
+        to the next op — defeating the spec's "no skipped files" guarantee.
+        The pause-and-retry path now waits until the drive comes back (or
+        the user clicks Cancel which sets stop_flag).
+        """
         main = tmp_path / "main"
         src  = tmp_path / "src"
         main.mkdir(); src.mkdir()
 
-        img = _make_image(src / "a.jpg")
+        _make_image(src / "a.jpg")
         op  = MergeFileOp(action="move", src=src / "a.jpg", dst=main / "a.jpg",
                            group_id="", role="unique")
         plan = MergePlan(mode="destructive", main_folder=main, source_folders=[src], ops=[op])
 
-        with patch("merger.MergeExecutor._drive_ok", return_value=False):
-            executor = MergeExecutor(plan=plan, library=None, dry_run=False)
+        # Simulate drive vanishing for one check then returning.  side_effect
+        # iterates: False (initial check fails) → True, True, ... (drives back).
+        # _drive_ok is queried first for src, then for dst, then for both
+        # again in _wait_for_drives.  Provide enough True values.
+        states = [False, False] + [True] * 50
+        disconnects: list = []
+
+        with patch("merger.MergeExecutor._drive_ok", side_effect=lambda *_: states.pop(0)):
+            executor = MergeExecutor(plan=plan, library=None, dry_run=False,
+                                     drive_disconnect_paths=disconnects)
             result = executor.apply()
 
-        assert result["completed"] == 0
-        assert len(result["errors"]) >= 1
-        assert (src / "a.jpg").exists()   # not moved
+        # The op should have been retried after the drive came back.
+        assert result["completed"] == 1, f"expected retry not skip, got {result}"
+        assert (main / "a.jpg").exists()
+        assert not (src / "a.jpg").exists()
+        # UI was notified at least once during the pause.
+        assert disconnects == []  # cleared by auto-resume in _wait_for_drives
 
     def test_pause_then_stop(self, tmp_path):
         """Pause flag pauses the loop; stop flag then aborts cleanly."""
