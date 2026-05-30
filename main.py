@@ -5147,6 +5147,28 @@ class App:
                    _ACCENT if space_b > 0 else _M_TEXT1,
                    tint=_ACCENT_TINT if space_b > 0 else None)
 
+        # Per-source-folder breakdown for Non-destructive mode (spec calls for
+        # per-folder report layout in Mode B; the full grid lives in Review
+        # In-App, this is a counts-only preview inside the results card).
+        if mode == "nondestructive" and getattr(plan, "source_trash", None):
+            per_src = tk.Frame(card, bg=_CARD_BG)
+            per_src.pack(fill=tk.X, padx=16, pady=(0, 8))
+            tk.Label(per_src, text="Per source folder (internal duplicates to trash):",
+                     font=("Segoe UI", 9, "bold"), bg=_CARD_BG, fg=_M_TEXT2,
+                     anchor=tk.W).pack(fill=tk.X)
+            for sf_str, trash_paths in plan.source_trash.items():
+                row = tk.Frame(per_src, bg=_CARD_BG)
+                row.pack(fill=tk.X, pady=(2, 0))
+                # Show just the folder leaf name + full count.
+                leaf = Path(sf_str).name or sf_str
+                tk.Label(row, text=f"  • {leaf}",
+                         font=("Segoe UI", 9), bg=_CARD_BG, fg=_M_TEXT2,
+                         anchor=tk.W).pack(side=tk.LEFT)
+                tk.Label(row, text=f"{len(trash_paths)} dup(s)",
+                         font=("Segoe UI", 9), bg=_CARD_BG,
+                         fg=(_M_ERROR if trash_paths else _M_HINT5),
+                         anchor=tk.E).pack(side=tk.RIGHT, padx=(0, 4))
+
         # Mode label
         mode_desc = "Destructive (move originals)" if mode == "destructive" else "Non-destructive (copy originals)"
         tk.Label(card,

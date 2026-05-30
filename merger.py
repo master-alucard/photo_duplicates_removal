@@ -51,7 +51,14 @@ class MergePlan:
     n_groups: int = 0
     n_to_main: int = 0
     n_suffix_renames: int = 0
-    space_delta: int = 0     # bytes that will be added to main
+    # Cumulative file size that the merge will TOUCH on the main drive:
+    # - Non-destructive (copy) mode: this is the new disk usage in main.
+    # - Destructive (move) mode same drive: bytes are effectively
+    #   re-parented, not duplicated, so "added to main" overstates by the
+    #   in-source size; the UI shows it as "Total size" honestly.
+    # - Destructive cross-drive: copy+delete, so the bytes ARE written to
+    #   main before being unlinked from the source.
+    space_delta: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -59,11 +66,26 @@ class MergePlan:
 # ---------------------------------------------------------------------------
 
 def _is_in_folder(path: Path, folder: Path) -> bool:
-    """Return True when path is inside folder (resolved comparison)."""
+    """Return True when path is inside folder.
+
+    Uses pure-string normalisation rather than `Path.resolve()` — on Windows
+    `resolve()` does parent-traversal I/O even for non-existent paths, and
+    this helper is called per-record in the planner's hot loops.  The
+    semantic trade-off: symlinks pointing OUT of a folder will not be
+    detected as outside (since we don't follow symlinks here) — acceptable
+    for photo libraries where symlink traversal is rare.
+    """
     try:
-        path.resolve().relative_to(folder.resolve())
-        return True
-    except ValueError:
+        norm_path = os.path.normcase(os.path.normpath(str(path)))
+        norm_folder = os.path.normcase(os.path.normpath(str(folder)))
+        sep = os.sep
+        # Treat folder as a prefix; add trailing sep so /foo doesn't match /foobar
+        if not norm_folder.endswith(sep):
+            norm_folder_pref = norm_folder + sep
+        else:
+            norm_folder_pref = norm_folder
+        return norm_path == norm_folder.rstrip(sep) or norm_path.startswith(norm_folder_pref)
+    except Exception:
         return False
 
 
@@ -146,7 +168,9 @@ def build_merge_plan(
     # Pre-populate with files already in main (they stay in place)
     for rec in records:
         if _is_in_folder(rec.path, main_folder):
-            claimed.add(str(rec.path.resolve()))
+            # Same string-normalisation as _compute_target for the claimed-
+            # paths set — avoids a per-record resolve() I/O on Windows.
+            claimed.add(os.path.normcase(os.path.normpath(str(rec.path))))
 
     def _is_cross_format_group(grp) -> bool:
         all_paths = [r.path for r in (grp.originals or [])] + [r.path for r in (grp.previews or [])]
