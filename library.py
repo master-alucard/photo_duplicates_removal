@@ -257,6 +257,23 @@ class VideoRecord:
         return self.duration is None or len(self.frame_hashes) == 0
 
 
+# ── Cache I/O helpers ──────────────────────────────────────────────────────────
+
+def _atomic_write_json(cache_path: Path, data: dict) -> None:
+    """Write JSON atomically: write to a temp sibling, then rename in place.
+
+    A direct ``cache_path.write_text(...)`` is not atomic — a crash or power
+    loss mid-write can truncate the on-disk cache to zero bytes (or worse,
+    leave half-written garbage that fails to parse).  os.replace is atomic
+    on both Windows and POSIX provided the temp file lives on the same
+    filesystem, so we put the temp next to the destination.
+    """
+    payload = json.dumps(data, ensure_ascii=False)
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(str(tmp), str(cache_path))
+
+
 # ── Library directory ──────────────────────────────────────────────────────────
 
 def get_library_dir() -> Path:
@@ -492,7 +509,7 @@ class Library:
             "version": _CACHE_VERSION,
             "files":   {k: asdict(v) for k, v in cache.items()},
         }
-        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(cache_path, data)
 
     # ── Video-record cache ─────────────────────────────────────────────────
 
@@ -519,7 +536,7 @@ class Library:
             "version": _VIDEO_CACHE_VERSION,
             "files":   {k: asdict(v) for k, v in cache.items()},
         }
-        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(cache_path, data)
 
     # ── Drive status ───────────────────────────────────────────────────────
 

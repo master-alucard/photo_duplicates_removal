@@ -1139,6 +1139,87 @@ class TestTrashStopPause:
         assert not (src / "trash").exists()
 
 
+# ---------------------------------------------------------------------------
+# Coverage gap: end-to-end Library × MergeExecutor over a multi-folder fixture
+# ---------------------------------------------------------------------------
+
+class TestExecutorLibraryIntegration:
+    """Verify Library.relocate / duplicate_entry are wired correctly through
+    MergeExecutor.apply() against a real Library instance.  Existing tests
+    cover the Library methods in isolation and the executor with library=None
+    mocks; this exercises both together so the cache continuity guarantee
+    isn't just a unit-test claim.
+    """
+
+    def test_destructive_move_relocates_library_entry(self, tmp_path):
+        lib = _make_lib(tmp_path)
+        src_folder = tmp_path / "src"
+        main_folder = tmp_path / "main"
+        src_folder.mkdir(); main_folder.mkdir()
+
+        primary = _make_image(src_folder / "a.jpg")
+        # Pre-seed a cache entry for the source path.
+        old_key = str(primary)
+        rec = _make_file_record(old_key)
+        rec.phash = "abcd1234deadbeef"
+        rec.dhash = "ffff0000aaaa5555"
+        lib.save_cache(str(src_folder), {old_key: rec})
+
+        op = MergeFileOp(action="move", src=primary, dst=main_folder / "a.jpg",
+                         group_id="", role="unique")
+        plan = MergePlan(mode="destructive", main_folder=main_folder,
+                         source_folders=[src_folder], ops=[op])
+
+        executor = MergeExecutor(plan=plan, library=lib, dry_run=False)
+        result = executor.apply()
+        assert result["completed"] == 1
+
+        # File on disk: in main, not in src
+        assert (main_folder / "a.jpg").exists()
+        assert not primary.exists()
+
+        # Library: entry under new path with hashes preserved, gone from old.
+        src_cache = lib.load_cache(str(src_folder))
+        main_cache = lib.load_cache(str(main_folder))
+        new_key = str(main_folder / "a.jpg")
+        assert old_key not in src_cache
+        assert new_key in main_cache
+        assert main_cache[new_key].phash == "abcd1234deadbeef"
+        assert main_cache[new_key].dhash == "ffff0000aaaa5555"
+
+    def test_nondestructive_copy_duplicates_library_entry(self, tmp_path):
+        lib = _make_lib(tmp_path)
+        src_folder = tmp_path / "src"
+        main_folder = tmp_path / "main"
+        src_folder.mkdir(); main_folder.mkdir()
+
+        primary = _make_image(src_folder / "a.jpg")
+        old_key = str(primary)
+        rec = _make_file_record(old_key)
+        rec.phash = "feedfacecafebabe"
+        lib.save_cache(str(src_folder), {old_key: rec})
+
+        op = MergeFileOp(action="copy", src=primary, dst=main_folder / "a.jpg",
+                         group_id="", role="unique")
+        plan = MergePlan(mode="nondestructive", main_folder=main_folder,
+                         source_folders=[src_folder], ops=[op])
+
+        executor = MergeExecutor(plan=plan, library=lib, dry_run=False)
+        executor.apply()
+
+        # Both files still exist on disk (copy mode).
+        assert primary.exists()
+        assert (main_folder / "a.jpg").exists()
+
+        # Library: source entry preserved, main entry added with same hash.
+        src_cache = lib.load_cache(str(src_folder))
+        main_cache = lib.load_cache(str(main_folder))
+        new_key = str(main_folder / "a.jpg")
+        assert old_key in src_cache
+        assert new_key in main_cache
+        assert main_cache[new_key].phash == "feedfacecafebabe"
+
+
 if __name__ == "__main__":
     import pytest as _pytest
     _pytest.main([__file__, "-v"])
