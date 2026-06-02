@@ -32,6 +32,26 @@ def _get_root() -> tk.Tk:
     return _ROOT
 
 
+def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.01) -> bool:
+    """Poll *predicate* until it is truthy or *timeout* seconds elapse.
+
+    The thumbnail loader runs on a background daemon thread, so tests that
+    assert on its side effects must wait for it to finish.  A fixed
+    ``time.sleep`` is racy: under semaphore contention or scheduler jitter the
+    thread can miss a short window, which made these tests flaky once the suite
+    stopped hanging before reaching them.  Polling for the actual condition
+    waits exactly as long as needed and tolerates jitter.  Returns the final
+    truthiness so callers can assert on it directly.
+    """
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
+
 def _make_record(path="/fake/img.jpg", width=800, height=600):
     """Return a minimal ImageRecord."""
     from scanner import ImageRecord
@@ -828,7 +848,7 @@ class TestVideoThumbnailLoader(unittest.TestCase):
             v._spawn_thumb_thread(
                 rec.path, label, 120, False, v._thumb_batch_id, is_video=True
             )
-            time.sleep(0.4)
+            _wait_until(lambda: called["extract"])
 
         self.assertTrue(called["extract"],
                         "_extract_video_thumb should be called for is_video=True records")
@@ -895,9 +915,11 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("scanner._extract_video_thumb", fake_extract):
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            # Wait for the first extraction to populate the cache, then issue the
+            # second request — it must hit the cache and never call extract again.
+            _wait_until(lambda: path in v._video_frame_cache)
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Second request for same path should use cache (1 extraction call)")
@@ -923,9 +945,11 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("scanner._extract_video_thumb", fake_extract):
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            # Wait for the failed extraction to record None, then issue the second
+            # request — the cached None must short-circuit it (no re-extraction).
+            _wait_until(lambda: path in v._video_frame_cache)
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Failed extraction should be cached as None; retry should be skipped")
@@ -954,7 +978,7 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("PIL.Image.open", spy_open):
             v._spawn_thumb_thread(path, label, 120, False, v._thumb_batch_id, is_video=False)
-            time.sleep(0.3)
+            _wait_until(lambda: pil_called["n"] > 0)
 
         self.assertGreater(pil_called["n"], 0,
                            "PIL.Image.open should be called for non-video (is_video=False) records")
@@ -1018,10 +1042,10 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         with patch("scanner._extract_video_thumb", fake_extract):
             # First call — cache miss, should invoke extract once
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, True)
-            time.sleep(0.4)
+            _wait_until(lambda: path in v._video_frame_cache)
             # Second call — cache hit, should NOT invoke extract
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Second cache-hit call must not invoke _extract_video_thumb again")
@@ -1120,6 +1144,118 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         # Label should NOT have changed
         self.assertEqual(str(label.cget("image")), str(initial_image),
                          "Stale batch_id must prevent label update")
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 20. per_folder pagination mode  (Mode B in-app Merge report)
+# ═════════════════════════════════════════════════════════════════════════════
+
+def _make_per_folder_viewer(root, folder_names=None, groups_per_folder=2, page_size=100):
+    """Create a ReportViewer in per_folder mode with synthetic groups."""
+    from config import Settings
+    from report_viewer import ReportViewer
+
+    if folder_names is None:
+        folder_names = ["/src/folder_a", "/src/folder_b"]
+
+    folder_groups = {}
+    all_groups = []
+    for name in folder_names:
+        grps = [_make_group(idx=len(all_groups) + i) for i in range(groups_per_folder)]
+        folder_groups[name] = grps
+        all_groups.extend(grps)
+
+    settings = Settings()
+    settings.report_page_size = page_size
+    viewer = ReportViewer(
+        root, all_groups,
+        settings=settings,
+        pagination_mode="per_folder",
+        folder_groups=folder_groups,
+    )
+    viewer.pack()
+    root.update_idletasks()
+    return viewer, folder_groups, all_groups
+
+
+class TestPerFolderPagination(unittest.TestCase):
+    """per_folder pagination mode — one page per source folder."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _get_root()
+
+    def test_total_pages_equals_folder_count(self):
+        """_total_pages() must equal the number of source folders."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b", "/c"])
+        self.assertEqual(viewer._total_pages(), 3)
+
+    def test_single_folder_gives_one_page(self):
+        """One source folder → exactly one page."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/only"])
+        self.assertEqual(viewer._total_pages(), 1)
+
+    def test_no_unique_page_in_per_folder_mode(self):
+        """_unique_page_index() must return -1 in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b"])
+        self.assertEqual(viewer._unique_page_index(), -1)
+        self.assertFalse(viewer._is_unique_page(0))
+        self.assertFalse(viewer._is_unique_page(1))
+
+    def test_page_info_shows_folder_label(self):
+        """Page info var should contain folder label in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/src/alpha", "/src/beta"])
+        viewer._render_page(0)
+        info = viewer._page_info_var.get()
+        self.assertIn("/src/alpha", info)
+        self.assertIn("1 of 2", info)
+
+    def test_second_page_shows_second_folder(self):
+        """Navigating to page 1 must show the second folder label."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/src/alpha", "/src/beta"])
+        viewer._render_page(1)
+        info = viewer._page_info_var.get()
+        self.assertIn("/src/beta", info)
+        self.assertIn("2 of 2", info)
+
+    def test_groups_mode_unchanged(self):
+        """Standard groups mode must still work — per_folder is purely additive."""
+        v = _make_viewer(self.root, 30, page_size=10)
+        self.assertEqual(v._pagination_mode, "groups")
+        self.assertEqual(v._total_pages(), 3)
+        self.assertEqual(v._unique_page_index(), -1)
+
+    def test_per_folder_renders_without_crash(self):
+        """Rendering both pages of a 2-folder viewer must not raise."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b"], groups_per_folder=1)
+        viewer._render_page(0)
+        viewer._render_page(1)
+        self.assertEqual(viewer._current_page, 1)
+
+    def test_empty_folder_groups_shows_fallback(self):
+        """A viewer created in per_folder mode but with no folder_groups must not crash."""
+        from config import Settings
+        from report_viewer import ReportViewer
+        settings = Settings()
+        viewer = ReportViewer(
+            self.root, [],
+            settings=settings,
+            pagination_mode="per_folder",
+            folder_groups=None,
+        )
+        viewer.pack()
+        self.root.update_idletasks()
+        # Should have exactly 1 page (the fallback)
+        self.assertEqual(viewer._total_pages(), 1)
+
+    def test_nav_buttons_update_in_per_folder_mode(self):
+        """Prev/Next navigation must work in per_folder mode."""
+        viewer, _, _ = _make_per_folder_viewer(self.root, ["/a", "/b", "/c"])
+        self.assertEqual(viewer._current_page, 0)
+        viewer._next_page()
+        self.assertEqual(viewer._current_page, 1)
+        viewer._prev_page()
+        self.assertEqual(viewer._current_page, 0)
 
 
 # ═════════════════════════════════════════════════════════════════════════════

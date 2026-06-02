@@ -115,6 +115,7 @@ _M_DISABLED_FG  = "#838387"
 # Tint backgrounds for stat cells
 _M_ERROR_TINT   = "#FFCDD2"
 _M_SUCCESS_TINT = "#DCEDC8"
+_M_WARNING_TINT = "#FFE0B2"
 # Button backgrounds — always saturated for white text
 _BTN_PRIMARY    = "#1565C0"
 _BTN_SUCCESS    = "#2E7D32"
@@ -143,7 +144,7 @@ def _apply_theme(dark: bool = False) -> None:
     global _M_DETAIL_BG, _M_PURPLE, _M_NOT_INST, _M_DISABLED_FG
     global _BTN_PRIMARY, _BTN_SUCCESS, _BTN_ERROR, _BTN_WARNING, _BTN_SECONDARY
     global _SL_REC_BAND, _SL_TRACK, _SL_THUMB, _SL_THUMB_OL
-    global _M_ERROR_TINT, _M_SUCCESS_TINT
+    global _M_ERROR_TINT, _M_SUCCESS_TINT, _M_WARNING_TINT
 
     p = _theme_mod.get_palette(dark)
     _ACCENT        = p["ACCENT"]
@@ -192,6 +193,7 @@ def _apply_theme(dark: bool = False) -> None:
     _SL_THUMB_OL    = p["SLIDER_THUMB_OL"]
     _M_ERROR_TINT   = p["ERROR_TINT"]
     _M_SUCCESS_TINT = p["SUCCESS_TINT"]
+    _M_WARNING_TINT = p["WARNING_TINT"]
 
 
 # Dark protection: maps strength 1-10 → (dark_threshold, dark_tighten_factor)
@@ -755,6 +757,7 @@ class App:
 
         self._tab_scan     = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_custom   = ttk.Frame(self._nb, style="Page.TFrame")
+        self._tab_merge    = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_organize = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_history  = ttk.Frame(self._nb, style="Page.TFrame")
         self._tab_library  = ttk.Frame(self._nb, style="Page.TFrame")
@@ -763,6 +766,7 @@ class App:
 
         self._nb.add(self._tab_scan,     text="  Scan  ")
         self._nb.add(self._tab_custom,   text="  Compare Scan  ")
+        self._nb.add(self._tab_merge,    text="  Merge  ")
         self._nb.add(self._tab_organize, text="  Organize by Date  ")
         self._nb.add(self._tab_history,  text="  History  ")
         self._nb.add(self._tab_library,  text="  Library  ")
@@ -775,6 +779,7 @@ class App:
         self._build_scan_tab()
         self._build_results_tab_content()
         self._build_custom_scan_tab()
+        self._build_merge_tab()
         self._build_organize_tab()
         self._build_history_tab()
         self._build_library_tab()
@@ -891,6 +896,34 @@ class App:
         self._custom_estimate_var = tk.StringVar(value="Select folders to see estimate.")
         self._custom_dry_var     = tk.BooleanVar(value=s2.dry_run)
         self._custom_dry_var.trace_add("write", self._on_setting_change)
+
+        # ── Merge tab state ───────────────────────────────────────────────────
+        self._merge_main_var       = tk.StringVar(value=getattr(s2, "merge_main_folder", ""))
+        self._merge_mode_var       = tk.StringVar(value=getattr(s2, "merge_mode", "destructive"))
+        self._merge_subfolder_var  = tk.BooleanVar(value=getattr(s2, "merge_keep_subfolder", False))
+        self._merge_recursive_var  = tk.BooleanVar(value=getattr(s2, "merge_recursive", True))
+        self._merge_sidecars_var   = tk.BooleanVar(value=getattr(s2, "merge_move_sidecars", True))
+        self._merge_phase_label    = tk.StringVar(value="Ready.")
+        self._merge_tracker: "PhaseTracker | None" = None
+        self._merge_source_folders: list = list(getattr(s2, "merge_source_folders", []))
+        # Merge runtime state — completely independent from scan pipeline
+        self._merging: bool = False
+        self._merge_stop_flag:   list = [False]
+        self._merge_pause_flag:  list = [False]
+        # MergeExecutor appends here when a drive vanishes mid-merge; the
+        # progress poll consumes it to surface the reconnect modal.
+        self._merge_drive_disconnect_paths: list = []
+        self._merge_drive_modal_open: bool = False
+        self._merge_plan = None          # set after scan phase
+        self._merge_groups: list = []    # groups from last scan
+        self._merge_all_records: list = []  # all records from last scan
+        self._merge_report_path: "Path | None" = None  # last generated HTML report
+        self._merge_pending_progress: "tuple | None" = None
+        self._merge_progress_tick_after_id: "int | None" = None
+        for _mv in (self._merge_main_var, self._merge_mode_var,
+                    self._merge_subfolder_var, self._merge_recursive_var,
+                    self._merge_sidecars_var):
+            _mv.trace_add("write", self._on_setting_change)
 
         # Add traces
         for var in (
@@ -4252,6 +4285,1005 @@ class App:
             s.use_dual_hash   = self.dual_hash_var.get()
             s.use_histogram   = self.hist_var.get()
             s.dark_protection = self.dark_var.get()
+        # Merge tab settings
+        s.merge_main_folder      = self._merge_main_var.get()
+        s.merge_mode             = self._merge_mode_var.get()
+        s.merge_keep_subfolder   = self._merge_subfolder_var.get()
+        s.merge_recursive        = self._merge_recursive_var.get()
+        s.merge_move_sidecars    = self._merge_sidecars_var.get()
+        s.merge_source_folders   = list(self._merge_source_folders)
+
+    # ── Merge tab ─────────────────────────────────────────────────────────────
+
+    def _build_merge_tab(self) -> None:
+        """Consolidate N source folders into one main folder, originals only."""
+        tab = self._tab_merge
+        self._merge_form_outer, body = _scrollable_frame(tab)
+
+        # ── Info banner ───────────────────────────────────────────────────
+        banner = tk.Frame(body, bg=_M_INFO_BG, bd=0)
+        banner.pack(fill=tk.X, pady=(0, 8))
+        tk.Frame(banner, height=3, bg=_ACCENT).pack(fill=tk.X)
+        tk.Label(
+            banner,
+            text=(
+                "Merge consolidates files from multiple source folders into a single main folder.\n"
+                "Only originals are moved/copied — duplicates are never duplicated into main.\n"
+                "Scan first (non-destructive preview), then click Apply Merge to execute."
+            ),
+            bg=_M_INFO_BG, fg=_M_INFO_FG,
+            font=("Segoe UI", 8), justify=tk.LEFT, padx=12, pady=8,
+        ).pack(anchor=tk.W)
+
+        # ── Main folder ───────────────────────────────────────────────────
+        self._merge_folders_section = _section(body, "Folders")
+        mf_row = ttk.Frame(self._merge_folders_section)
+        mf_row.pack(fill=tk.X, pady=3)
+        ttk.Label(mf_row, text="Main folder (target):", width=22, anchor=tk.W).pack(side=tk.LEFT)
+        mf_ent = ttk.Entry(mf_row, textvariable=self._merge_main_var)
+        mf_ent.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+        self._bind_paste_normalize(mf_ent, self._merge_main_var)
+        ttk.Button(mf_row, text="Browse…",
+                   command=lambda: self._browse(self._merge_main_var, "merge_main_folder")).pack(side=tk.RIGHT)
+
+        # ── Source folders list ───────────────────────────────────────────
+        sf_lbl_row = ttk.Frame(self._merge_folders_section)
+        sf_lbl_row.pack(fill=tk.X, pady=(6, 2))
+        ttk.Label(sf_lbl_row, text="Source folders:", anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Button(sf_lbl_row, text="Add…",
+                   command=self._merge_add_source).pack(side=tk.RIGHT, padx=(4, 0))
+        ttk.Button(sf_lbl_row, text="Remove selected",
+                   command=self._merge_remove_source).pack(side=tk.RIGHT, padx=4)
+
+        self._merge_src_listbox = tk.Listbox(
+            self._merge_folders_section, height=5,
+            font=("Segoe UI", 9), selectmode=tk.SINGLE,
+            relief=tk.FLAT, bd=1,
+        )
+        self._merge_src_listbox.pack(fill=tk.X, pady=(0, 4))
+        for sf in self._merge_source_folders:
+            self._merge_src_listbox.insert(tk.END, sf)
+        # Inline empty-state hint shown only while the listbox is empty so
+        # the user knows the next action is "Add Source".
+        self._merge_src_hint_lbl = tk.Label(
+            self._merge_folders_section,
+            text="No source folders yet — click Add Source to pick one.",
+            bg=_BG, fg=_M_HINT2, font=("Segoe UI", 8, "italic"),
+        )
+        self._merge_refresh_src_hint()
+
+        # ── Mode ─────────────────────────────────────────────────────────
+        mode_card = ttk.LabelFrame(body, text="Merge Mode", padding=(12, 8, 12, 10))
+        mode_card.pack(fill=tk.X, pady=(0, 8))
+        for val, lbl, desc in (
+            ("destructive", "Destructive (default)",
+             "Originals are physically moved to main; duplicates stay in source. "
+             "Trash step removes those leftover source duplicates."),
+            ("nondestructive", "Non-destructive",
+             "Originals are copied to main; source folders are not depleted. "
+             "Trash step removes only intra-folder duplicates; main is untouched."),
+        ):
+            rb = tk.Radiobutton(
+                mode_card, text=lbl, variable=self._merge_mode_var, value=val,
+                bg=_M3_SURFACE2, fg=_M_TEXT1, font=("Segoe UI", 9, "bold"),
+                indicatoron=False, width=22, relief=tk.FLAT,
+                command=self._on_setting_change,
+                selectcolor=_ACCENT, activebackground=_M3_SURFACE3,
+                bd=0, pady=5,
+            )
+            rb.pack(side=tk.LEFT, padx=2)
+            # bg matches the surrounding ttk.LabelFrame (_M3_SURFACE2) rather
+            # than _CARD_BG so the caption doesn't sit on a white rectangle
+            # inside the grey card — and so it flips correctly under dark theme.
+            tk.Label(mode_card, text=f"  {desc}",
+                     bg=_M3_SURFACE2, fg=_M_HINT2,
+                     font=("Segoe UI", 8), wraplength=400, justify=tk.LEFT).pack(anchor=tk.W, pady=(0, 4))
+
+        # ── Key settings ──────────────────────────────────────────────────
+        ks = ttk.LabelFrame(body, text="Settings", padding=(10, 6, 10, 8))
+        ks.pack(fill=tk.X, pady=(0, 8))
+
+        ks_r0 = ttk.Frame(ks)
+        ks_r0.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(ks_r0, text="Keep subfolder structure (preserve relative paths)",
+                        variable=self._merge_subfolder_var).pack(side=tk.LEFT)
+        _info_btn(ks_r0, "merge_keep_subfolder").pack(side=tk.LEFT, padx=4)
+
+        ks_r1 = ttk.Frame(ks)
+        ks_r1.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(ks_r1, text="Scan source subfolders recursively",
+                        variable=self._merge_recursive_var).pack(side=tk.LEFT)
+        _info_btn(ks_r1, "recursive").pack(side=tk.LEFT, padx=4)
+
+        ks_r2 = ttk.Frame(ks)
+        ks_r2.pack(fill=tk.X, pady=2)
+        ttk.Checkbutton(ks_r2, text="Move sidecar files alongside primaries (.xmp / .aae)",
+                        variable=self._merge_sidecars_var).pack(side=tk.LEFT)
+        _info_btn(ks_r2, "date_org_move_sidecars").pack(side=tk.LEFT, padx=4)
+
+        ks_r3 = ttk.Frame(ks)
+        ks_r3.pack(fill=tk.X, pady=2)
+        ttk.Label(ks_r3, text="Prefer to keep:", anchor=tk.W).pack(side=tk.LEFT)
+        ttk.Radiobutton(ks_r3, text="Largest resolution",
+                        variable=self.strategy_var, value="pixels").pack(side=tk.LEFT, padx=(8, 0))
+        ttk.Radiobutton(ks_r3, text="Oldest file date",
+                        variable=self.strategy_var, value="oldest").pack(side=tk.LEFT, padx=4)
+
+        # ── Results info card (hidden until scan completes) ───────────────
+        # Packed into the scrollable body by _merge_show_results_card().
+        self._merge_results_card = tk.Frame(body, bg=_CARD_BG, bd=0, relief=tk.FLAT,
+                                            highlightthickness=0)
+
+        # ── Progress panel (fixed bottom of tab) ──────────────────────────
+        self._merge_prog_frame = ttk.LabelFrame(tab, text="Progress", padding=(10, 6, 10, 8))
+        self._merge_prog_frame.pack(fill=tk.X, side=tk.BOTTOM, padx=20, pady=(0, 2))
+
+        _mphase_row = ttk.Frame(self._merge_prog_frame)
+        _mphase_row.pack(anchor=tk.W, fill=tk.X)
+        self._merge_pulse_dot = _anim.PulsingDot(
+            _mphase_row, fg_color=_M_SUCCESS, bg_color=_CARD_BG)
+        self._merge_phase_lbl_widget = ttk.Label(
+            _mphase_row, textvariable=self._merge_phase_label,
+            font=("Segoe UI", 9, "bold"))
+        self._merge_phase_lbl_widget.pack(side=tk.LEFT, anchor=tk.W)
+        # Phase transition flash — mirrors the Scan tab pattern so phase
+        # changes are visible during long merge runs.
+        self._merge_phase_flash = _anim.PhaseFlash(
+            self._merge_phase_lbl_widget, accent_color=_ACCENT, normal_color=_M_TEXT1)
+        self._merge_progress_bar = ttk.Progressbar(
+            self._merge_prog_frame, mode="determinate", maximum=100)
+        self._merge_progress_bar.pack(fill=tk.X, pady=(6, 3))
+
+        # Host frame for the embedded ReportViewer (shown on "Review In-App")
+        self._merge_viewer_host = tk.Frame(tab, bg=_BG)
+
+        # ── Button bar (fixed very bottom) ────────────────────────────────
+        self._merge_btn_bar = tk.Frame(tab, bg=_M3_SURFACE2, pady=8)
+        m_btn_bar = self._merge_btn_bar
+        m_btn_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        tk.Frame(m_btn_bar, height=1, bg=_M_DIVIDER).place(relx=0, rely=0, relwidth=1)
+
+        # Match the Scan tab convention (#616161) — the merge tab is a
+        # primary-action tab like Scan, not a secondary tab.
+        _GR = "#616161"
+
+        self._merge_idle_frame = tk.Frame(m_btn_bar, bg=_M3_SURFACE2)
+        self._merge_idle_frame.pack(fill=tk.X, padx=4)
+
+        # Button label says "Folders" because the action clears both main and
+        # the source list (see _merge_reset_sources implementation).
+        _mat_btn(self._merge_idle_frame, "Reset Folders",
+                 self._merge_reset_sources, _GR).pack(side=tk.LEFT, padx=(4, 4))
+
+        self._merge_scan_btn = _mat_btn(
+            self._merge_idle_frame, "▶  Start Merge Scan",
+            self._start_merge_scan, _BTN_SUCCESS)
+        self._merge_scan_btn.pack(side=tk.RIGHT, padx=(4, 8))
+
+        self._merge_apply_btn = _mat_btn(
+            self._merge_idle_frame, "✓  Apply Merge",
+            self._merge_apply, _BTN_SUCCESS)
+        self._merge_apply_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_apply_btn)
+
+        self._merge_trash_btn = _mat_btn(
+            self._merge_idle_frame, "🗑  Move Duplicates to Trash",
+            self._merge_trash, _BTN_WARNING)
+        self._merge_trash_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_trash_btn)
+
+        self._merge_inapp_btn = _mat_btn(
+            self._merge_idle_frame, "📋  Review In-App",
+            self._merge_open_inapp_report, _BTN_PRIMARY)
+        self._merge_inapp_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_inapp_btn)
+
+        self._merge_browser_btn = _mat_btn(
+            self._merge_idle_frame, "🌐  Browser Report",
+            self._merge_open_browser_report, _BTN_SECONDARY)
+        self._merge_browser_btn.pack(side=tk.RIGHT, padx=4)
+        _mat_disable(self._merge_browser_btn)
+
+        # Active (scanning) button frame
+        self._merge_active_frame = tk.Frame(m_btn_bar, bg=_M3_SURFACE2)
+
+        self._merge_stop_btn = _mat_btn(
+            self._merge_active_frame, "■  Stop",
+            self._merge_stop, _BTN_ERROR)
+        self._merge_stop_btn.pack(side=tk.LEFT, padx=(4, 4))
+
+        self._merge_pause_btn = _mat_btn(
+            self._merge_active_frame, "⏸  Pause",
+            self._merge_pause, _BTN_SECONDARY)
+        self._merge_pause_btn.pack(side=tk.LEFT, padx=4)
+
+    # ── Merge source folder management ────────────────────────────────────────
+
+    def _merge_refresh_src_hint(self) -> None:
+        """Show the empty-state hint only while the source listbox is empty."""
+        try:
+            if not self._merge_source_folders:
+                self._merge_src_hint_lbl.pack(anchor=tk.W, pady=(0, 4))
+            else:
+                self._merge_src_hint_lbl.pack_forget()
+        except Exception:
+            # The hint label is created during _build_merge_tab; tolerate
+            # being called before that runs (e.g. early settings restore).
+            pass
+
+    def _merge_add_source(self) -> None:
+        folder = filedialog.askdirectory(
+            title="Add source folder",
+            parent=self.root,
+        )
+        if not folder:
+            return
+        folder = str(Path(folder).resolve())
+        if folder not in self._merge_source_folders:
+            self._merge_source_folders.append(folder)
+            self._merge_src_listbox.insert(tk.END, folder)
+            self._merge_refresh_src_hint()
+            self._on_setting_change()
+
+    def _merge_remove_source(self) -> None:
+        sel = self._merge_src_listbox.curselection()
+        if not sel:
+            return
+        idx = sel[0]
+        self._merge_src_listbox.delete(idx)
+        if 0 <= idx < len(self._merge_source_folders):
+            self._merge_source_folders.pop(idx)
+        self._merge_refresh_src_hint()
+        self._on_setting_change()
+
+    def _merge_reset_sources(self) -> None:
+        self._merge_source_folders.clear()
+        self._merge_src_listbox.delete(0, tk.END)
+        self._merge_main_var.set("")
+        self._merge_refresh_src_hint()
+        self._on_setting_change()
+
+    # ── Merge scan ────────────────────────────────────────────────────────────
+
+    def _start_merge_scan(self) -> None:
+        if self._scanning or self._merging:
+            messagebox.showwarning("Busy", "A scan is already running.", parent=self.root)
+            return
+
+        main_str = self._merge_main_var.get().strip()
+        if not main_str:
+            messagebox.showwarning("Missing folder", "Please select a main (target) folder.", parent=self.root)
+            return
+        if not self._merge_source_folders:
+            messagebox.showwarning("Missing folders", "Please add at least one source folder.", parent=self.root)
+            return
+
+        main_folder = Path(main_str)
+        source_folders = [Path(sf) for sf in self._merge_source_folders]
+
+        for sf in source_folders:
+            if not sf.exists():
+                messagebox.showwarning("Folder not found", f"Source folder not found:\n{sf}", parent=self.root)
+                return
+
+        self._merging = True
+        self._merge_stop_flag[0] = False
+        self._merge_pause_flag[0] = False
+        self._merge_drive_disconnect_paths.clear()
+        self._merge_plan = None
+
+        # Disable Apply + Trash until scan completes
+        _mat_disable(self._merge_apply_btn)
+        _mat_disable(self._merge_trash_btn)
+
+        # Switch to active button frame
+        self._merge_idle_frame.pack_forget()
+        self._merge_active_frame.pack(fill=tk.X, padx=4)
+
+        self._merge_phase_label.set("Starting merge scan…")
+        self._merge_progress_bar["mode"] = "indeterminate"
+        self._merge_progress_bar.start(12)
+        try:
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
+        _set_sleep_prevention(True)
+
+        settings = self.settings
+        mode = self._merge_mode_var.get()
+        keep_subfolder = self._merge_subfolder_var.get()
+        move_sidecars = self._merge_sidecars_var.get()
+
+        def _worker():
+            try:
+                self._merge_scan_worker(
+                    main_folder=main_folder,
+                    source_folders=source_folders,
+                    settings=settings,
+                    mode=mode,
+                    keep_subfolder=keep_subfolder,
+                    move_sidecars=move_sidecars,
+                )
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: self._on_merge_error(str(exc), tb))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _merge_scan_worker(
+        self, main_folder: Path, source_folders: list,
+        settings, mode: str, keep_subfolder: bool, move_sidecars: bool,
+    ) -> None:
+        """Background worker: hashes files and builds the merge plan."""
+        from merger import build_merge_plan
+        from scanner import collect_images, find_groups, IMAGE_EXTENSIONS, RAW_EXTENSIONS
+
+        def _progress(msg: str, done: int, total: int, phase: str = "") -> None:
+            if self._merge_stop_flag[0]:
+                return
+            self._merge_pending_progress = (msg, done, total)
+            if self._merge_progress_tick_after_id is None:
+                self.root.after(0, self._merge_progress_tick)
+
+        def _prog_cb(msg, done, total, phase=""):
+            _progress(msg, done, total, phase)
+
+        # ── Discovery: collect all folders ────────────────────────────────
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Discovery: scanning folders…"),
+            self._merge_phase_flash.trigger(),
+        ))
+
+        all_folders = [main_folder] + source_folders
+        all_records = []
+        library_cache: dict = {}
+
+        recursive = self._merge_recursive_var.get()
+
+        for folder in all_folders:
+            if self._merge_stop_flag[0]:
+                return
+            _progress(f"Scanning {folder.name}…", 0, 1)
+            try:
+                from scanner import collect_images
+                recs = collect_images(
+                    folder=folder,
+                    skip_paths=set(),
+                    settings=settings,
+                    library_cache=library_cache,
+                    progress_cb=lambda n, i, t, phase="Hashing": _prog_cb(n, i, t, phase),
+                    stop_flag=self._merge_stop_flag,
+                )
+                all_records.extend(recs)
+            except Exception as _exc:
+                # A failed source folder (permission denied, drive vanished
+                # mid-walk, etc.) shouldn't silently disappear from the merge
+                # plan — surface the failure so the user can investigate.
+                import sys as _sys
+                print(
+                    f"[merge-scan] collect_images failed for {folder}: {_exc}",
+                    file=_sys.stderr,
+                )
+
+        if self._merge_stop_flag[0]:
+            return
+
+        _progress("Detecting duplicates…", 0, 1)
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Comparing files…"),
+            self._merge_phase_flash.trigger(),
+        ))
+
+        groups, _ = find_groups(
+            all_records, settings,
+            progress_cb=lambda m, d, t, p="Comparing": _prog_cb(m, d, t, p),
+            stop_flag=self._merge_stop_flag,
+        )
+
+        if self._merge_stop_flag[0]:
+            return
+
+        self.root.after(0, lambda: (
+            self._merge_phase_label.set("Building merge plan…"),
+            self._merge_phase_flash.trigger(),
+        ))
+
+        plan = build_merge_plan(
+            records=all_records,
+            groups=groups,
+            main_folder=main_folder,
+            source_folders=source_folders,
+            mode=mode,
+            keep_subfolder=keep_subfolder,
+            keep_strategy=settings.keep_strategy,
+        )
+
+        self.root.after(0, lambda: self._on_merge_scan_done(plan, all_records, groups, library_cache))
+
+    def _merge_progress_tick(self) -> None:
+        self._merge_progress_tick_after_id = None
+        if self._merge_pending_progress is None:
+            return
+        msg, done, total = self._merge_pending_progress
+        self._merge_pending_progress = None
+        self._merge_phase_label.set(msg)
+        if total > 0:
+            self._merge_progress_bar.stop()
+            self._merge_progress_bar["mode"] = "determinate"
+            self._merge_progress_bar["value"] = min(100, done / total * 100)
+        if self._merging:
+            self._merge_progress_tick_after_id = self.root.after(50, self._merge_progress_tick)
+
+    def _on_merge_scan_done(self, plan, all_records, groups, library_cache) -> None:
+        """Called on main thread when the merge scan worker finishes."""
+        _set_sleep_prevention(False)
+        self._merge_progress_bar.stop()
+        self._merge_progress_bar["mode"] = "determinate"
+        self._merge_progress_bar["value"] = 100
+        self._merging = False
+        # Cancel any pending progress poll (stale-progress race fix)
+        self._merge_pending_progress = None
+        if self._merge_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._merge_progress_tick_after_id)
+            except Exception:
+                pass
+            self._merge_progress_tick_after_id = None
+        try:
+            self._merge_pulse_dot.hide()
+        except Exception:
+            pass
+
+        self._merge_plan = plan
+        self._merge_library_cache = library_cache
+        self._merge_groups = groups
+        self._merge_all_records = all_records
+
+        # Restore idle frame
+        self._merge_active_frame.pack_forget()
+        self._merge_idle_frame.pack(fill=tk.X, padx=4)
+
+        # Short status only — the results card directly above carries the
+        # full breakdown (files, dup groups, suffix renames, space delta).
+        self._merge_phase_label.set("Scan complete.")
+
+        # Populate and show the results info card
+        self._merge_show_results_card(plan, all_records, groups)
+
+        # Enable action buttons — only when there's actually something to do.
+        # A scan that finds no files to move and no duplicate groups means the
+        # sources are already a subset of main; surface that explicitly rather
+        # than letting the user click Apply on an empty plan.
+        if plan.n_to_main == 0 and plan.n_groups == 0:
+            self._merge_phase_label.set(
+                "Nothing to merge — sources contain only files already in main."
+            )
+        else:
+            _mat_enable(self._merge_apply_btn)
+            _mat_enable(self._merge_browser_btn)
+            _mat_enable(self._merge_inapp_btn)
+            # Dynamic Apply label so the user knows whether this click moves
+            # or copies (driven by the selected mode).
+            verb = "move" if plan.mode == "destructive" else "copy"
+            try:
+                self._merge_apply_btn.configure(text=f"✓  Apply Merge ({verb})")
+            except Exception:
+                pass
+
+        # Generate HTML report in background so Browser Report is ready quickly
+        def _gen_report():
+            try:
+                rpt = generate_report(
+                    groups,
+                    plan.main_folder,
+                    plan.main_folder,
+                    len(all_records),
+                    self.settings,
+                )
+                self._merge_report_path = rpt
+            except Exception:
+                self._merge_report_path = None
+        threading.Thread(target=_gen_report, daemon=True).start()
+
+        # Refresh Library tab
+        if hasattr(self, "_library_ctrl"):
+            try:
+                self._library_ctrl.reload()
+            except Exception:
+                pass
+
+    def _on_merge_error(self, msg: str, tb: str = "") -> None:
+        _set_sleep_prevention(False)
+        self._merge_progress_bar.stop()
+        self._merging = False
+        self._merge_pending_progress = None
+        if self._merge_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._merge_progress_tick_after_id)
+            except Exception:
+                pass
+            self._merge_progress_tick_after_id = None
+        try:
+            self._merge_pulse_dot.hide()
+        except Exception:
+            pass
+        self._merge_active_frame.pack_forget()
+        self._merge_idle_frame.pack(fill=tk.X, padx=4)
+        self._merge_phase_label.set("Merge scan failed.")
+        user_msg, detail = error_handler.format_scan_error(Exception(msg), tb)
+        error_handler.show_error(self.root, "Merge Failed", user_msg, detail=detail)
+
+    # ── Merge apply ───────────────────────────────────────────────────────────
+
+    def _merge_apply(self) -> None:
+        if self._merge_plan is None:
+            return
+        # Re-entry guard: if another scan/merge is already running (e.g. a
+        # double-click slipped through the button disable during a modal),
+        # refuse to start a second worker that would race on shared state.
+        if self._scanning or self._merging:
+            return
+        plan = self._merge_plan
+        n = plan.n_to_main
+        verb = "move" if plan.mode == "destructive" else "copy"
+        mode_label = "Destructive (move)" if plan.mode == "destructive" else "Non-destructive (copy)"
+        # Human-readable size delta (matches the results card formatting).
+        space_b = getattr(plan, "space_delta", 0) or 0
+        space_mb = space_b / (1024 * 1024)
+        if space_mb >= 1024:
+            size_str = f"{space_mb / 1024:.1f} GB"
+        elif space_mb >= 1:
+            size_str = f"{space_mb:.1f} MB"
+        else:
+            size_str = f"{space_b / 1024:.0f} KB"
+        # Originals-strategy label (matches Scan tab wording).
+        strat = getattr(self.settings, "keep_strategy", "pixels")
+        strat_label = "Largest resolution" if strat == "pixels" else "Oldest file date"
+        confirm = messagebox.askyesno(
+            "Apply Merge",
+            f"This will {verb} {n} file(s) to:\n"
+            f"  {plan.main_folder}\n\n"
+            f"Mode: {mode_label}\n"
+            f"Total size: {size_str}\n"
+            f"Prefer to keep: {strat_label}\n"
+            f"Duplicate groups detected: {plan.n_groups}\n"
+            f"Name collisions (will be renamed): {plan.n_suffix_renames}\n\n"
+            "Proceed?",
+            parent=self.root,
+        )
+        if not confirm:
+            return
+
+        from merger import MergeExecutor
+        from library import Library, get_library_dir
+
+        try:
+            lib = Library.load(get_library_dir())
+        except Exception:
+            lib = None
+
+        self._merging = True
+        self._merge_stop_flag[0] = False
+        self._merge_pause_flag[0] = False
+        self._merge_drive_disconnect_paths.clear()
+
+        _mat_disable(self._merge_apply_btn)
+        _mat_disable(self._merge_trash_btn)
+        self._merge_idle_frame.pack_forget()
+        self._merge_active_frame.pack(fill=tk.X, padx=4)
+        self._merge_phase_label.set("Applying merge…")
+        try:
+            self._merge_phase_flash.trigger()
+        except Exception:
+            pass
+        self._merge_progress_bar["mode"] = "indeterminate"
+        self._merge_progress_bar.start(12)
+        try:
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
+        _set_sleep_prevention(True)
+
+        def _worker():
+            try:
+                executor = MergeExecutor(
+                    plan=plan, library=lib,
+                    dry_run=False,
+                    stop_flag=self._merge_stop_flag,
+                    pause_flag=self._merge_pause_flag,
+                    drive_disconnect_paths=self._merge_drive_disconnect_paths,
+                    progress_cb=lambda m, d, t: self._on_merge_progress(m, d, t),
+                    move_sidecars=self._merge_sidecars_var.get(),
+                )
+                result = executor.apply()
+                self.root.after(0, lambda r=result: self._on_merge_apply_done(r))
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: self._on_merge_error(str(exc), tb))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_merge_progress(self, msg: str, done: int, total: int) -> None:
+        self._merge_pending_progress = (msg, done, total)
+        if self._merge_progress_tick_after_id is None:
+            self.root.after(0, self._merge_progress_tick)
+        # Drive-disconnect modal trigger.  The executor appends to
+        # _merge_drive_disconnect_paths from its worker thread; surface the
+        # modal on the main thread the next time progress reports in.
+        if self._merge_drive_disconnect_paths and not self._merge_drive_modal_open:
+            self.root.after(0, self._show_merge_drive_disconnect_modal)
+
+    def _show_merge_drive_disconnect_modal(self) -> None:
+        """Modal shown when the executor reports a vanished drive.
+
+        The merge worker auto-pauses and polls for the drive to come back —
+        all this dialog does is inform the user and offer a Cancel path.
+        On Cancel the merge stop flag is raised.  On OK the dialog closes
+        and the worker resumes naturally as soon as the drive returns.
+        """
+        if self._merge_drive_modal_open or not self._merge_drive_disconnect_paths:
+            return
+        self._merge_drive_modal_open = True
+        try:
+            bad_path = str(self._merge_drive_disconnect_paths[0])
+            cont = messagebox.askokcancel(
+                "Drive Disconnected",
+                f"Drive at:\n  {bad_path}\nis no longer available.\n\n"
+                "Reconnect the drive and the merge will resume automatically.\n\n"
+                "Click Cancel to stop the merge instead.",
+                parent=self.root,
+            )
+            if not cont:
+                self._merge_stop_flag[0] = True
+        finally:
+            self._merge_drive_modal_open = False
+
+    def _on_merge_apply_done(self, result: dict) -> None:
+        _set_sleep_prevention(False)
+        self._merge_progress_bar.stop()
+        self._merge_progress_bar["mode"] = "determinate"
+        self._merge_progress_bar["value"] = 100
+        self._merging = False
+        self._merge_pending_progress = None
+        if self._merge_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._merge_progress_tick_after_id)
+            except Exception:
+                pass
+            self._merge_progress_tick_after_id = None
+        try:
+            self._merge_pulse_dot.hide()
+        except Exception:
+            pass
+        self._merge_active_frame.pack_forget()
+        self._merge_idle_frame.pack(fill=tk.X, padx=4)
+
+        n = result["completed"]
+        errs = result["errors"]
+        self._merge_phase_label.set(
+            f"Apply complete: {n} file(s) {'moved' if self._merge_plan.mode == 'destructive' else 'copied'}."
+            + (f"  ({len(errs)} error(s))" if errs else "")
+        )
+        _mat_enable(self._merge_trash_btn)
+
+        if hasattr(self, "_library_ctrl"):
+            try:
+                self._library_ctrl.reload()
+            except Exception:
+                pass
+
+    # ── Merge trash ───────────────────────────────────────────────────────────
+
+    def _merge_trash(self) -> None:
+        if self._merge_plan is None:
+            return
+        if self._scanning or self._merging:
+            return
+        plan = self._merge_plan
+        # Count the trashable files per mode so the user knows what they're
+        # about to remove before they click yes.
+        if plan.mode == "destructive":
+            mode_desc = "duplicates left in source folders"
+            # Mode A duplicates are recorded as ops with src == dst (see
+            # merger.py comment "dst unused for trash").
+            trash_count = sum(
+                1 for op in plan.ops
+                if getattr(op, "action", None) == "move"
+                and getattr(op, "src", None) == getattr(op, "dst", None)
+            )
+        else:
+            mode_desc = "intra-folder duplicates in each source folder"
+            trash_count = sum(len(v) for v in plan.source_trash.values())
+        confirm = messagebox.askyesno(
+            "Move Duplicates to Trash",
+            f"This will move {trash_count} file(s) — {mode_desc} — to a 'trash'\n"
+            f"subfolder next to each source file.\n\nProceed?",
+            parent=self.root,
+        )
+        if not confirm:
+            return
+
+        from merger import MergeExecutor
+        from library import Library, get_library_dir
+        try:
+            lib = Library.load(get_library_dir())
+        except Exception:
+            lib = None
+
+        self._merging = True
+        _mat_disable(self._merge_trash_btn)
+        self._merge_idle_frame.pack_forget()
+        self._merge_active_frame.pack(fill=tk.X, padx=4)
+        self._merge_phase_label.set("Trashing duplicates…")
+        try:
+            self._merge_phase_flash.trigger()
+        except Exception:
+            pass
+        self._merge_progress_bar["mode"] = "indeterminate"
+        self._merge_progress_bar.start(12)
+        try:
+            self._merge_pulse_dot.show(side=tk.LEFT, padx=(0, 6))
+        except Exception:
+            pass
+        _set_sleep_prevention(True)
+
+        def _worker():
+            try:
+                executor = MergeExecutor(
+                    plan=plan, library=lib,
+                    dry_run=False,
+                    stop_flag=self._merge_stop_flag,
+                    pause_flag=self._merge_pause_flag,
+                    drive_disconnect_paths=self._merge_drive_disconnect_paths,
+                    move_sidecars=self._merge_sidecars_var.get(),
+                )
+                result = executor.trash_duplicates()
+                self.root.after(0, lambda r=result: self._on_merge_trash_done(r))
+            except Exception as exc:
+                import traceback
+                tb = traceback.format_exc()
+                self.root.after(0, lambda: self._on_merge_error(str(exc), tb))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _on_merge_trash_done(self, result: dict) -> None:
+        _set_sleep_prevention(False)
+        self._merge_progress_bar.stop()
+        self._merge_progress_bar["mode"] = "determinate"
+        self._merge_progress_bar["value"] = 100
+        self._merging = False
+        self._merge_pending_progress = None
+        if self._merge_progress_tick_after_id is not None:
+            try:
+                self.root.after_cancel(self._merge_progress_tick_after_id)
+            except Exception:
+                pass
+            self._merge_progress_tick_after_id = None
+        try:
+            self._merge_pulse_dot.hide()
+        except Exception:
+            pass
+        self._merge_active_frame.pack_forget()
+        self._merge_idle_frame.pack(fill=tk.X, padx=4)
+        n = result["trashed"]
+        self._merge_phase_label.set(f"Trash complete: {n} file(s) moved to trash.")
+
+    # ── Merge results card ────────────────────────────────────────────────────
+
+    def _merge_show_results_card(self, plan, all_records, groups) -> None:
+        """Populate and show the merge results info card (mirrors _update_results_tab_ui)."""
+        card = self._merge_results_card
+
+        # Rebuild card contents
+        for w in card.winfo_children():
+            w.destroy()
+
+        mode = plan.mode
+        n_to_main    = plan.n_to_main
+        n_groups     = plan.n_groups
+        n_renames    = plan.n_suffix_renames
+        space_b      = plan.space_delta
+        total_files  = len(all_records)
+        action_word  = "move" if mode == "destructive" else "copy"
+
+        # Colour bar: green if there are groups, accent otherwise
+        bar_col = _M_SUCCESS if n_groups > 0 else _ACCENT
+        tk.Frame(card, height=4, bg=bar_col).pack(fill=tk.X)
+
+        # Header
+        hdr = tk.Frame(card, bg=_CARD_BG)
+        hdr.pack(fill=tk.X, padx=16, pady=(12, 4))
+        title = "Scan Complete — Review the plan below"
+        tk.Label(hdr, text=title,
+                 font=("Segoe UI", 12, "bold"), bg=_CARD_BG, fg=bar_col).pack(side=tk.LEFT)
+
+        # Main folder path
+        tk.Label(card,
+                 text=f"Target: {plan.main_folder}",
+                 font=("Segoe UI", 9), bg=_CARD_BG, fg=_M_TEXT2,
+                 anchor=tk.W, wraplength=900).pack(fill=tk.X, padx=16, pady=(0, 8))
+
+        tk.Frame(card, height=1, bg=_M_DIVIDER).pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        # Stat cells
+        stats_row = tk.Frame(card, bg=_CARD_BG)
+        stats_row.pack(fill=tk.X, padx=16, pady=(0, 10))
+
+        def _stat_cell(parent, value, label, fg=_M_TEXT1, tint=None):
+            cell_bg = tint if tint else _CARD_BG
+            cell = tk.Frame(parent, bg=cell_bg, padx=8 if tint else 0, pady=4 if tint else 0)
+            cell.pack(side=tk.LEFT, padx=(0, 16))
+            vstr = f"{value:,}" if isinstance(value, int) else str(value)
+            tk.Label(cell, text=vstr, font=("Segoe UI", 20, "bold"),
+                     bg=cell_bg, fg=fg).pack(anchor=tk.W)
+            tk.Label(cell, text=label, font=("Segoe UI", 8),
+                     bg=cell_bg, fg=_M_HINT5).pack(anchor=tk.W)
+
+        _stat_cell(stats_row, total_files, "files scanned")
+        _to_main_lbl = f"files to {action_word} to main"
+        _stat_cell(stats_row, n_to_main, _to_main_lbl,
+                   _ACCENT if n_to_main > 0 else _M_TEXT1,
+                   tint=_ACCENT_TINT if n_to_main > 0 else None)
+        _stat_cell(stats_row, n_renames, "suffix renames",
+                   _M_WARNING if n_renames > 0 else _M_TEXT1,
+                   tint=_M_WARNING_TINT if n_renames > 0 else None)
+        _stat_cell(stats_row, n_groups, "dup groups",
+                   _M_ERROR if n_groups > 0 else _M_TEXT1,
+                   tint=_M_ERROR_TINT if n_groups > 0 else None)
+
+        # Space delta
+        space_mb = space_b / (1024 * 1024) if space_b else 0.0
+        if space_mb >= 1024:
+            space_lbl = f"+{space_mb / 1024:.1f} GB"
+        elif space_mb >= 1:
+            space_lbl = f"+{space_mb:.1f} MB"
+        elif space_b > 0:
+            space_lbl = f"+{space_b // 1024} KB"
+        else:
+            space_lbl = "–"
+        _stat_cell(stats_row, space_lbl, "space added to main",
+                   _ACCENT if space_b > 0 else _M_TEXT1,
+                   tint=_ACCENT_TINT if space_b > 0 else None)
+
+        # Per-source-folder breakdown for Non-destructive mode (spec calls for
+        # per-folder report layout in Mode B; the full grid lives in Review
+        # In-App, this is a counts-only preview inside the results card).
+        if mode == "nondestructive" and getattr(plan, "source_trash", None):
+            per_src = tk.Frame(card, bg=_CARD_BG)
+            per_src.pack(fill=tk.X, padx=16, pady=(0, 8))
+            tk.Label(per_src, text="Per source folder (internal duplicates to trash):",
+                     font=("Segoe UI", 9, "bold"), bg=_CARD_BG, fg=_M_TEXT2,
+                     anchor=tk.W).pack(fill=tk.X)
+            for sf_str, trash_paths in plan.source_trash.items():
+                row = tk.Frame(per_src, bg=_CARD_BG)
+                row.pack(fill=tk.X, pady=(2, 0))
+                # Show just the folder leaf name + full count.
+                leaf = Path(sf_str).name or sf_str
+                tk.Label(row, text=f"  • {leaf}",
+                         font=("Segoe UI", 9), bg=_CARD_BG, fg=_M_TEXT2,
+                         anchor=tk.W).pack(side=tk.LEFT)
+                tk.Label(row, text=f"{len(trash_paths)} dup(s)",
+                         font=("Segoe UI", 9), bg=_CARD_BG,
+                         fg=(_M_ERROR if trash_paths else _M_HINT5),
+                         anchor=tk.E).pack(side=tk.RIGHT, padx=(0, 4))
+
+        # Mode label
+        mode_desc = "Destructive (move originals)" if mode == "destructive" else "Non-destructive (copy originals)"
+        tk.Label(card,
+                 text=f"Mode: {mode_desc}",
+                 font=("Segoe UI", 8), bg=_CARD_BG,
+                 fg=_M_HINT5, anchor=tk.W).pack(fill=tk.X, padx=16, pady=(0, 14))
+
+        card.pack(fill=tk.X, padx=16, pady=(16, 8))
+        try:
+            _anim.SlideDownReveal(card, duration_ms=350).play()
+        except Exception:
+            pass
+
+    # ── Merge report actions ──────────────────────────────────────────────────
+
+    def _merge_open_browser_report(self) -> None:
+        """Open the HTML merge report in the system browser."""
+        if not self._merge_groups and not self._merge_plan:
+            messagebox.showinfo("No Results", "No merge scan results yet.", parent=self.root)
+            return
+
+        # If report was pre-generated on scan-done, open it directly
+        if self._merge_report_path and self._merge_report_path.exists():
+            webbrowser.open(self._merge_report_path.as_uri())
+            return
+
+        # Generate on demand
+        if not self._merge_plan:
+            return
+        try:
+            rpt = generate_report(
+                self._merge_groups,
+                self._merge_plan.main_folder,
+                self._merge_plan.main_folder,
+                len(self._merge_all_records),
+                self.settings,
+            )
+            self._merge_report_path = rpt
+            webbrowser.open(rpt.as_uri())
+        except Exception as exc:
+            messagebox.showerror("Report Error",
+                                 f"Could not generate HTML report:\n{exc}",
+                                 parent=self.root)
+
+    def _merge_open_inapp_report(self) -> None:
+        """Open the embedded merge report viewer inside the Merge tab."""
+        if not self._merge_groups and not self._merge_plan:
+            messagebox.showinfo("No Results", "No merge scan results yet.", parent=self.root)
+            return
+
+        # Build folder_groups dict for Mode B per-folder pagination
+        mode = self._merge_plan.mode if self._merge_plan else "destructive"
+        pagination_mode = "groups"
+        folder_groups = None
+
+        if mode == "nondestructive" and self._merge_plan:
+            # Map each source folder to its groups
+            from merger import _is_in_folder
+            source_folders = self._merge_plan.source_folders
+            fg: dict = {}
+            for sf in source_folders:
+                sf_grps = []
+                for grp in self._merge_groups:
+                    all_paths = [r.path for r in (grp.originals or [])] + \
+                                [r.path for r in (grp.previews or [])]
+                    if any(_is_in_folder(p, sf) for p in all_paths):
+                        sf_grps.append(grp)
+                if sf_grps:
+                    fg[str(sf)] = sf_grps
+            if fg:
+                pagination_mode = "per_folder"
+                folder_groups = fg
+
+        # Show the merge form and switch tab
+        if not self._merge_viewer_host.winfo_ismapped():
+            self._merge_form_outer.pack_forget()
+            self._merge_viewer_host.pack(fill=tk.BOTH, expand=True)
+
+        # Clear any previous viewer
+        for w in self._merge_viewer_host.winfo_children():
+            w.destroy()
+
+        self._nb.select(self._tab_merge)
+
+        def _on_close():
+            self._merge_viewer_host.pack_forget()
+            for w in self._merge_viewer_host.winfo_children():
+                w.destroy()
+            self._merge_form_outer.pack(fill=tk.BOTH, expand=True)
+
+        viewer = ReportViewer(
+            self._merge_viewer_host,
+            self._merge_groups,
+            settings=self.settings,
+            on_close_cb=_on_close,
+            pagination_mode=pagination_mode,
+            folder_groups=folder_groups,
+        )
+        viewer.pack(fill=tk.BOTH, expand=True)
+
+    # ── Merge stop/pause ──────────────────────────────────────────────────────
+
+    def _merge_stop(self) -> None:
+        self._merge_stop_flag[0] = True
+        self._merge_phase_label.set("Stopping…")
+
+    def _merge_pause(self) -> None:
+        if self._merge_pause_flag[0]:
+            self._merge_pause_flag[0] = False
+            self._merge_pause_btn.configure(text="⏸  Pause", command=self._merge_pause)
+            self._merge_phase_label.set("Resuming…")
+        else:
+            self._merge_pause_flag[0] = True
+            self._merge_pause_btn.configure(text="▶  Resume", command=self._merge_pause)
+            self._merge_phase_label.set("Paused. Reconnect drive then click Resume.")
 
     def _build_library_tab(self) -> None:
         """Populate the Library tab using the library_tab module."""

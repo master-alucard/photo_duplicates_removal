@@ -441,7 +441,29 @@ class ReportViewer(tk.Frame):
         settings=None,
         on_close_cb: Optional[Callable] = None,
         selection_cache: Optional[dict] = None,
+        pagination_mode: str = "groups",
+        folder_groups: "Optional[dict]" = None,
     ) -> None:
+        """Create the viewer.
+
+        Parameters
+        ----------
+        pagination_mode : str
+            ``"groups"`` (default) — standard N-groups-per-page pagination used by
+            Scan and Compare Scan.  All existing behaviour is unchanged.
+
+            ``"per_folder"`` — one page per source folder.  Each page shows a
+            folder header with summary statistics followed by the duplicate groups
+            that belong to that folder.  Pass the source-folder mapping via
+            *folder_groups*.
+
+        folder_groups : dict[str, list[DuplicateGroup]] | None
+            Required when *pagination_mode* is ``"per_folder"``.  Maps a
+            human-readable folder label (the source-folder path string, or any
+            label) to the list of ``DuplicateGroup`` objects for that folder.
+            The ``groups`` positional argument should be the flat union of all
+            groups in this dict (needed for ``_ensure_group_vars`` bookkeeping).
+        """
         super().__init__(parent, bg=_M_BG)
 
         self._groups          = groups
@@ -452,6 +474,17 @@ class ReportViewer(tk.Frame):
         self._settings        = settings
         self._on_close_cb     = on_close_cb
         self._selection_cache = selection_cache  # restored selection state (or None)
+
+        # ── per-folder pagination (Mode B in-app report) ──────────────────
+        self._pagination_mode: str = pagination_mode  # "groups" | "per_folder"
+        # folder_groups: ordered dict  label → [DuplicateGroup, ...]
+        # Built from the caller-supplied mapping (or empty in "groups" mode).
+        if pagination_mode == "per_folder" and folder_groups:
+            self._folder_labels: list = list(folder_groups.keys())
+            self._folder_group_map: dict = dict(folder_groups)
+        else:
+            self._folder_labels = []
+            self._folder_group_map = {}
 
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
@@ -946,6 +979,18 @@ class ReportViewer(tk.Frame):
             tile_bg = "#E0E0E0" if trashed else prev_col_bg
             self._build_image_tile(prev_grid, rec, v, img_idx % 4, img_idx // 4,
                                    bg=tile_bg, max_thumb=120, trashed=trashed, group_idx=idx)
+
+    # ── per-folder page (Mode B in-app report) ────────────────────────────────
+
+    def _build_per_folder_page(self, page: int) -> None:
+        """Render one source-folder page for Mode B per-folder pagination.
+
+        The rendering body lives in :mod:`per_folder_report`; this is a thin
+        delegate so report_viewer stays focused.  Imported lazily to avoid an
+        import cycle (per_folder_report pulls theme tokens back from here).
+        """
+        from per_folder_report import build_per_folder_page
+        build_per_folder_page(self, page)
 
     # ── solo & broken sections ────────────────────────────────────────────────
 
@@ -2690,6 +2735,9 @@ class ReportViewer(tk.Frame):
     # ── pagination ────────────────────────────────────────────────────────────
 
     def _total_pages(self) -> int:
+        if self._pagination_mode == "per_folder":
+            # One page per source folder; no unique-images page in this mode
+            return max(1, len(self._folder_labels))
         import math
         group_pages = max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
         # Unique images get their own dedicated page when present
@@ -2698,12 +2746,16 @@ class ReportViewer(tk.Frame):
 
     def _unique_page_index(self) -> int:
         """Return the page index of the dedicated Unique Images page, or -1."""
+        if self._pagination_mode == "per_folder":
+            return -1  # no unique page in per_folder mode
         if not self._solo_originals:
             return -1
         import math
         return max(1, math.ceil(len(self._groups) / self._page_size)) if self._groups else 1
 
     def _is_unique_page(self, page: int) -> bool:
+        if self._pagination_mode == "per_folder":
+            return False
         return self._solo_originals and page == self._unique_page_index()
 
     def _render_page(self, page: int) -> None:
@@ -2743,7 +2795,9 @@ class ReportViewer(tk.Frame):
         if canvas_w > 1:
             self._canvas.itemconfig(self._canvas_window, width=canvas_w)
 
-        if self._is_unique_page(self._current_page):
+        if self._pagination_mode == "per_folder":
+            self._build_per_folder_page(self._current_page)
+        elif self._is_unique_page(self._current_page):
             self._build_solo_section()
         else:
             if not self._groups:
@@ -2851,7 +2905,17 @@ class ReportViewer(tk.Frame):
                 activebackground=_darken_color(_ubg), activeforeground=_ufg,
             )
 
-        if self._is_unique_page(page):
+        if self._pagination_mode == "per_folder":
+            if self._folder_labels:
+                folder_label = self._folder_labels[page] if page < len(self._folder_labels) else ""
+                short_label = folder_label
+                if len(short_label) > 60:
+                    short_label = "…" + short_label[-57:]
+                self._page_info_var.set(
+                    f"Folder {page + 1} of {total}  ·  {short_label}")
+            else:
+                self._page_info_var.set(f"Page {page + 1} of {total}")
+        elif self._is_unique_page(page):
             self._page_info_var.set(
                 f"Unique Images  ·  {len(self._solo_originals)} files  ·  page {page + 1} of {total}")
         elif n > 0:
