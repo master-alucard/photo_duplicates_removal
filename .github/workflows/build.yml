@@ -140,17 +140,15 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### 🎬 Find Re-encoded & Resized Duplicate Videos
-            - **Content-based video matching** — duplicate videos are now found even when their file sizes differ (re-encoded, different container, trimmed metadata). The app samples several frames across each video and matches on what they actually look like, gated by a duration check to avoid false positives. Previously only byte-identical copies were detected.
-            - **Faster re-scans** — video fingerprints are cached, and the sampled frames are extracted in a single pass per file.
+            ### New: Merge tab
+            - **Consolidate scattered duplicates into one folder.** The new Merge tab gathers the best copy of each photo from several source folders into a single main folder. It keeps only originals, and when the same shot exists as both a RAW and a JPEG it keeps both. You can move the originals or copy them.
+            - **Survives a drive dropping out.** If an external drive disconnects mid-merge, the merge pauses and resumes automatically once the drive comes back, instead of failing.
+            - **Review before you commit.** See exactly what gets copied or trashed, broken down per source folder, in your browser or inside the app.
 
-            ### 🛡️ Reliable Single-Instance
-            - **No more stacked windows** — launching the app again now reliably focuses the existing window instead of opening another copy. The previous guard could be defeated by a firewall or security product blocking a local socket; it now uses a Windows kernel mutex that doesn't depend on networking.
+            ### Reliability
+            - **Crash-safe cache.** The hash cache is now written atomically, so a power loss or crash mid-write can no longer corrupt it and force a full re-scan.
 
-            ### 🐛 Fixes
-            - **Progress no longer looks stuck after a large scan** — on big folders the progress bar and label could stay on "Generating report…" at ~96% even though the scan had finished and the buttons were unlocked. The final "done" state now sticks.
-
-            > Builds on v1.1.31 (in-app video thumbnails, bundled ffmpeg) and the v1.1.30 accuracy overhaul.
+            > Builds on v1.1.32 (content-based video matching, reliable single-instance) and the v1.1.30 accuracy overhaul.
 
             ---
 

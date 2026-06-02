@@ -257,6 +257,23 @@ class VideoRecord:
         return self.duration is None or len(self.frame_hashes) == 0
 
 
+# ── Cache I/O helpers ──────────────────────────────────────────────────────────
+
+def _atomic_write_json(cache_path: Path, data: dict) -> None:
+    """Write JSON atomically: write to a temp sibling, then rename in place.
+
+    A direct ``cache_path.write_text(...)`` is not atomic — a crash or power
+    loss mid-write can truncate the on-disk cache to zero bytes (or worse,
+    leave half-written garbage that fails to parse).  os.replace is atomic
+    on both Windows and POSIX provided the temp file lives on the same
+    filesystem, so we put the temp next to the destination.
+    """
+    payload = json.dumps(data, ensure_ascii=False)
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text(payload, encoding="utf-8")
+    os.replace(str(tmp), str(cache_path))
+
+
 # ── Library directory ──────────────────────────────────────────────────────────
 
 def get_library_dir() -> Path:
@@ -492,7 +509,7 @@ class Library:
             "version": _CACHE_VERSION,
             "files":   {k: asdict(v) for k, v in cache.items()},
         }
-        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(cache_path, data)
 
     # ── Video-record cache ─────────────────────────────────────────────────
 
@@ -519,7 +536,7 @@ class Library:
             "version": _VIDEO_CACHE_VERSION,
             "files":   {k: asdict(v) for k, v in cache.items()},
         }
-        cache_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+        _atomic_write_json(cache_path, data)
 
     # ── Drive status ───────────────────────────────────────────────────────
 
@@ -576,6 +593,84 @@ class Library:
         entry.path      = new_key
         self._index[new_key] = entry
         self.save()
+
+    # ── Merge helpers ──────────────────────────────────────────────────────
+
+    def relocate(self, old_path: str, new_path: str) -> None:
+        """Update the library cache key when a file is moved (Mode A merge move).
+
+        The entry at *old_path* is renamed to *new_path* inside whatever folder
+        cache currently holds it.  Hashes are preserved unchanged (content didn't
+        change); only the ``path`` field and the dict key are updated.  If the
+        file is now on a different drive its mtime/size fields may differ — the
+        caller should re-stat and call :meth:`save_cache` if needed, but for
+        typical same-drive moves the values stay accurate.
+
+        This is a no-op when *old_path* is not cached anywhere.
+        """
+        old_norm = self._norm(old_path)
+        new_norm = self._norm(new_path)
+
+        # Determine which folder cache holds this file
+        old_folder = str(Path(old_norm).parent)
+        new_folder = str(Path(new_norm).parent)
+
+        old_folder_norm = self._norm(old_folder)
+        new_folder_norm = self._norm(new_folder)
+
+        old_cache = self.load_cache(old_folder_norm)
+        if old_norm not in old_cache:
+            return  # not cached — no-op
+
+        record = old_cache.pop(old_norm)
+        record.path = new_norm
+
+        if old_folder_norm == new_folder_norm:
+            # Same folder: update in place
+            old_cache[new_norm] = record
+            self.save_cache(old_folder_norm, old_cache)
+        else:
+            # Different folder: remove from old cache, add to new cache
+            self.save_cache(old_folder_norm, old_cache)
+            new_cache = self.load_cache(new_folder_norm)
+            new_cache[new_norm] = record
+            self.save_cache(new_folder_norm, new_cache)
+
+    def duplicate_entry(self, src_path: str, new_path: str) -> None:
+        """Add a library cache entry for a file that was copied (Mode B merge copy).
+
+        Creates a new entry at *new_path* with the same hashes as the entry at
+        *src_path*.  The source entry is left unchanged.  If *src_path* is not
+        in cache this is a no-op (the copied file will be hashed on next scan).
+        """
+        src_norm = self._norm(src_path)
+        new_norm = self._norm(new_path)
+
+        src_folder_norm = self._norm(str(Path(src_norm).parent))
+        new_folder_norm = self._norm(str(Path(new_norm).parent))
+
+        src_cache = self.load_cache(src_folder_norm)
+        if src_norm not in src_cache:
+            return  # not cached — no-op
+
+        src_record = src_cache[src_norm]
+
+        # Build a new record with the new path; copy all hashes
+        import copy as _copy
+        new_record = _copy.copy(src_record)
+        new_record.path = new_norm
+
+        # Update mtime/size from actual file if it exists already
+        try:
+            st = Path(new_norm).stat()
+            new_record.mtime = st.st_mtime
+            new_record.size  = st.st_size
+        except OSError:
+            pass
+
+        new_cache = self.load_cache(new_folder_norm)
+        new_cache[new_norm] = new_record
+        self.save_cache(new_folder_norm, new_cache)
 
     # ── Fingerprint verification ───────────────────────────────────────────
 

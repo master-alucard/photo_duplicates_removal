@@ -465,4 +465,16 @@ INFO_TEXTS: dict[str, tuple[str, str]] = {
         "Disable this if you trust exact file size as sufficient evidence, or if "
         "frame extraction is slow on your machine."
     ),
+    "merge_keep_subfolder": (
+        "Keep Subfolder Structure (Merge tab)",
+        "When enabled, each file moved or copied to the main folder preserves "
+        "its path relative to its source folder.  For example, "
+        "src1/Photos/2024/x.jpg lands at main/Photos/2024/x.jpg.\n\n"
+        "When disabled, all files flatten into the main folder root.  Name "
+        "collisions are resolved by appending a numeric suffix "
+        "(x.jpg -> x_1.jpg, x_2.jpg) -- files are never overwritten.\n\n"
+        "ON is appropriate when source folders share a meaningful layout you "
+        "want preserved in main.  OFF is appropriate when main folder should "
+        "be a single flat consolidation."
+    ),
 }
