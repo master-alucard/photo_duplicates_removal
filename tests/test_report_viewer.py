@@ -32,6 +32,26 @@ def _get_root() -> tk.Tk:
     return _ROOT
 
 
+def _wait_until(predicate, timeout: float = 3.0, interval: float = 0.01) -> bool:
+    """Poll *predicate* until it is truthy or *timeout* seconds elapse.
+
+    The thumbnail loader runs on a background daemon thread, so tests that
+    assert on its side effects must wait for it to finish.  A fixed
+    ``time.sleep`` is racy: under semaphore contention or scheduler jitter the
+    thread can miss a short window, which made these tests flaky once the suite
+    stopped hanging before reaching them.  Polling for the actual condition
+    waits exactly as long as needed and tolerates jitter.  Returns the final
+    truthiness so callers can assert on it directly.
+    """
+    import time
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return bool(predicate())
+
+
 def _make_record(path="/fake/img.jpg", width=800, height=600):
     """Return a minimal ImageRecord."""
     from scanner import ImageRecord
@@ -828,7 +848,7 @@ class TestVideoThumbnailLoader(unittest.TestCase):
             v._spawn_thumb_thread(
                 rec.path, label, 120, False, v._thumb_batch_id, is_video=True
             )
-            time.sleep(0.4)
+            _wait_until(lambda: called["extract"])
 
         self.assertTrue(called["extract"],
                         "_extract_video_thumb should be called for is_video=True records")
@@ -895,9 +915,11 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("scanner._extract_video_thumb", fake_extract):
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            # Wait for the first extraction to populate the cache, then issue the
+            # second request — it must hit the cache and never call extract again.
+            _wait_until(lambda: path in v._video_frame_cache)
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Second request for same path should use cache (1 extraction call)")
@@ -923,9 +945,11 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("scanner._extract_video_thumb", fake_extract):
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            # Wait for the failed extraction to record None, then issue the second
+            # request — the cached None must short-circuit it (no re-extraction).
+            _wait_until(lambda: path in v._video_frame_cache)
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, is_video=True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Failed extraction should be cached as None; retry should be skipped")
@@ -954,7 +978,7 @@ class TestVideoThumbnailLoader(unittest.TestCase):
 
         with patch("PIL.Image.open", spy_open):
             v._spawn_thumb_thread(path, label, 120, False, v._thumb_batch_id, is_video=False)
-            time.sleep(0.3)
+            _wait_until(lambda: pil_called["n"] > 0)
 
         self.assertGreater(pil_called["n"], 0,
                            "PIL.Image.open should be called for non-video (is_video=False) records")
@@ -1018,10 +1042,10 @@ class TestVideoThumbnailLoader(unittest.TestCase):
         with patch("scanner._extract_video_thumb", fake_extract):
             # First call — cache miss, should invoke extract once
             v._spawn_thumb_thread(path, label1, 120, False, v._thumb_batch_id, True)
-            time.sleep(0.4)
+            _wait_until(lambda: path in v._video_frame_cache)
             # Second call — cache hit, should NOT invoke extract
             v._spawn_thumb_thread(path, label2, 120, False, v._thumb_batch_id, True)
-            time.sleep(0.4)
+            _wait_until(lambda: call_count["n"] > 1, timeout=0.3)
 
         self.assertEqual(call_count["n"], 1,
                          "Second cache-hit call must not invoke _extract_video_thumb again")

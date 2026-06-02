@@ -24,6 +24,8 @@ We prevent that by:
 from __future__ import annotations
 
 import sys
+import threading
+import time
 import tkinter as tk
 
 import pytest
@@ -167,6 +169,90 @@ def _silent_tk_windows():
     tk.Wm.wm_state            = _orig_wm_state
     tk.Misc.grab_set          = _orig_grab_set
     tk.Misc.update_idletasks  = _orig_update_idletasks
+
+
+@pytest.fixture(autouse=True)
+def _reset_master_root_between_tests():
+    """Destroy leaked widgets and cancel pending Tk timers between tests.
+
+    The viewer tests build ReportViewers with ``_make_viewer`` and never destroy
+    them, so each leaks onto the shared session root (see ``_silent_tk_windows``)
+    along with 50-250 packed cards and pending timers: ``after(300, ...)`` +
+    ``after(1000, ...)`` safety-net re-layouts and an ``after_idle`` finalizer
+    that itself calls ``update_idletasks()``.
+
+    Two failure modes accumulate as the suite runs:
+
+    1. **Widget pileup.**  Every later ``update_idletasks()`` reprocesses
+       geometry for *all* accumulated widgets across *all* leaked viewers, so
+       the cost grows quadratically and the suite slows to an apparent hang.
+    2. **Timer cascade.**  A later ``update_idletasks()`` re-enters idle
+       processing through ``_finalize_scroll`` and fans out across every leaked
+       viewer's queued callbacks.
+
+    Both vanish if each test starts from a clean root.  Destroying the widgets
+    a test created and draining the ``after`` backlog after it finishes does
+    that.
+
+    Only widgets created *during* the test are destroyed: children present
+    before the test runs are preserved, so class-scoped viewers built once in
+    ``setUpClass`` (e.g. ``TestReportViewerActionBar.cls.viewer``) survive across
+    that class's methods.  This runs in teardown — after the test's assertions —
+    so nothing it clears can affect what the test observed.
+
+    It also drains lingering worker threads.  Building a viewer with video
+    records spawns real thumbnail-loader daemon threads that hold the decode
+    semaphore (``_THUMB_SEMAPHORE``) while they shell out to ffmpeg.  Left
+    running, they starve the next test's loader of a slot, which made the
+    ``TestVideoThumbnailLoader`` cache tests flaky.  Joining them (briefly,
+    bounded) hands every test a free semaphore.
+    """
+    if _MASTER_ROOT is None:
+        yield
+        return
+    try:
+        preexisting = {id(c) for c in _MASTER_ROOT.winfo_children()}
+    except Exception:
+        preexisting = set()
+
+    yield
+
+    # Drain lingering worker threads (thumbnail loaders et al.) so they release
+    # the decode semaphore before the next test runs.  Bounded so a genuinely
+    # stuck thread can never hang the suite.
+    main = threading.main_thread()
+    drain_deadline = time.monotonic() + 3.0
+    for t in threading.enumerate():
+        if t is main or not t.is_alive():
+            continue
+        remaining = drain_deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            t.join(timeout=remaining)
+        except Exception:
+            pass
+
+    # Cancel pending timers first so none fire against a half-destroyed tree.
+    try:
+        for aid in _MASTER_ROOT.tk.splitlist(_MASTER_ROOT.tk.call("after", "info")):
+            try:
+                _MASTER_ROOT.after_cancel(aid)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    # Destroy only the widgets this test added, leaving class-scoped widgets and
+    # the master root (with its ttkbootstrap image cache) intact.
+    try:
+        for child in list(_MASTER_ROOT.winfo_children()):
+            if id(child) not in preexisting:
+                try:
+                    child.destroy()
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
 
 def pytest_collection_modifyitems(config, items):
