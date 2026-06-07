@@ -475,6 +475,12 @@ class ReportViewer(tk.Frame):
         self._on_close_cb     = on_close_cb
         self._selection_cache = selection_cache  # restored selection state (or None)
 
+        # Freeze the output folder at construction time so that edits to the
+        # settings field between scan and apply don't silently redirect files.
+        self._frozen_out_folder: str = (
+            settings.out_folder.strip() if settings else ""
+        )
+
         # ── per-folder pagination (Mode B in-app report) ──────────────────
         self._pagination_mode: str = pagination_mode  # "groups" | "per_folder"
         # folder_groups: ordered dict  label → [DuplicateGroup, ...]
@@ -2537,7 +2543,16 @@ class ReportViewer(tk.Frame):
             return
         paths = list(self._manual_trash_selected)
 
-        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        # Use the folder that was active when the viewer was opened, not the
+        # current field value (which the user may have edited since scanning).
+        out = self._frozen_out_folder
+        if out and not os.path.exists(out):
+            messagebox.showwarning(
+                "Output Folder Missing",
+                f"The output folder no longer exists:\n{out}\n\n"
+                "Re-run the scan with a valid output folder.",
+            )
+            return
         trash_dir = Path(out) / "trash" if out else paths[0].parent / "trash"
         dry = bool(self._settings.dry_run) if self._settings else False
 

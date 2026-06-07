@@ -6416,11 +6416,18 @@ class App:
             parent=self.root,
         ):
             return
-        out = self.settings.out_folder.strip()
+        # Use the output folder that was active when THIS scan ran, not the
+        # current field value (which the user may have changed since scanning).
+        out = getattr(self, "_last_scan_out_folder", None) or self.settings.out_folder.strip()
         if not out:
             error_handler.show_warning(self.root, "No Output Folder",
                 "Output folder is not set.\n\n"
                 "Go to the Scan tab, set an output folder, and re-run the scan.")
+            return
+        if not os.path.exists(out):
+            error_handler.show_warning(self.root, "Output Folder Missing",
+                f"The output folder no longer exists:\n{out}\n\n"
+                "Re-run the scan with a valid output folder.")
             return
         _mat_disable(self.accept_btn)
         self._phase_label_var.set("Moving files…")
