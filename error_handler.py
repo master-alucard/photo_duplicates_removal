@@ -33,6 +33,19 @@ def is_developer_mode() -> bool:
     return bool(_settings and getattr(_settings, "developer_mode", False))
 
 
+def _palette() -> dict:
+    """Current theme palette (respects dark mode); light fallback on error."""
+    try:
+        import theme
+        return theme.get_palette(bool(getattr(_settings, "dark_mode", False)))
+    except Exception:
+        return {
+            "CARD_BG": "#FFFFFF", "TEXT1": "#1B1B1F", "TEXT2": "#49454F",
+            "ERROR": "#C62828", "WARNING": "#E65100", "ACCENT": "#1565C0",
+            "PRIMARY_TINT": "#E8EFF9",
+        }
+
+
 # ── public API ────────────────────────────────────────────────────────────────
 
 def show_error(
@@ -60,7 +73,11 @@ def show_warning(
 ) -> None:
     """Show a warning dialog, optionally with developer detail."""
     msg = _build_msg(user_msg, detail)
-    messagebox.showwarning(title, msg, parent=parent)
+    try:
+        _show_custom_note(parent, title, msg, kind="warning")
+    except Exception:
+        # Defensive fallback: native dialog if the themed one cannot render.
+        messagebox.showwarning(title, msg, parent=parent)
 
 
 def show_info(
@@ -71,7 +88,10 @@ def show_info(
 ) -> None:
     """Show an informational dialog, optionally with developer detail."""
     msg = _build_msg(user_msg, detail)
-    messagebox.showinfo(title, msg, parent=parent)
+    try:
+        _show_custom_note(parent, title, msg, kind="info")
+    except Exception:
+        messagebox.showinfo(title, msg, parent=parent)
 
 
 def _show_custom_error(
@@ -80,55 +100,86 @@ def _show_custom_error(
     msg: str,
 ) -> None:
     """Custom error dialog with OK and Copy to Clipboard buttons."""
+    _show_custom_note(parent, title, msg, kind="error", copy_button=True)
+
+
+def _show_custom_note(
+    parent: Optional[tk.Widget],
+    title: str,
+    msg: str,
+    kind: str = "info",
+    copy_button: bool = False,
+) -> None:
+    """Theme-aware modal dialog (error / warning / info).
+
+    Replaces the native messagebox so dialogs follow the app's dark mode
+    (native messageboxes stay light regardless of theme).
+    """
+    pal = _palette()
+    bg      = pal.get("CARD_BG", "#FFFFFF")
+    fg      = pal.get("TEXT1", "#1B1B1F")
+    tint    = pal.get("PRIMARY_TINT", "#E8EFF9")
+    accent_by_kind = {
+        "error":   pal.get("ERROR", "#C62828"),
+        "warning": pal.get("WARNING", "#E65100"),
+        "info":    pal.get("ACCENT", "#1565C0"),
+    }
+    icon_by_kind = {"error": "✕", "warning": "!", "info": "i"}
+    accent = accent_by_kind.get(kind, accent_by_kind["info"])
+    icon   = icon_by_kind.get(kind, "i")
+
     root = parent.winfo_toplevel() if parent else None
 
     win = tk.Toplevel(root)
     win.title(title)
     win.resizable(False, False)
+    win.configure(bg=bg)
     win.grab_set()
 
     # ── Icon + message ────────────────────────────────────────────────────
-    body = tk.Frame(win, padx=20, pady=16)
+    body = tk.Frame(win, padx=20, pady=16, bg=bg)
     body.pack(fill=tk.BOTH, expand=True)
 
-    icon_lbl = tk.Label(body, text="✕", font=("Segoe UI", 18, "bold"),
-                        fg="#FFFFFF", bg="#C62828", width=2, height=1,
+    icon_lbl = tk.Label(body, text=icon, font=("Segoe UI", 18, "bold"),
+                        fg="#FFFFFF", bg=accent, width=2, height=1,
                         relief=tk.FLAT)
     icon_lbl.pack(side=tk.LEFT, anchor=tk.N, padx=(0, 14))
 
     msg_lbl = tk.Label(body, text=msg, justify=tk.LEFT,
                        wraplength=420, font=("Segoe UI", 9),
-                       anchor=tk.W)
+                       anchor=tk.W, bg=bg, fg=fg)
     msg_lbl.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     # ── Button bar ────────────────────────────────────────────────────────
-    btn_bar = tk.Frame(win, pady=10, padx=20)
+    btn_bar = tk.Frame(win, pady=10, padx=20, bg=bg)
     btn_bar.pack(fill=tk.X)
 
-    copied_var = tk.StringVar(value="📋  Copy to Clipboard")
+    if copy_button:
+        copied_var = tk.StringVar(value="📋  Copy to Clipboard")
 
-    def _copy():
-        try:
-            win.clipboard_clear()
-            win.clipboard_append(msg)
-            win.update()
-            copied_var.set("✓  Copied!")
-            win.after(2000, lambda: copied_var.set("📋  Copy to Clipboard"))
-        except Exception:
-            pass
+        def _copy():
+            try:
+                win.clipboard_clear()
+                win.clipboard_append(msg)
+                win.update()
+                copied_var.set("✓  Copied!")
+                win.after(2000, lambda: copied_var.set("📋  Copy to Clipboard"))
+            except Exception:
+                pass
 
-    copy_btn = tk.Button(btn_bar, textvariable=copied_var, command=_copy,
-                         font=("Segoe UI", 9), relief=tk.FLAT, bd=0,
-                         padx=10, pady=4, cursor="hand2")
-    copy_btn.configure(bg="#E8EFF9", fg="#1565C0",
-                       activebackground="#D0DCF0", activeforeground="#1565C0")
-    copy_btn.pack(side=tk.LEFT)
+        copy_btn = tk.Button(btn_bar, textvariable=copied_var, command=_copy,
+                             font=("Segoe UI", 9), relief=tk.FLAT, bd=0,
+                             padx=10, pady=4, cursor="hand2")
+        copy_btn.configure(bg=tint, fg=pal.get("ACCENT", "#1565C0"),
+                           activebackground=tint,
+                           activeforeground=pal.get("ACCENT", "#1565C0"))
+        copy_btn.pack(side=tk.LEFT)
 
     ok_btn = tk.Button(btn_bar, text="OK", command=win.destroy,
                        font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0,
                        padx=20, pady=4, cursor="hand2")
-    ok_btn.configure(bg="#C62828", fg="#FFFFFF",
-                     activebackground="#B71C1C", activeforeground="#FFFFFF")
+    ok_btn.configure(bg=accent, fg="#FFFFFF",
+                     activebackground=accent, activeforeground="#FFFFFF")
     ok_btn.pack(side=tk.RIGHT)
 
     win.bind("<Return>", lambda _: win.destroy())

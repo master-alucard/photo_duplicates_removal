@@ -174,5 +174,88 @@ class TestCliProgressThrottle(unittest.TestCase):
         self.assertNotIn("2/10", text.replace(",", ""))
 
 
+
+class TestEllipsizeMiddle(unittest.TestCase):
+
+    def test_short_text_unchanged(self):
+        import main as main_mod
+        self.assertEqual(main_mod._ellipsize_middle("abc", 60), "abc")
+
+    def test_long_text_keeps_head_and_tail(self):
+        import main as main_mod
+        name = "Extracting frames from video 5/40: " + "x" * 80 + "_001993.mp4"
+        out = main_mod._ellipsize_middle(name, 60)
+        self.assertEqual(len(out), 60)
+        self.assertIn("…", out)
+        self.assertTrue(out.startswith("Extracting frames"))
+        self.assertTrue(out.endswith("_001993.mp4"))
+
+    def test_exact_limit_unchanged(self):
+        import main as main_mod
+        text = "a" * 60
+        self.assertEqual(main_mod._ellipsize_middle(text, 60), text)
+
+
+class TestThemedDialogs(unittest.TestCase):
+    """Smoke tests: the themed note dialog renders with palette colors and
+    show_warning/show_info route through it (no native messagebox)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _get_root()
+
+    def _open_and_close(self, fn, title):
+        import error_handler
+        # Auto-close: destroy the dialog as soon as it appears.
+        def _close_soon():
+            for w in self.root.winfo_children():
+                if isinstance(w, tk.Toplevel) and w.title() == title:
+                    w.destroy()
+                    return
+            self.root.after(20, _close_soon)
+        self.root.after(20, _close_soon)
+        with patch.object(error_handler.messagebox, "showwarning") as native_w, \
+             patch.object(error_handler.messagebox, "showinfo") as native_i:
+            fn()
+        native_w.assert_not_called()
+        native_i.assert_not_called()
+
+    def test_show_warning_uses_themed_dialog(self):
+        import error_handler
+        self._open_and_close(
+            lambda: error_handler.show_warning(self.root, "WarnTitle", "msg"),
+            "WarnTitle")
+
+    def test_show_info_uses_themed_dialog(self):
+        import error_handler
+        self._open_and_close(
+            lambda: error_handler.show_info(self.root, "InfoTitle", "msg"),
+            "InfoTitle")
+
+    def test_dark_palette_applied(self):
+        import error_handler
+        import theme
+        dark = theme.get_palette(True)
+
+        class _S:
+            dark_mode = True
+        old = error_handler._settings
+        error_handler.set_settings(_S())
+        try:
+            captured = {}
+            def _close_soon():
+                for w in self.root.winfo_children():
+                    if isinstance(w, tk.Toplevel) and w.title() == "DarkT":
+                        captured["bg"] = w.cget("bg")
+                        w.destroy()
+                        return
+                self.root.after(20, _close_soon)
+            self.root.after(20, _close_soon)
+            error_handler.show_info(self.root, "DarkT", "msg")
+            self.assertEqual(captured.get("bg"), dark["CARD_BG"])
+        finally:
+            error_handler.set_settings(old)
+
+
 if __name__ == "__main__":
     unittest.main()

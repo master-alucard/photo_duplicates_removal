@@ -290,6 +290,20 @@ def _fmt_duration(seconds: float) -> str:
     return f"{h}h {m:02d}m"
 
 
+def _ellipsize_middle(text: str, limit: int) -> str:
+    """Shorten *text* to *limit* chars with a middle ellipsis.
+
+    Status-line messages end with a filename; a plain head-cut drops the
+    most identifying part (name tail + extension). Keeping head and tail
+    preserves both the phase prefix and the end of the filename.
+    """
+    if len(text) <= limit:
+        return text
+    head = max(1, (limit - 1) * 3 // 5)
+    tail = max(1, limit - 1 - head)
+    return f"{text[:head]}…{text[-tail:]}"
+
+
 def _set_sleep_prevention(enable: bool) -> None:
     """Ask Windows to keep the system awake while scanning (no-op on non-Windows)."""
     try:
@@ -1864,7 +1878,7 @@ class App:
             pct = 0
         self._date_org_pbar["value"] = pct
         # Truncate long messages to keep the label short
-        self._date_org_msg_var.set(f"{pct:.0f}%  ·  {msg[:120]}")
+        self._date_org_msg_var.set(f"{pct:.0f}%  ·  {_ellipsize_middle(msg, 120)}")
 
     def _date_org_worker(self, op: dict) -> None:
         try:
@@ -3427,7 +3441,7 @@ class App:
             f"Phase {phase_num}/{len(_CUSTOM_PHASES)}: {mapped}…"
         )
         self._custom_eta_var.set(
-            f"{pct:.0f}%  ·  {eta} remaining  ·  {msg[:80]}"
+            f"{pct:.0f}%  ·  {eta} remaining  ·  {_ellipsize_middle(msg, 80)}"
         )
         self._update_custom_detail_log()
 
@@ -5912,7 +5926,7 @@ class App:
         else:
             file_info = rate_str
         self._eta_var.set(
-            f"{pct:.0f}%  ·  {eta} remaining{file_info}  ·  {msg[:60]}"
+            f"{pct:.0f}%  ·  {eta} remaining{file_info}  ·  {_ellipsize_middle(msg, 60)}"
         )
         self._update_detail_log()
 
