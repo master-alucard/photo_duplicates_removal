@@ -142,14 +142,14 @@ jobs:
 
             ### Fixed: black window cascade during video scans
             - **No more console windows popping up while scanning videos.** Every video probe spawned a visible black console window; on large or damaged video collections these cascaded across the whole screen. All background ffmpeg work is now fully hidden.
-            - **Live progress during video analysis.** The scan previously appeared frozen at "Indexing video N/N" while frames were being extracted. It now shows "Extracting video frames i/N" as it works, and the Stop button interrupts this phase immediately.
+            - **Live progress during video analysis.** The scan previously appeared frozen at "Indexing video N/N" while frames were being extracted. It now shows "Extracting frames from video i/N" as it works, and the Stop button interrupts this phase promptly.
 
             ### Reliability
             - **Much lower memory use when reviewing video results.** Video previews are now stored downscaled instead of as full-resolution frames, preventing gigabytes of memory buildup on large video collections.
             - **Moving duplicates to trash always uses the folder from scan time.** Editing the output folder field after a scan no longer redirects files to an unexpected location.
 
             ### New: command-line mode
-            - Scan and clean duplicates from scripts: `deduper.py --scan <folder> [--threshold 90] [--auto-move-trash] [--out <folder>]`. Dry-run by default; moves are logged and revertable from the app.
+            - Scan and clean image duplicates from scripts (when running from the Python source; see the README): `deduper.py --scan <folder> [--threshold 90] [--auto-move-trash] [--out <folder>]`. Dry-run by default; moves are logged and revertable from the app.
 
             > Builds on v1.2.0 (Merge tab, drive-disconnect auto-resume, crash-safe cache).
 

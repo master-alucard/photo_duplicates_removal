@@ -87,6 +87,8 @@ python deduper.py --scan "D:\Photos" --threshold 90
 python deduper.py --scan "D:\Photos" --threshold 90 --auto-move-trash
 ```
 
+- The CLI scans **images only** — video duplicate detection is available in
+  the GUI, not in command-line mode.
 - `--threshold` is a similarity percentage (0-100). Omit it to use the
   value from `settings.json`.
 - Without `--auto-move-trash` nothing is moved — the run is a report-only

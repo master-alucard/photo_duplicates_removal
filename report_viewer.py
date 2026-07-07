@@ -192,6 +192,10 @@ _RV_BTN_SUCCESS  = "#2E7D32"
 
 _THUMB_SIZE = 156
 
+# Working size for frames cached in _video_frame_cache. Must stay >= the
+# largest thumbnail rendered from the cache (currently _THUMB_SIZE).
+_VIDEO_CACHE_THUMB_PX = 384
+
 # Keep legacy aliases used elsewhere
 _CARD_BG    = _M_SURFACE
 _ORIG_BG    = _M_SUCCESS_TINT
@@ -1378,9 +1382,11 @@ class ReportViewer(tk.Frame):
                             # Cache a bounded working copy, not the raw frame:
                             # a 1080p RGB frame is ~6 MB, and this cache is
                             # never pruned across page cycles, so hundreds of
-                            # videos would hold gigabytes. 384 px comfortably
-                            # covers every thumbnail size used (<= 156 px).
-                            frame.thumbnail((384, 384), PILImage.LANCZOS)
+                            # videos would hold gigabytes.
+                            frame.thumbnail(
+                                (_VIDEO_CACHE_THUMB_PX, _VIDEO_CACHE_THUMB_PX),
+                                PILImage.LANCZOS,
+                            )
                         self._video_frame_cache[path] = frame
                     _dispatch_img(_build_video_img(frame))
             else:
@@ -2554,8 +2560,8 @@ class ReportViewer(tk.Frame):
         # current field value (which the user may have edited since scanning).
         out = self._frozen_out_folder
         if out and not os.path.exists(out):
-            messagebox.showwarning(
-                "Output Folder Missing",
+            error_handler.show_warning(
+                self, "Output Folder Missing",
                 f"The output folder no longer exists:\n{out}\n\n"
                 "Re-run the scan with a valid output folder.",
             )

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import os
+import subprocess as _subprocess
 import sys as _sys
 import time as _time
 from collections import defaultdict
@@ -2061,11 +2062,18 @@ def _split_by_format(
 _FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/truncated videos
 _VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
 
-# subprocess.CREATE_NO_WINDOW (0x08000000). The app ships as a windowed
-# (console=False) PyInstaller build, so without this flag Windows allocates a
-# visible console window for every ffmpeg/ffprobe child — hundreds of black
-# windows cascade across the screen during a video scan. Zero on non-Windows.
-_SUBPROC_NO_WINDOW = 0x08000000 if _sys.platform == "win32" else 0
+# Extraction-progress throttle: report every file for small batches, every
+# N-th file for large ones (mirrors the Phase-1 indexing throttle).
+_EXTRACT_PROGRESS_SMALL_BATCH = 20
+_EXTRACT_PROGRESS_EVERY = 5
+
+# The app ships as a windowed (console=False) PyInstaller build, so without
+# this flag Windows allocates a visible console window for every ffmpeg/
+# ffprobe child — hundreds of black windows cascade across the screen during
+# a video scan. Zero on non-Windows.
+_SUBPROC_NO_WINDOW = (
+    _subprocess.CREATE_NO_WINDOW if _sys.platform == "win32" else 0
+)
 
 
 _FFMPEG_EXE_CACHE: "Optional[str]" = None
@@ -2578,7 +2586,10 @@ def collect_videos(
         import threading as _threading
 
         n_extract = len(extract_indices)
-        _extract_step = 1 if n_extract <= 20 else 5
+        _extract_step = (
+            1 if n_extract <= _EXTRACT_PROGRESS_SMALL_BATCH
+            else _EXTRACT_PROGRESS_EVERY
+        )
         _extract_done = [0]
         _extract_lock = _threading.Lock()
 
@@ -2600,6 +2611,11 @@ def collect_videos(
                     # safe single-frame seek position).
                     dur = _probe_video_duration_ffmpeg(slot.path)
 
+                # Re-check Stop between ffmpeg steps: each step can block for
+                # its full timeout on a corrupt file, so a single check at
+                # task entry could still leave ~a minute of work after Stop.
+                if stop_flag and stop_flag[0]:
+                    return
                 thumb = _extract_video_thumb(slot.path)
                 if thumb is not None:
                     work = _downscaled_for_hashing(
@@ -2607,6 +2623,8 @@ def collect_videos(
                     )
                     ph = imagehash.phash(work)
 
+                if stop_flag and stop_flag[0]:
+                    return
                 if use_content and dur is not None:
                     fhashes = _extract_video_multi_frame_hashes(slot.path, dur)
             except Exception:
@@ -2634,7 +2652,7 @@ def collect_videos(
                     done = _extract_done[0]
                 if done == 1 or done % _extract_step == 0 or done == n_extract:
                     progress_cb(
-                        f"Extracting video frames {done}/{n_extract}: {slot.path.name}",
+                        f"Extracting frames from video {done}/{n_extract}: {slot.path.name}",
                         done, n_extract, "Videos",
                     )
 

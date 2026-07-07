@@ -39,8 +39,6 @@ import sys
 import time
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent))
-
 from config import Settings, load_settings
 from mover import move_groups, ops_log_path
 from scanner import DuplicateGroup, collect_images, find_groups
@@ -100,7 +98,6 @@ def _fmt_size(nbytes: int) -> str:
         if value < 1024 or unit == "TB":
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
         value /= 1024
-    return f"{int(nbytes)} B"
 
 
 def _print_groups(groups: list[DuplicateGroup]) -> tuple[int, int, int]:

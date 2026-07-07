@@ -161,6 +161,32 @@ class TestDryRunAndAutoMove(_CliTestBase):
         moved_ops = [o for o in ops if o.get("status") == "moved"]
         self.assertEqual(len(moved_ops), 1)
 
+    def test_out_flag_redirects_trash_and_ops_log(self):
+        out_dir = Path(tempfile.mkdtemp(prefix="deduper_cli_out_"))
+        self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)
+
+        code, out = self.run_cli(
+            "--scan", str(self.tmp), "--threshold", "90",
+            "--auto-move-trash", "--out", str(out_dir),
+        )
+
+        self.assertEqual(code, 0)
+        self.assertIn("Moved 1", out)
+
+        # Trash and ops log land under --out, not under the scan folder.
+        trash = out_dir / "trash"
+        self.assertTrue(trash.exists())
+        self.assertEqual(len(self._files_in(trash)), 1)
+        self.assertTrue((out_dir / "operations_log.json").exists())
+        self.assertFalse((self.tmp / "trash").exists())
+        self.assertFalse((self.tmp / "operations_log.json").exists())
+
+        # Original kept, distinct image untouched.
+        self.assertTrue(self.distinct.exists())
+        remaining_pair = [p for p in (self.original, self.duplicate)
+                          if p.exists()]
+        self.assertEqual(len(remaining_pair), 1)
+
     def test_clean_folder_reports_no_duplicates(self):
         clean = self.tmp / "clean"
         clean.mkdir()
