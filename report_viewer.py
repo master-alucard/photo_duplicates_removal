@@ -447,6 +447,7 @@ class ReportViewer(tk.Frame):
         selection_cache: Optional[dict] = None,
         pagination_mode: str = "groups",
         folder_groups: "Optional[dict]" = None,
+        out_folder: Optional[str] = None,
     ) -> None:
         """Create the viewer.
 
@@ -479,10 +480,15 @@ class ReportViewer(tk.Frame):
         self._on_close_cb     = on_close_cb
         self._selection_cache = selection_cache  # restored selection state (or None)
 
-        # Freeze the output folder at construction time so that edits to the
-        # settings field between scan and apply don't silently redirect files.
-        self._frozen_out_folder: str = (
-            settings.out_folder.strip() if settings else ""
+        # The viewer's working output folder. Initialized to the scan-time
+        # value passed by the caller (regular and compare scans use different
+        # settings fields; the settings fallback covers callers with no scan
+        # out folder, e.g. the merge viewer). Edits to the settings FIELD
+        # after the scan never redirect moves; only the in-viewer
+        # "Change Folder" action updates this value.
+        self._out_folder: str = (
+            out_folder.strip() if out_folder is not None
+            else (settings.out_folder.strip() if settings else "")
         )
 
         # ── per-folder pagination (Mode B in-app report) ──────────────────
@@ -1531,7 +1537,7 @@ class ReportViewer(tk.Frame):
 
     def _get_trash_folder_display(self) -> str:
         """Return a short display string for the current trash destination."""
-        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        out = self._out_folder
         if out:
             folder = Path(out) / "trash"
         else:
@@ -1547,7 +1553,7 @@ class ReportViewer(tk.Frame):
     def _on_change_folder(self) -> None:
         """Open a folder browser so the user can redirect the trash destination."""
         from tkinter import filedialog
-        initial = (self._settings.out_folder.strip() if self._settings else "") or "/"
+        initial = self._out_folder or "/"
         new_folder = filedialog.askdirectory(
             title="Select Output Folder  (duplicates go to <folder>/trash)",
             initialdir=initial,
@@ -1555,6 +1561,7 @@ class ReportViewer(tk.Frame):
         )
         if not new_folder:
             return
+        self._out_folder = new_folder
         if self._settings:
             self._settings.out_folder = new_folder
             try:
@@ -1589,7 +1596,7 @@ class ReportViewer(tk.Frame):
             return
 
         # Determine trash directory
-        out = (self._settings.out_folder.strip() if self._settings else "") or ""
+        out = self._out_folder
         if out:
             trash_dir = Path(out) / "trash"
         else:
@@ -2558,7 +2565,7 @@ class ReportViewer(tk.Frame):
 
         # Use the folder that was active when the viewer was opened, not the
         # current field value (which the user may have edited since scanning).
-        out = self._frozen_out_folder
+        out = self._out_folder
         if out and not os.path.exists(out):
             error_handler.show_warning(
                 self, "Output Folder Missing",

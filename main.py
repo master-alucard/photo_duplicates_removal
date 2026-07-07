@@ -1334,12 +1334,6 @@ class App:
 
         log_path = ops_log_path(Path(out)) if out else None
 
-        # Sync settings.out_folder to the folder used by THIS scan (#159).
-        # Without this, a user who edits the out_folder field between scan
-        # completion and clicking "View Report" would see the wrong trash path.
-        if out and self.settings.out_folder.strip() != out:
-            self.settings.out_folder = out
-
         def _on_close():
             # Save selection state before destroying the viewer
             for w in self._results_viewer_host.winfo_children():
@@ -1361,6 +1355,7 @@ class App:
             settings=self.settings,
             on_close_cb=_on_close,
             selection_cache=self._scan_selection_cache,
+            out_folder=out,
         )
         viewer.pack(fill=tk.BOTH, expand=True)
 
@@ -2901,6 +2896,9 @@ class App:
 
         self._collect_settings()
         self._scanning = True
+        # Freeze this scan's output folder so later edits to the field can't
+        # redirect the accept/manual-trash moves (#159 class, compare scan).
+        self._custom_last_scan_out = out
         self._custom_stop_flag[0]  = False
         self._custom_pause_flag[0] = False
         self._custom_is_paused     = False
@@ -3575,7 +3573,8 @@ class App:
         if not self._custom_groups:
             messagebox.showinfo("Review", "No custom scan results to review.", parent=self.root)
             return
-        out = self._custom_out_var.get().strip()
+        out = (getattr(self, "_custom_last_scan_out", None)
+               or self._custom_out_var.get().strip())
 
         def _apply_cb(_paths_trashed: list) -> None:
             # File moving is handled inside ReportViewer; update history here.
@@ -3621,6 +3620,7 @@ class App:
             settings=self.settings,
             on_close_cb=_on_close,
             selection_cache=self._custom_selection_cache,
+            out_folder=out,
         )
         viewer.pack(fill=tk.BOTH, expand=True)
 
@@ -3639,7 +3639,8 @@ class App:
             parent=self.root,
         ):
             return
-        out = self._custom_out_var.get().strip()
+        out = (getattr(self, "_custom_last_scan_out", None)
+               or self._custom_out_var.get().strip())
         if not out:
             return
         _mat_disable(self._cr_accept_btn)
