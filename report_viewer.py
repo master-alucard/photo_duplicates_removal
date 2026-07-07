@@ -1374,6 +1374,13 @@ class ReportViewer(tk.Frame):
                             frame = _extract_video_thumb(path)
                         except Exception:
                             frame = None
+                        if frame is not None:
+                            # Cache a bounded working copy, not the raw frame:
+                            # a 1080p RGB frame is ~6 MB, and this cache is
+                            # never pruned across page cycles, so hundreds of
+                            # videos would hold gigabytes. 384 px comfortably
+                            # covers every thumbnail size used (<= 156 px).
+                            frame.thumbnail((384, 384), PILImage.LANCZOS)
                         self._video_frame_cache[path] = frame
                     _dispatch_img(_build_video_img(frame))
             else:
