@@ -2061,6 +2061,12 @@ def _split_by_format(
 _FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/truncated videos
 _VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
 
+# subprocess.CREATE_NO_WINDOW (0x08000000). The app ships as a windowed
+# (console=False) PyInstaller build, so without this flag Windows allocates a
+# visible console window for every ffmpeg/ffprobe child — hundreds of black
+# windows cascade across the screen during a video scan. Zero on non-Windows.
+_SUBPROC_NO_WINDOW = 0x08000000 if _sys.platform == "win32" else 0
+
 
 _FFMPEG_EXE_CACHE: "Optional[str]" = None
 
@@ -2102,6 +2108,7 @@ def _probe_video_duration(path: Path) -> "Optional[float]":
                 str(path),
             ],
             capture_output=True, timeout=5,
+            creationflags=_SUBPROC_NO_WINDOW,
         )
         if result.returncode == 0 and result.stdout.strip():
             return float(result.stdout.strip())
@@ -2149,6 +2156,7 @@ def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
                 "-vcodec", "png", "-",
             ],
             capture_output=True, timeout=_FFMPEG_TIMEOUT,
+            creationflags=_SUBPROC_NO_WINDOW,
         )
         if result.returncode == 0 and result.stdout:
             img = Image.open(_io.BytesIO(result.stdout))
@@ -2217,6 +2225,7 @@ def _probe_video_duration_ffmpeg(path: Path) -> "Optional[float]":
         result = subprocess.run(
             [_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
             capture_output=True, timeout=_FFMPEG_TIMEOUT,
+            creationflags=_SUBPROC_NO_WINDOW,
         )
         output = result.stderr.decode("utf-8", errors="replace")
         m = _re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", output)
@@ -2278,6 +2287,7 @@ def _extract_video_multi_frame_hashes(
                 "-f", "image2pipe", "-vcodec", "png", "-",
             ],
             capture_output=True, timeout=_FFMPEG_TIMEOUT * len(positions),
+            creationflags=_SUBPROC_NO_WINDOW,
         )
         if proc.returncode == 0 and proc.stdout:
             # Split raw stdout into individual PNG chunks by magic bytes
@@ -2328,6 +2338,7 @@ def _extract_video_multi_frame_hashes(
                     "-vcodec", "png", "-",
                 ],
                 capture_output=True, timeout=_FFMPEG_TIMEOUT,
+                creationflags=_SUBPROC_NO_WINDOW,
             )
             if proc.returncode == 0 and proc.stdout:
                 img = Image.open(_io.BytesIO(proc.stdout))
@@ -2564,11 +2575,21 @@ def collect_videos(
     # ── Phase 2: bounded parallel extraction for cache-miss files ──────────
     if extract_indices and not (stop_flag and stop_flag[0]):
         from concurrent.futures import ThreadPoolExecutor as _TPE
+        import threading as _threading
+
+        n_extract = len(extract_indices)
+        _extract_step = 1 if n_extract <= 20 else 5
+        _extract_done = [0]
+        _extract_lock = _threading.Lock()
 
         def _extract_one(slot_idx: int):
             """Extract thumbnail (and optionally multi-frame fingerprint) for one
             slot; safe to run in a thread."""
             slot = slots[slot_idx]
+            # Respect Stop promptly: skip remaining extractions instead of
+            # letting the pool grind through every queued file.
+            if stop_flag and stop_flag[0]:
+                return
             ph = _zero
             dur: "Optional[float]" = None
             fhashes: list[str] = []
@@ -2604,6 +2625,18 @@ def collect_videos(
                 duration=dur,
                 frame_hashes=fhashes,
             )
+            # Progress: extraction dominates first-scan wall time (multiple
+            # ffmpeg calls per file), so without this the UI freezes at the
+            # last Phase-1 "Indexing video N/N" message for many minutes.
+            if progress_cb:
+                with _extract_lock:
+                    _extract_done[0] += 1
+                    done = _extract_done[0]
+                if done == 1 or done % _extract_step == 0 or done == n_extract:
+                    progress_cb(
+                        f"Extracting video frames {done}/{n_extract}: {slot.path.name}",
+                        done, n_extract, "Videos",
+                    )
 
         with _TPE(max_workers=_VIDEO_EXTRACT_WORKERS) as _pool:
             list(_pool.map(_extract_one, extract_indices))

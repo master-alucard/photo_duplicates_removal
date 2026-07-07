@@ -75,6 +75,26 @@ pip install -r requirements.txt
 python main.py
 ```
 
+### 6. Command-line mode (optional)
+
+Run a scan without the GUI:
+
+```bash
+# Dry run: report duplicate groups, move nothing
+python deduper.py --scan "D:\Photos" --threshold 90
+
+# Move detected duplicates to D:\Photos\trash\ (revertable from the GUI)
+python deduper.py --scan "D:\Photos" --threshold 90 --auto-move-trash
+```
+
+- `--threshold` is a similarity percentage (0-100). Omit it to use the
+  value from `settings.json`.
+- Without `--auto-move-trash` nothing is moved — the run is a report-only
+  dry run. With it, duplicates go to `<out>/trash/` and the move is logged
+  to `operations_log.json` so it can be reverted. Originals are never touched.
+- `--out FOLDER` changes where `trash/` and the log are created
+  (default: the scan folder). See `python deduper.py --help`.
+
 ---
 
 ## Requirements
