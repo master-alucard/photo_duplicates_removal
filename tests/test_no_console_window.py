@@ -19,10 +19,13 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import scanner
 
-# Resolve the ffmpeg exe once, outside the subprocess.run patches below:
-# imageio_ffmpeg.get_ffmpeg_exe() makes its own internal subprocess call on
-# first resolve, which is not a scanner.py call site.
-scanner._ffmpeg_exe()
+
+def setup_module(_module=None):
+    # Resolve the ffmpeg exe once, outside the subprocess.run patches below:
+    # imageio_ffmpeg.get_ffmpeg_exe() makes its own internal subprocess call
+    # on first resolve, which is not a scanner.py call site. A setup hook
+    # (not module-level code) keeps pytest collection side-effect free.
+    scanner._ffmpeg_exe()
 
 
 def _capture_run(captured):
