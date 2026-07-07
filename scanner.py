@@ -2062,10 +2062,10 @@ def _split_by_format(
 _FFMPEG_TIMEOUT = 10            # seconds — prevents hangs on malformed/truncated videos
 _VIDEO_EXTRACT_WORKERS = 2      # concurrent ffmpeg/OpenCV calls during cache-miss extraction
 
-# Extraction-progress throttle: report every file for small batches, every
-# N-th file for large ones (mirrors the Phase-1 indexing throttle).
-_EXTRACT_PROGRESS_SMALL_BATCH = 20
-_EXTRACT_PROGRESS_EVERY = 5
+# Video-progress throttle: report every file for small batches, every N-th
+# file for large ones. Shared by Phase-1 indexing and Phase-2 extraction.
+_VIDEO_PROGRESS_SMALL_BATCH = 20
+_VIDEO_PROGRESS_EVERY = 5
 
 # The app ships as a windowed (console=False) PyInstaller build, so without
 # this flag Windows allocates a visible console window for every ffmpeg/
@@ -2107,8 +2107,7 @@ def _probe_video_duration(path: Path) -> "Optional[float]":
     short clips (duration < 1 s).
     """
     try:
-        import subprocess
-        result = subprocess.run(
+        result = _subprocess.run(
             [
                 "ffprobe", "-v", "error",
                 "-show_entries", "format=duration",
@@ -2141,7 +2140,6 @@ def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
     Both ffmpeg and ffprobe calls are bounded by timeouts to prevent hangs on
     corrupt or truncated video files.
     """
-    import subprocess
     import io as _io
 
     # ── determine a safe seek offset ─────────────────────────────────────────
@@ -2156,7 +2154,7 @@ def _extract_video_thumb(path: Path) -> "Optional[Image.Image]":
 
     # ── 1. ffmpeg path ─────────────────────────────────────────────────────
     try:
-        result = subprocess.run(
+        result = _subprocess.run(
             [
                 _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
                 "-ss", seek_str, "-i", str(path),
@@ -2227,10 +2225,9 @@ def _probe_video_duration_ffmpeg(path: Path) -> "Optional[float]":
 
     Returns ``None`` on any failure (missing tool, malformed file, timeout).
     """
-    import subprocess
     import re as _re
     try:
-        result = subprocess.run(
+        result = _subprocess.run(
             [_ffmpeg_exe(), "-hide_banner", "-i", str(path)],
             capture_output=True, timeout=_FFMPEG_TIMEOUT,
             creationflags=_SUBPROC_NO_WINDOW,
@@ -2265,7 +2262,6 @@ def _extract_video_multi_frame_hashes(
 
     Returns ``[]`` if *duration* is too short to sample meaningfully (< 0.5 s).
     """
-    import subprocess
     import io as _io
 
     if duration < 0.5:
@@ -2285,7 +2281,7 @@ def _extract_video_multi_frame_hashes(
     # Use "eq(pict_type,I)" is too restrictive — use "gte(t, ...)" for any frame type.
     select_parts = "+".join(f"between(t,{t},{t})" for t in seek_times)
     try:
-        proc = subprocess.run(
+        proc = _subprocess.run(
             [
                 _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
                 "-i", str(path),
@@ -2338,7 +2334,7 @@ def _extract_video_multi_frame_hashes(
         seek_s = duration * frac
         ph_str = ""
         try:
-            proc = subprocess.run(
+            proc = _subprocess.run(
                 [
                     _ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
                     "-ss", f"{seek_s:.3f}", "-i", str(path),
@@ -2486,7 +2482,9 @@ def collect_videos(
 
     # Progress throttle: report every file when the collection is small;
     # otherwise at most once every 5 files to avoid flooding the UI.
-    _progress_step = 1 if total <= 20 else 5
+    _progress_step = (
+        1 if total <= _VIDEO_PROGRESS_SMALL_BATCH else _VIDEO_PROGRESS_EVERY
+    )
     failed_paths: list[Path] = []
 
     # ── Phase 1: stat + cache check (fast, sequential) ─────────────────────
@@ -2587,8 +2585,8 @@ def collect_videos(
 
         n_extract = len(extract_indices)
         _extract_step = (
-            1 if n_extract <= _EXTRACT_PROGRESS_SMALL_BATCH
-            else _EXTRACT_PROGRESS_EVERY
+            1 if n_extract <= _VIDEO_PROGRESS_SMALL_BATCH
+            else _VIDEO_PROGRESS_EVERY
         )
         _extract_done = [0]
         _extract_lock = _threading.Lock()

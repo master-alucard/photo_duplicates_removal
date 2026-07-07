@@ -146,10 +146,10 @@ jobs:
 
             ### Reliability
             - **Much lower memory use when reviewing video results.** Video previews are now stored downscaled instead of as full-resolution frames, preventing gigabytes of memory buildup on large video collections.
-            - **Moving duplicates to trash always uses the folder from scan time.** Editing the output folder field after a scan no longer redirects files to an unexpected location.
+            - **Moving duplicates to trash now uses the folder from scan time.** Editing the output folder field after a scan no longer redirects files to an unexpected location.
 
             ### New: command-line mode
-            - Scan and clean image duplicates from scripts (when running from the Python source; see the README): `deduper.py --scan <folder> [--threshold 90] [--auto-move-trash] [--out <folder>]`. Dry-run by default; moves are logged and revertable from the app.
+            - Scan and clean image duplicates from scripts (when running from the Python source; see the README): `deduper.py --scan <folder> [--threshold 90] [--auto-move-trash] [--out <folder>]`. Dry-run by default; moves are logged and revertable from the GUI.
 
             > Builds on v1.2.0 (Merge tab, drive-disconnect auto-resume, crash-safe cache).
 

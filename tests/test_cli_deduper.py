@@ -7,6 +7,7 @@ Covers:
   * dry run: duplicates reported on stdout, no files touched
   * --auto-move-trash: duplicate copy moved to <scan>/trash/, original kept,
     operations_log.json written
+  * --out: trash/ + operations log redirected, scan folder untouched
   * clean-folder scan reports no duplicates
 
 Run with:
