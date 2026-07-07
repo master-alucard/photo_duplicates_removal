@@ -463,3 +463,46 @@ class TestFinishPhase:
         t.start_phase("Discovery", 10)
         t.finish_phase()
         assert len(t._completed_time_per_weight) == 0
+
+# ── revise_total (mid-phase denominator changes, #2151) ───────────────────────
+
+class TestReviseTotal:
+
+    def test_revise_updates_total_and_unclamps_percent(self):
+        t = _make_tracker(["Videos"])
+        # First callback of the phase fixes total=1 ("Collecting videos…").
+        t.start_phase("Videos", 1)
+        t.update(1)
+        # Indexing arrives with the real denominator.
+        t.revise_total(262)
+        t.update(100)
+        s = t.phase_summaries[0]
+        assert s["total_units"] == 262
+        assert s["done_units"] == 100
+
+    def test_revise_clamps_done_when_total_shrinks(self):
+        t = _make_tracker(["Videos"])
+        t.start_phase("Videos", 262)
+        t.update(262)
+        # Extraction sub-stage has a smaller denominator (cache misses only).
+        t.revise_total(40)
+        s = t.phase_summaries[0]
+        assert s["total_units"] == 40
+        assert s["done_units"] == 40
+
+    def test_same_total_is_noop(self):
+        t = _make_tracker(["Hashing"])
+        t.start_phase("Hashing", 100)
+        t.update(50)
+        t.revise_total(100)
+        s = t.phase_summaries[0]
+        assert s["done_units"] == 50
+        assert s["total_units"] == 100
+
+    def test_no_active_phase_or_zero_total_ignored(self):
+        t = _make_tracker(["Hashing"])
+        t.revise_total(10)   # no active phase — must not raise
+        t.start_phase("Hashing", 100)
+        t.revise_total(0)    # zero — ignored
+        s = t.phase_summaries[0]
+        assert s["total_units"] == 100

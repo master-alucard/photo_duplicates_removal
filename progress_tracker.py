@@ -104,6 +104,26 @@ class PhaseTracker:
         # let the next eta_seconds() pick up the raw value without damping.
         self._last_eta = None
 
+    def revise_total(self, total_units: int) -> None:
+        """Revise the active phase's total mid-phase.
+
+        A phase's total is normally fixed by its first progress callback, but
+        some phases run several sub-stages with different denominators (the
+        "Videos" phase: collecting -> indexing N files -> extracting M cache
+        misses). Without revision the total stays at the first value and the
+        per-phase percent clamps. Speed samples are cleared because the done
+        counter restarts with the new denominator.
+        """
+        if self._current_idx < 0 or total_units <= 0:
+            return
+        phase = self._phases[self._current_idx]
+        if phase.total_units == max(total_units, 1):
+            return
+        phase.total_units = max(total_units, 1)
+        phase.done_units = min(phase.done_units, phase.total_units)
+        self._speed_samples.clear()
+        self._last_eta = None
+
     def update(self, done_units: int) -> None:
         """Update progress in the current phase."""
         if self._current_idx < 0:

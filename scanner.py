@@ -2659,15 +2659,19 @@ def collect_videos(
             # Progress: extraction dominates first-scan wall time (multiple
             # ffmpeg calls per file), so without this the UI freezes at the
             # last Phase-1 "Indexing video N/N" message for many minutes.
+            # The publish stays inside the lock so two workers can't write
+            # the mailbox out of order (a regressing counter for one tick);
+            # the callback is a plain attribute write, so holding the lock
+            # across it is safe and cheap.
             if progress_cb:
                 with _extract_lock:
                     _extract_done[0] += 1
                     done = _extract_done[0]
-                if done == 1 or done % _extract_step == 0 or done == n_extract:
-                    progress_cb(
-                        f"Extracting frames from video {done}/{n_extract}: {slot.path.name}",
-                        done, n_extract, "Videos",
-                    )
+                    if done == 1 or done % _extract_step == 0 or done == n_extract:
+                        progress_cb(
+                            f"Extracting frames from video {done}/{n_extract}: {slot.path.name}",
+                            done, n_extract, "Videos",
+                        )
 
         with _TPE(max_workers=_VIDEO_EXTRACT_WORKERS) as _pool:
             list(_pool.map(_extract_one, extract_indices))

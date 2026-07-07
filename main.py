@@ -3412,6 +3412,7 @@ class App:
                 pass
 
         if total > 0:
+            tracker.revise_total(total)
             tracker.update(done)
 
         pct = tracker.total_pct
@@ -5892,6 +5893,7 @@ class App:
                 pass
 
         if total > 0:
+            self._tracker.revise_total(total)
             self._tracker.update(done)
 
         pct = self._tracker.total_pct
