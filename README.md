@@ -95,7 +95,10 @@ python deduper.py --scan "D:\Photos" --threshold 90 --auto-move-trash
   dry run. With it, duplicates go to `<out>/trash/` and the move is logged
   to `operations_log.json` so it can be reverted. Originals are never touched.
 - `--out FOLDER` changes where `trash/` and the log are created
-  (default: the scan folder). See `python deduper.py --help`.
+  (default: the scan folder). To revert a CLI run made with `--out`, first
+  point the GUI's Output folder field at that same folder — the GUI's Revert
+  reads the operations log from its current Output folder.
+  See `python deduper.py --help`.
 
 ---
 

@@ -59,7 +59,7 @@ import theme as _theme_mod
 import ui_animations as _anim
 from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
-                     collect_videos, find_video_duplicates)
+                     collect_videos, find_video_duplicates, scan_skip_paths)
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -3087,11 +3087,7 @@ class App:
 
         try:
             out_path.mkdir(parents=True, exist_ok=True)
-            skip_paths = {
-                (out_path / "results").resolve(),
-                (out_path / "trash").resolve(),
-                out_path.resolve(),
-            }
+            skip_paths = scan_skip_paths(out_path)
 
             main_records = []
             check_records = []
@@ -3274,9 +3270,7 @@ class App:
                     cb("Collecting videos (main folder)…", 0, 1, "Comparing")
                     _main_videos = collect_videos(
                         main_path,
-                        {(out_path / "results").resolve(),
-                         (out_path / "trash").resolve(),
-                         out_path.resolve()},
+                        scan_skip_paths(out_path),
                         settings,
                         progress_cb=cb,
                         stop_flag=self._custom_stop_flag,
@@ -3285,9 +3279,7 @@ class App:
                         cb("Collecting videos (check folder)…", 0, 1, "Comparing")
                         _check_videos = collect_videos(
                             check_path,
-                            {(out_path / "results").resolve(),
-                             (out_path / "trash").resolve(),
-                             out_path.resolve()},
+                            scan_skip_paths(out_path),
                             settings,
                             progress_cb=cb,
                             stop_flag=self._custom_stop_flag,
@@ -5970,11 +5962,7 @@ class App:
 
         try:
             out.mkdir(parents=True, exist_ok=True)
-            skip_paths = {
-                (out / "results").resolve(),
-                (out / "trash").resolve(),
-                out.resolve(),
-            }
+            skip_paths = scan_skip_paths(out)
 
             if resume_state and resume_state.phase == "comparing":
                 from scan_state import deserialize_record

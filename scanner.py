@@ -389,6 +389,21 @@ def _resolve_thread_count(settings: Settings, folder: Path) -> int:
 
 # ── collection ───────────────────────────────────────────────────────────────
 
+def scan_skip_paths(out_folder: Path) -> "set[Path]":
+    """Return the canonical set of paths a scan must never walk: the output
+    folder itself plus its ``results/`` and ``trash/`` subfolders.
+
+    Shared by the GUI scan workers and the CLI so the skip set can't drift
+    between entry points (a future artifact written under the output folder
+    must be excluded everywhere at once).
+    """
+    return {
+        out_folder.resolve(),
+        (out_folder / "results").resolve(),
+        (out_folder / "trash").resolve(),
+    }
+
+
 def collect_images(
     folder: Path,
     skip_paths: set[Path],

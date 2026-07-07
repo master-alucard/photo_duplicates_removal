@@ -162,6 +162,28 @@ class TestDryRunAndAutoMove(_CliTestBase):
         moved_ops = [o for o in ops if o.get("status") == "moved"]
         self.assertEqual(len(moved_ops), 1)
 
+    def test_low_threshold_auto_move_refused_noninteractively(self):
+        # --threshold takes a percentage; a Hamming-style value like 2 means
+        # 2% similarity (63 bits tolerance). Combined with --auto-move-trash
+        # and no TTY to confirm on, the CLI must refuse rather than move.
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            code, _ = self.run_cli(
+                "--scan", str(self.tmp), "--threshold", "2",
+                "--auto-move-trash",
+            )
+        self.assertEqual(code, 2)
+        self.assertIn("PERCENTAGE", err.getvalue())
+        self.assertFalse((self.tmp / "trash").exists())
+        self.assertTrue(self.original.exists() and self.duplicate.exists())
+
+    def test_low_threshold_dry_run_still_allowed(self):
+        # Without --auto-move-trash the low threshold is harmless; only warn
+        # when files would actually move.
+        with contextlib.redirect_stderr(io.StringIO()):
+            code, out = self.run_cli("--scan", str(self.tmp), "--threshold", "2")
+        self.assertEqual(code, 0)
+        self.assertIn("dry run", out.lower())
+
     def test_out_flag_redirects_trash_and_ops_log(self):
         out_dir = Path(tempfile.mkdtemp(prefix="deduper_cli_out_"))
         self.addCleanup(shutil.rmtree, out_dir, ignore_errors=True)

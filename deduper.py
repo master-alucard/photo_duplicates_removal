@@ -41,7 +41,7 @@ from pathlib import Path
 
 from config import Settings, load_settings
 from mover import move_groups, ops_log_path
-from scanner import DuplicateGroup, collect_images, find_groups
+from scanner import DuplicateGroup, collect_images, find_groups, scan_skip_paths
 
 SETTINGS_PATH = Path(__file__).parent / "settings.json"
 
@@ -194,12 +194,35 @@ def main(argv: "list[str] | None" = None) -> int:
              if args.threshold is not None else " (from settings.json)"))
     print(f"  mode        : {'AUTO-MOVE to ' + str(trash_dir) if args.auto_move_trash else 'dry run (report only)'}")
 
+    # Guard the percent-vs-Hamming confusion trap: someone typing the GUI's
+    # Hamming value (e.g. 2) as --threshold gets 2% similarity = 63 bits of
+    # tolerance, which groups nearly everything. Only dangerous combined with
+    # --auto-move-trash, so gate exactly that combination.
+    if (args.auto_move_trash and args.threshold is not None
+            and args.threshold < 50):
+        print(f"WARNING: --threshold {args.threshold} means "
+              f"{args.threshold}% similarity ({settings.threshold} bits of "
+              "pHash tolerance) - almost any two images would be grouped as "
+              "duplicates. If you meant a pHash Hamming distance, note that "
+              "--threshold takes a PERCENTAGE (e.g. 97 corresponds to the "
+              "GUI default of 2 bits).", file=sys.stderr)
+        if sys.stdin is not None and sys.stdin.isatty():
+            answer = input("Move files with this threshold anyway? [y/N] ")
+            if answer.strip().lower() not in ("y", "yes"):
+                print("Aborted.", file=sys.stderr)
+                return 2
+        else:
+            print("Refusing to auto-move non-interactively with "
+                  "--threshold below 50. Re-run without --auto-move-trash "
+                  "to preview the groups first.", file=sys.stderr)
+            return 2
+
     # ── scan (same pipeline as the GUI scan worker) ──────────────────────
     progress_cb = _make_progress_cb()
     lib_cache = _load_library_cache(scan_folder)
 
-    # Never rescan our own trash output.
-    skip_paths = {trash_dir.resolve()}
+    # Never rescan our own output artifacts (same skip set as the GUI).
+    skip_paths = scan_skip_paths(out_folder)
 
     try:
         records = collect_images(
@@ -247,4 +270,8 @@ def main(argv: "list[str] | None" = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        print("\nInterrupted.", file=sys.stderr)
+        sys.exit(130)
