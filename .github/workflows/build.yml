@@ -140,18 +140,18 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### Fixed: black window cascade during video scans
-            - **No more console windows popping up while scanning videos.** Every video probe spawned a visible black console window; on large or damaged video collections these cascaded across the whole screen. All background ffmpeg work is now fully hidden.
-            - **Live progress during video analysis.** The scan previously appeared frozen at "Indexing video N/N" while frames were being extracted. It now shows "Extracting frames from video i/N" as it works, and the Stop button interrupts this phase promptly.
+            ### Fixed: Compare Scan could redirect trashed files to the wrong folder
+            - **Trash from Compare Scan now always goes to that scan's own output folder.** Reviewing results and moving files manually could send them to a different folder than expected if the Scan tab's output field differed from the Compare Scan one. This is now scan-time frozen, matching the regular Scan tab's behavior.
 
             ### Reliability
-            - **Much lower memory use when reviewing video results.** Video previews are now stored downscaled instead of as full-resolution frames, preventing gigabytes of memory buildup on large video collections.
-            - **Moving duplicates to trash now uses the folder from scan time.** Editing the output folder field after a scan no longer redirects files to an unexpected location.
+            - **Command-line mode is safer.** `--auto-move-trash` combined with a very low `--threshold` (a common mix-up between percentage and the app's internal similarity value) now warns and asks for confirmation instead of silently moving almost everything. Interrupting a CLI scan with Ctrl+C now exits cleanly.
+            - **More accurate progress during video scans.** The percentage shown while extracting video frames no longer gets stuck partway through.
 
-            ### New: command-line mode
-            - Scan and clean image duplicates from scripts (when running from the Python source; see the README): `deduper.py --scan <folder> [--threshold 90] [--auto-move-trash] [--out <folder>]`. Dry-run by default; moves are logged and revertable from the GUI.
+            ### Polish
+            - **Dialogs follow dark mode.** Warning and info pop-ups now match the app's theme instead of staying light always.
+            - **Long filenames display better** in the scan status line instead of being cut off mid-word.
 
-            > Builds on v1.2.0 (Merge tab, drive-disconnect auto-resume, crash-safe cache).
+            > Builds on v1.2.1 (console-window cascade fix, video-scan stability, CLI mode).
 
             ---
 
