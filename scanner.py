@@ -404,6 +404,13 @@ def scan_skip_paths(out_folder: Path) -> "set[Path]":
     }
 
 
+# Cap on futures held in flight at once during hashing. Submitting every
+# future for a 10k+ file scan up front holds every in-flight ImageRecord
+# (plus pre-downscaled PIL images) simultaneously, driving RSS toward 1-2 GB
+# and triggering Windows memory pressure on very large scans.
+_HASH_BATCH_SIZE = 500
+
+
 def collect_images(
     folder: Path,
     skip_paths: set[Path],
@@ -569,17 +576,10 @@ def collect_images(
 
     if n_threads > 1:
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        futures = {}
+        import gc
         completed = 0
         pool = ThreadPoolExecutor(max_workers=n_threads)
         try:
-            for i, path in enumerate(all_image_paths):
-                if stop_flag and stop_flag[0]:
-                    break
-                if pause_flag and pause_flag[0]:
-                    break
-                futures[pool.submit(_hash_one, (i, path))] = i
-
             ordered: dict[int, Optional[ImageRecord]] = {}
             ordered_cache_hit: dict[int, bool] = {}
             _interrupted = False
@@ -590,30 +590,58 @@ def collect_images(
             # main thread free for UI events.
             _last_cb: float = 0.0
             _CB_INTERVAL: float = 0.05  # seconds between progress updates
-            for fut in as_completed(futures):
+
+            indexed_paths = list(enumerate(all_image_paths))
+            for batch_start in range(0, len(indexed_paths), _HASH_BATCH_SIZE):
+                if _interrupted:
+                    break
                 if stop_flag and stop_flag[0]:
-                    _interrupted = True
                     break
                 if pause_flag and pause_flag[0]:
-                    _interrupted = True
                     break
-                try:
-                    idx, path, rec, exc, was_cache_hit = fut.result()
-                except Exception:
+
+                # Submit at most one batch of futures at a time -- see
+                # _HASH_BATCH_SIZE.
+                batch = indexed_paths[batch_start:batch_start + _HASH_BATCH_SIZE]
+                futures = {}
+                for i, path in batch:
+                    if stop_flag and stop_flag[0]:
+                        break
+                    if pause_flag and pause_flag[0]:
+                        break
+                    futures[pool.submit(_hash_one, (i, path))] = i
+
+                for fut in as_completed(futures):
+                    if stop_flag and stop_flag[0]:
+                        _interrupted = True
+                        break
+                    if pause_flag and pause_flag[0]:
+                        _interrupted = True
+                        break
+                    try:
+                        idx, path, rec, exc, was_cache_hit = fut.result()
+                    except Exception:
+                        completed += 1
+                        continue
                     completed += 1
-                    continue
-                completed += 1
-                if progress_cb:
-                    _now = _time.monotonic()
-                    if _now - _last_cb >= _CB_INTERVAL or completed == total:
-                        progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
-                        _last_cb = _now
-                if exc is not None:
-                    if failed_paths is not None:
-                        failed_paths.append(path)
-                elif rec is not None:
-                    ordered[idx] = rec
-                    ordered_cache_hit[idx] = was_cache_hit
+                    if progress_cb:
+                        _now = _time.monotonic()
+                        if _now - _last_cb >= _CB_INTERVAL or completed == total:
+                            progress_cb(f"Hashing {path.name}", completed, total, "Hashing")
+                            _last_cb = _now
+                    if exc is not None:
+                        if failed_paths is not None:
+                            failed_paths.append(path)
+                    elif rec is not None:
+                        ordered[idx] = rec
+                        ordered_cache_hit[idx] = was_cache_hit
+
+                # Drop this batch's future objects (each retains its result --
+                # an ImageRecord plus any pre-downscaled PIL image -- until
+                # garbage collected) and force collection so RSS doesn't creep
+                # across a 10k+ file scan.
+                futures.clear()
+                gc.collect()
 
             if _interrupted:
                 # Cancel queued futures immediately — do NOT wait for in-flight

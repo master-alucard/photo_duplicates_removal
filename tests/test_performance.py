@@ -366,3 +366,130 @@ class TestStopResponsiveness:
         assert len(records) < n, (
             f"Expected < {n} records after stop, got {len(records)}"
         )
+
+
+# ── batched hashing (Bug 1: memory growth on very large scans) ─────────────────
+
+class TestHashingBatching:
+    """Future submission is chunked (_HASH_BATCH_SIZE) with a gc.collect()
+    between batches, so a 10k+ file scan doesn't hold every in-flight
+    ImageRecord simultaneously. Batching must not change the result set."""
+
+    def test_batched_hashing_matches_unbatched_result_set(self, tmp_path, monkeypatch):
+        """A small batch size (forcing several batches) must produce the same
+        set of records as the default (effectively single-batch) path --
+        batching must not drop, duplicate, or corrupt results."""
+        import scanner
+        from config import Settings
+
+        n = 47  # deliberately not a multiple of the batch size below
+        for i in range(n):
+            (tmp_path / f"batch_{i:03d}.jpg").write_bytes(
+                _make_rgb_jpeg(seed=i + 3000)
+            )
+
+        settings = Settings(
+            src_folder=str(tmp_path),
+            out_folder=str(tmp_path / "out"),
+            recursive=False,
+            scan_threads=4,
+        )
+
+        records_unbatched = scanner.collect_images(
+            tmp_path, skip_paths=set(), settings=settings
+        )
+
+        monkeypatch.setattr(scanner, "_HASH_BATCH_SIZE", 10)  # -> 5 batches
+        records_batched = scanner.collect_images(
+            tmp_path, skip_paths=set(), settings=settings
+        )
+
+        assert len(records_unbatched) == n
+        assert len(records_batched) == n
+        assert (sorted(str(r.path) for r in records_unbatched)
+                == sorted(str(r.path) for r in records_batched)), (
+            "Batching changed which files were hashed"
+        )
+        assert ([str(r.phash) for r in records_unbatched]
+                == [str(r.phash) for r in records_batched]), (
+            "Batching changed hash values or original walk-order assembly"
+        )
+
+    def test_gc_collect_runs_once_per_batch(self, tmp_path, monkeypatch):
+        """gc.collect() must run once per batch, not once per file or once
+        total -- proves submission actually happens in the expected chunks."""
+        import gc as gc_module
+        import scanner
+        from config import Settings
+
+        n = 25
+        for i in range(n):
+            (tmp_path / f"gc_{i:03d}.jpg").write_bytes(
+                _make_rgb_jpeg(seed=i + 4000)
+            )
+
+        settings = Settings(
+            src_folder=str(tmp_path),
+            out_folder=str(tmp_path / "out"),
+            recursive=False,
+            scan_threads=4,
+        )
+
+        monkeypatch.setattr(scanner, "_HASH_BATCH_SIZE", 10)  # 25 -> 3 batches
+        calls = []
+        monkeypatch.setattr(gc_module, "collect", lambda: calls.append(1))
+
+        records = scanner.collect_images(
+            tmp_path, skip_paths=set(), settings=settings
+        )
+
+        assert len(records) == n
+        assert len(calls) == 3, (
+            f"Expected 3 gc.collect() calls for 25 files at batch size 10, "
+            f"got {len(calls)}"
+        )
+
+    def test_stop_flag_prevents_later_batches(self, tmp_path, monkeypatch):
+        """Setting stop_flag partway through must not let later batches run."""
+        import itertools
+        import scanner
+        from config import Settings
+
+        n = 24
+        for i in range(n):
+            (tmp_path / f"stopb_{i:03d}.jpg").write_bytes(
+                _make_rgb_jpeg(seed=i + 5000)
+            )
+
+        settings = Settings(
+            src_folder=str(tmp_path),
+            out_folder=str(tmp_path / "out"),
+            recursive=False,
+            scan_threads=4,
+        )
+
+        monkeypatch.setattr(scanner, "_HASH_BATCH_SIZE", 4)  # 24 -> 6 batches
+
+        stop_flag: list[bool] = [False]
+        hash_counter = itertools.count()
+        real_hash_image = scanner._hash_image
+
+        def counting_hash_image(path, settings_arg):
+            n_done = next(hash_counter)
+            if n_done >= 8:  # stop after ~2 batches' worth of files
+                stop_flag[0] = True
+            return real_hash_image(path, settings_arg)
+
+        monkeypatch.setattr(scanner, "_hash_image", counting_hash_image)
+
+        records = scanner.collect_images(
+            tmp_path, skip_paths=set(), settings=settings, stop_flag=stop_flag,
+        )
+
+        assert len(records) < n, "Expected an incomplete result after stopping"
+        # Bounded near a couple of batches, nowhere close to the full scan --
+        # proves batches after the stop point were never submitted.
+        assert len(records) <= 16, (
+            f"Stop flag should have prevented later batches; got "
+            f"{len(records)} records (batch size 4, stopped after ~8 files)"
+        )

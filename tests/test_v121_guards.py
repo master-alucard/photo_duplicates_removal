@@ -9,6 +9,7 @@ Covers:
   * App._accept_and_move frozen scan-time folder + missing-folder guard
   * App._install_rawpy frozen-build guard (never relaunches the exe)
   * deduper._make_progress_cb throttle (phase change / finished / 1s gate)
+  * ReportViewer._video_frame_cache LRU bound (Bug 1 memory-growth fix)
 """
 from __future__ import annotations
 
@@ -255,6 +256,85 @@ class TestThemedDialogs(unittest.TestCase):
             self.assertEqual(captured.get("bg"), dark["CARD_BG"])
         finally:
             error_handler.set_settings(old)
+
+
+class TestVideoFrameCacheLRU(unittest.TestCase):
+    """_video_frame_cache is LRU-bounded (_VIDEO_FRAME_CACHE_MAX) so a scan
+    with thousands of videos can't accumulate unbounded memory across page
+    cycles (Bug 1)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _get_root()
+
+    def test_eviction_caps_cache_at_max_size(self):
+        import report_viewer
+        viewer, _ = _make_viewer(self.root, out_folder=r"C:\out")
+        try:
+            with patch.object(report_viewer, "_VIDEO_FRAME_CACHE_MAX", 5):
+                for i in range(10):
+                    viewer._touch_video_frame_cache(
+                        Path(f"/fake/video_{i}.mp4"), frame=None, _write=True
+                    )
+                self.assertEqual(len(viewer._video_frame_cache), 5)
+                # The 5 most-recently-inserted entries survive; the oldest
+                # (video_0..video_4) were evicted first.
+                self.assertNotIn(Path("/fake/video_0.mp4"), viewer._video_frame_cache)
+                for i in range(5, 10):
+                    self.assertIn(Path(f"/fake/video_{i}.mp4"), viewer._video_frame_cache)
+        finally:
+            viewer.destroy()
+
+    def test_read_touch_protects_recently_used_entry_from_eviction(self):
+        import report_viewer
+        viewer, _ = _make_viewer(self.root, out_folder=r"C:\out")
+        try:
+            with patch.object(report_viewer, "_VIDEO_FRAME_CACHE_MAX", 3):
+                for i in range(3):
+                    viewer._touch_video_frame_cache(
+                        Path(f"/fake/v{i}.mp4"), frame=None, _write=True
+                    )
+                # Re-touch (read) the oldest entry -- it should now be the
+                # most-recently-used and survive the next insert.
+                viewer._touch_video_frame_cache(Path("/fake/v0.mp4"))
+                viewer._touch_video_frame_cache(
+                    Path("/fake/v3.mp4"), frame=None, _write=True
+                )
+                self.assertEqual(len(viewer._video_frame_cache), 3)
+                self.assertIn(Path("/fake/v0.mp4"), viewer._video_frame_cache)
+                # v1 was the true least-recently-used and should be evicted.
+                self.assertNotIn(Path("/fake/v1.mp4"), viewer._video_frame_cache)
+        finally:
+            viewer.destroy()
+
+    def test_thumbnail_load_path_uses_lru_touch(self):
+        """Integration check: the actual video-thumbnail load path (cache
+        miss -> extraction -> cache write, and cache hit -> read) goes
+        through the LRU helper, not a raw dict write."""
+        import report_viewer
+        viewer, _ = _make_viewer(self.root, out_folder=r"C:\out")
+        try:
+            with patch.object(report_viewer, "_VIDEO_FRAME_CACHE_MAX", 2), \
+                 patch("scanner._extract_video_thumb", return_value=None):
+                label = tk.Label(self.root)
+                for i in range(4):
+                    path = Path(f"/fake/thumbload_{i}.mp4")
+                    viewer._spawn_thumb_thread(
+                        path, label, 100, grayscale=False,
+                        batch_id=viewer._thumb_batch_id, is_video=True,
+                    )
+                # Threads are daemon background loaders; give them a moment
+                # to finish (extraction is mocked, so this is fast).
+                self.root.update()
+                import time
+                deadline = time.monotonic() + 2.0
+                while (len(viewer._video_frame_cache) < 2
+                       and time.monotonic() < deadline):
+                    self.root.update()
+                    time.sleep(0.01)
+                self.assertLessEqual(len(viewer._video_frame_cache), 2)
+        finally:
+            viewer.destroy()
 
 
 if __name__ == "__main__":

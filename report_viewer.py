@@ -9,6 +9,7 @@ import os
 import shutil
 import tempfile
 import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -195,6 +196,12 @@ _THUMB_SIZE = 156
 # Working size for frames cached in _video_frame_cache. Must stay >= the
 # largest thumbnail rendered from the cache (currently _THUMB_SIZE).
 _VIDEO_CACHE_THUMB_PX = 384
+
+# Max distinct videos held in _video_frame_cache at once (LRU-evicted beyond
+# this). Frames are downscaled to _VIDEO_CACHE_THUMB_PX (~50-150 KB each), so
+# 200 entries is a generous bound (~10-30 MB) that comfortably spans several
+# review pages while still capping memory on a scan with thousands of videos.
+_VIDEO_FRAME_CACHE_MAX = 200
 
 # Keep legacy aliases used elsewhere
 _CARD_BG    = _M_SURFACE
@@ -504,13 +511,22 @@ class ReportViewer(tk.Frame):
 
         # Photo reference storage (prevent GC)
         self._photo_refs: list = []
-        self._placeholder_cache: dict[tuple, ImageTk.PhotoImage] = {}  # (size, bg) → photo
+        # (size, bg, video) -> photo. Deliberately NOT pruned across page
+        # cycles: keys are drawn from a small fixed set (a handful of thumb
+        # sizes x theme tile colors x video-flag), so the whole cache stays
+        # at a few dozen entries of a few KB each for the life of the viewer.
+        # Clearing it per page would only force re-rendering the same
+        # placeholders on every navigation for no memory benefit.
+        self._placeholder_cache: dict[tuple, ImageTk.PhotoImage] = {}
 
         # In-memory cache for extracted video frames.  Keyed by Path so paging
-        # back and forth never re-invokes ffmpeg for the same file within a
-        # single viewer session.  Maps path → PIL Image (RGB) or None when
-        # extraction was attempted but failed (avoids repeated failed attempts).
-        self._video_frame_cache: dict[Path, "Optional[PILImage.Image]"] = {}
+        # back and forth doesn't re-invoke ffmpeg for a recently-viewed file.
+        # Maps path → PIL Image (RGB) or None when extraction was attempted
+        # but failed (avoids repeated failed attempts). LRU-bounded via
+        # OrderedDict (see _VIDEO_FRAME_CACHE_MAX / _touch_video_frame_cache)
+        # so a scan with thousands of videos can't accumulate unbounded
+        # memory across page cycles.
+        self._video_frame_cache: "OrderedDict[Path, Optional[PILImage.Image]]" = OrderedDict()
 
         # In-memory cache for video durations (seconds).  Maps path → float or
         # None when ffprobe failed / was not called.
@@ -745,6 +761,23 @@ class ReportViewer(tk.Frame):
             style.configure("TScrollbar", troughcolor=_M_BG, background=_M_PRIMARY)
         except Exception:
             pass
+
+    def _touch_video_frame_cache(self, path: Path, frame=None, _write: bool = False) -> None:
+        """Read/write _video_frame_cache with LRU touch + eviction.
+
+        Called from background thumbnail-loader threads, so this only relies
+        on individually-atomic dict/OrderedDict operations (no lock) -- worst
+        case under a race is an off-by-a-few eviction count, never corruption.
+        """
+        cache = self._video_frame_cache
+        if _write:
+            cache[path] = frame
+        cache.move_to_end(path)
+        while len(cache) > _VIDEO_FRAME_CACHE_MAX:
+            try:
+                cache.popitem(last=False)
+            except KeyError:
+                break
 
     def _get_placeholder(self, size: int, bg: str, video: bool = False) -> "ImageTk.PhotoImage":
         """Return a cached placeholder image of the given pixel size.
@@ -1367,7 +1400,9 @@ class ReportViewer(tk.Frame):
                 # Cache holds the raw extracted frame (or None if extraction failed).
                 # Processing (resize + overlays) is cheap and doesn't need the slot.
                 if path in self._video_frame_cache:
-                    _dispatch_img(_build_video_img(self._video_frame_cache[path]))
+                    frame = self._video_frame_cache[path]
+                    self._touch_video_frame_cache(path)
+                    _dispatch_img(_build_video_img(frame))
                     return
 
                 # ── Cache miss: acquire semaphore, call ffmpeg/OpenCV ─────────
@@ -1378,6 +1413,7 @@ class ReportViewer(tk.Frame):
                     # thread for the same path already ran extraction.
                     if path in self._video_frame_cache:
                         frame = self._video_frame_cache[path]
+                        self._touch_video_frame_cache(path)
                     else:
                         try:
                             from scanner import _extract_video_thumb
@@ -1386,14 +1422,15 @@ class ReportViewer(tk.Frame):
                             frame = None
                         if frame is not None:
                             # Cache a bounded working copy, not the raw frame:
-                            # a 1080p RGB frame is ~6 MB, and this cache is
-                            # never pruned across page cycles, so hundreds of
-                            # videos would hold gigabytes.
+                            # a 1080p RGB frame is ~6 MB each. Entry count is
+                            # additionally LRU-bounded (_VIDEO_FRAME_CACHE_MAX)
+                            # so a scan with thousands of videos can't
+                            # accumulate unbounded memory.
                             frame.thumbnail(
                                 (_VIDEO_CACHE_THUMB_PX, _VIDEO_CACHE_THUMB_PX),
                                 PILImage.LANCZOS,
                             )
-                        self._video_frame_cache[path] = frame
+                        self._touch_video_frame_cache(path, frame, _write=True)
                     _dispatch_img(_build_video_img(frame))
             else:
                 # ── Standard image path — always needs the semaphore ─────────
