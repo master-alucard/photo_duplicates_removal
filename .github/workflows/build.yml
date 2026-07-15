@@ -140,18 +140,11 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### Fixed: Compare Scan could redirect trashed files to the wrong folder
-            - **Trash from Compare Scan now always goes to that scan's own output folder.** Reviewing results and moving files manually could send them to a different folder than expected if the Scan tab's output field differed from the Compare Scan one. This is now scan-time frozen, matching the regular Scan tab's behavior.
+            ### Fixed: app could become unresponsive on very large scans
+            - **Scanning 10,000+ files or running for over an hour no longer risks the app freezing up.** Memory usage during hashing is now capped by processing files in bounded batches with cleanup in between, instead of holding every result in memory at once.
+            - **Lower memory use when reviewing video-heavy results.** Extracted video preview frames are now capped to a bounded number in memory instead of accumulating for the entire review session.
 
-            ### Reliability
-            - **Command-line mode is safer.** `--auto-move-trash` combined with a very low `--threshold` (a common mix-up between percentage and the app's internal similarity value) now warns and asks for confirmation instead of silently moving almost everything. Interrupting a CLI scan with Ctrl+C now exits cleanly.
-            - **More accurate progress during video scans.** The percentage shown while extracting video frames no longer gets stuck partway through.
-
-            ### Polish
-            - **Dialogs follow dark mode.** Warning and info pop-ups now match the app's theme instead of staying light always.
-            - **Long filenames display better** in the scan status line instead of being cut off mid-word.
-
-            > Builds on v1.2.1 (console-window cascade fix, video-scan stability, CLI mode).
+            > Builds on v1.2.2 (compare-scan trash-path fix, safer CLI, more accurate video-scan progress, dark-mode dialogs).
 
             ---
 
