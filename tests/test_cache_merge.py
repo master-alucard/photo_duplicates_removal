@@ -504,31 +504,49 @@ class TestBrowseModeAlwaysUsesCache:
 
     def test_effective_trust_requires_both_flags(self):
         """
-        _effective_trust = trust_library AND use_library — browse mode (use_library=False)
-        must never bypass staleness checks.
+        Staleness checks may be skipped only when Library mode is active AND
+        "trust library" is enabled. Browse mode (use=False) must never bypass
+        them, or a file edited since the last scan would be matched against a
+        stale hash.
+
+        Since Stage 3 this rule lives in LibraryOptions.effective_trust (it was
+        previously spelled out separately in each worker). Asserted behaviorally
+        across all four combinations rather than by inspecting expression text,
+        which is both stronger and refactor-stable.
         """
+        from scan_request import LibraryOptions
+
+        assert LibraryOptions(use=True,  trust=True ).effective_trust is True
+        assert LibraryOptions(use=True,  trust=False).effective_trust is False
+        assert LibraryOptions(use=False, trust=True ).effective_trust is False, (
+            "browse mode must not bypass staleness checks even if trust was "
+            "left enabled from a previous Library-mode session"
+        )
+        assert LibraryOptions(use=False, trust=False).effective_trust is False
+        assert LibraryOptions().effective_trust is False, "default must be safe"
+
+    def test_worker_sources_trust_from_the_request(self):
+        """_worker must derive trust from the request's library options rather
+        than re-deriving it locally, so the rule cannot drift between the two
+        scan paths again."""
         import ast, inspect
         import main as _main
 
-        src  = textwrap.dedent(inspect.getsource(_main.App._worker))
-        tree = ast.parse(src)
+        tree = ast.parse(textwrap.dedent(inspect.getsource(_main.App._worker)))
+        assigns: list[str] = []
 
-        trust_assigns: list[str] = []
-
-        class _Visitor(ast.NodeVisitor):
+        class _V(ast.NodeVisitor):
             def visit_Assign(self, node):
                 for t in node.targets:
                     if isinstance(t, ast.Name) and t.id == "_effective_trust":
-                        trust_assigns.append(ast.unparse(node.value))
+                        assigns.append(ast.unparse(node.value))
                 self.generic_visit(node)
 
-        _Visitor().visit(tree)
-        assert len(trust_assigns) >= 1, "_effective_trust assignment not found in _worker"
-
-        expr = trust_assigns[0]
-        # Must involve both `trust_library` and `use_library` (ANDed together)
-        assert "trust_library" in expr, f"_effective_trust must use trust_library: {expr}"
-        assert "use_library"   in expr, f"_effective_trust must use use_library: {expr}"
+        _V().visit(tree)
+        assert assigns, "_effective_trust assignment not found in _worker"
+        assert "effective_trust" in assigns[0], (
+            f"_worker must use the shared effective_trust rule, got: {assigns[0]}"
+        )
 
 
 # ═════════════════════════════════════════════════════════════════════════════

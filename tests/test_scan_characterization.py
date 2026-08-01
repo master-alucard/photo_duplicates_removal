@@ -40,6 +40,8 @@ from PIL import Image, ImageDraw
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+from scan_request import ScanRequest
+
 
 # ── fixtures / helpers ────────────────────────────────────────────────────────
 
@@ -187,7 +189,7 @@ class TestRegularScanCharacterization:
 
         stub = _WorkerStub()
         settings = _settings(src, out, **over)
-        main.App._worker(stub, src, out, settings)
+        main.App._worker(stub, ScanRequest.single(src, out, settings))
         return stub, src, out
 
     def test_duplicate_pair_is_detected_and_results_published(self, tmp_path):
@@ -249,7 +251,7 @@ class TestRegularScanCharacterization:
         (src / "garbage.jpg").write_bytes(b"\xff\xd8not-a-real-jpeg")
 
         stub = _WorkerStub()
-        main.App._worker(stub, src, out, _settings(src, out))
+        main.App._worker(stub, ScanRequest.single(src, out, _settings(src, out)))
 
         assert stub.error_calls == [], "unreadable files must not abort the scan"
         assert stub.done_calls and stub.done_calls[-1][1] is True
@@ -266,7 +268,7 @@ class TestRegularScanCharacterization:
 
         stub = _WorkerStub()
         stub._stop_flag[0] = True    # pre-set: abort at the first checkpoint
-        main.App._worker(stub, src, out, _settings(src, out))
+        main.App._worker(stub, ScanRequest.single(src, out, _settings(src, out)))
 
         assert stub.done_calls, "a stopped scan must still report completion"
         assert stub.done_calls[-1][1] is False, "stopped scan must not report success"
@@ -308,7 +310,8 @@ class TestCompareScanCharacterization:
         main_dir, check_dir, out_dir = self._build(tmp_path)
         stub = _WorkerStub()
         settings = _settings(main_dir, out_dir, **over)
-        main.App._custom_worker(stub, main_dir, check_dir, out_dir, settings)
+        main.App._custom_worker(
+            stub, ScanRequest.compare(main_dir, check_dir, out_dir, settings))
         return stub, main_dir, check_dir, out_dir
 
     def test_completes_successfully(self, tmp_path):
@@ -368,8 +371,8 @@ class TestCompareScanCharacterization:
         main_dir, check_dir, out_dir = self._build(tmp_path)
         stub = _WorkerStub()
         stub._custom_stop_flag[0] = True
-        main.App._custom_worker(stub, main_dir, check_dir, out_dir,
-                                _settings(main_dir, out_dir))
+        main.App._custom_worker(stub, ScanRequest.compare(
+            main_dir, check_dir, out_dir, _settings(main_dir, out_dir)))
         assert stub.done_calls and stub.done_calls[-1][1] is False
 
     def test_broken_files_are_collected_not_fatal(self, tmp_path):
@@ -385,8 +388,8 @@ class TestCompareScanCharacterization:
         (check_dir / "broken.jpg").write_bytes(b"\xff\xd8nope")
 
         stub = _WorkerStub()
-        main.App._custom_worker(stub, main_dir, check_dir, out_dir,
-                                _settings(main_dir, out_dir))
+        main.App._custom_worker(stub, ScanRequest.compare(
+            main_dir, check_dir, out_dir, _settings(main_dir, out_dir)))
 
         assert stub.error_calls == [], "an unreadable file must not abort the scan"
         assert stub.done_calls and stub.done_calls[-1][1] is True

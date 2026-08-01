@@ -60,6 +60,7 @@ import ui_animations as _anim
 from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates, scan_skip_paths)
+from scan_request import ScanRequest
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -2958,15 +2959,14 @@ class App:
         _trust_main    = self.trust_lib_main_var.get() if _use_lib_main else False
         _use_lib_check = self.check_mode_var.get() == "library"
         _trust_check   = self.trust_lib_check_var.get() if _use_lib_check else False
+        request = ScanRequest.compare(
+            main_path, check_path, out_path, self.settings,
+            use_lib_main=_use_lib_main,   trust_main=_trust_main,
+            use_lib_check=_use_lib_check, trust_check=_trust_check,
+            resume_state=resume_state,
+        )
         threading.Thread(
-            target=self._custom_worker,
-            args=(main_path, check_path, out_path, self.settings),
-            kwargs={
-                "use_lib_main":  _use_lib_main,  "trust_main":  _trust_main,
-                "use_lib_check": _use_lib_check, "trust_check": _trust_check,
-                "resume_state":  resume_state,
-            },
-            daemon=True,
+            target=self._custom_worker, args=(request,), daemon=True,
         ).start()
 
     def _pause_custom_scan(self) -> None:
@@ -3012,12 +3012,20 @@ class App:
 
     # ── custom worker ─────────────────────────────────────────────────────
 
-    def _custom_worker(
-        self, main_path: Path, check_path: Path, out_path: Path, settings: Settings,
-        use_lib_main: bool = False, trust_main: bool = False,
-        use_lib_check: bool = False, trust_check: bool = False,
-        resume_state=None,
-    ) -> None:
+    def _custom_worker(self, request: "ScanRequest") -> None:
+        # Unpacked into the original local names so the body below is unchanged
+        # from the pre-ScanRequest version (Stage 3 is a parameter-object swap,
+        # not a restructure).
+        main_path     = request.main_folder
+        check_path    = request.check_folder
+        out_path      = request.out_folder
+        settings      = request.settings
+        resume_state  = request.resume_state
+        use_lib_main  = request.primary_library.use
+        trust_main    = request.primary_library.trust
+        use_lib_check = request.check_library.use
+        trust_check   = request.check_library.trust
+
         _PHASES = ["Main folder", "Check folder", "Comparing", "Report"]
 
         def cb(msg, done, total, phase):
@@ -3138,7 +3146,7 @@ class App:
                     pause_flag=self._custom_pause_flag,
                     failed_paths=main_failed,
                     library_cache=_main_cache,
-                    trust_library=trust_main and use_lib_main,
+                    trust_library=request.primary_library.effective_trust,
                 )
                 _writeback_to_library(main_path, main_records)
 
@@ -3162,7 +3170,7 @@ class App:
                     pause_flag=self._custom_pause_flag,
                     failed_paths=check_failed,
                     library_cache=_check_cache,
-                    trust_library=trust_check and use_lib_check,
+                    trust_library=request.check_library.effective_trust,
                 )
                 _writeback_to_library(check_path, check_records)
 
@@ -5717,11 +5725,13 @@ class App:
 
         _use_lib  = self.src_mode_var.get() == "library"
         _trust    = self.trust_lib_src_var.get() if _use_lib else False
+        request = ScanRequest.single(
+            src_path, out_path, self.settings,
+            use_library=_use_lib, trust_library=_trust,
+            resume_state=resume_state,
+        )
         threading.Thread(
-            target=self._worker,
-            args=(src_path, out_path, self.settings, resume_state),
-            kwargs={"use_library": _use_lib, "trust_library": _trust},
-            daemon=True,
+            target=self._worker, args=(request,), daemon=True,
         ).start()
 
     def _pause_scan(self) -> None:
@@ -5930,10 +5940,17 @@ class App:
 
     # ── worker thread ─────────────────────────────────────────────────────
 
-    def _worker(
-        self, src: Path, out: Path, settings: Settings, resume_state=None,
-        use_library: bool = False, trust_library: bool = False,
-    ) -> None:
+    def _worker(self, request: "ScanRequest") -> None:
+        # Unpacked into the original local names so the body below is unchanged
+        # from the pre-ScanRequest version (Stage 3 is a parameter-object swap,
+        # not a restructure).
+        src           = request.src
+        out           = request.out_folder
+        settings      = request.settings
+        resume_state  = request.resume_state
+        use_library   = request.primary_library.use
+        trust_library = request.primary_library.trust
+
         def cb(msg, done, total, phase):
             self._progress_cb(msg, done, total, phase)
 
@@ -5984,7 +6001,7 @@ class App:
                 _lib_cache, _ = load_scan_cache(src)
                 # trust_library (skip staleness check) only applies when the
                 # user explicitly chose Library mode *and* enabled that option.
-                _effective_trust = trust_library and use_library
+                _effective_trust = request.primary_library.effective_trust
 
                 records = collect_images(
                     src, skip_paths, settings,
