@@ -61,7 +61,8 @@ from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates, scan_skip_paths)
 from scan_request import ScanRequest
-from scan_pipeline import collect_folder_records, reclassify_compare_groups
+from scan_pipeline import (collect_folder_records, compute_solo_originals,
+                          reclassify_compare_groups)
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -6041,11 +6042,7 @@ class App:
             # out_folder widget before clicking "View Report" (bug #159).
             self._last_scan_out_folder = str(out)
 
-            grouped_paths = {
-                r.path.resolve()
-                for g in groups for r in g.originals + g.previews
-            }
-            solo_originals     = [r for r in records if r.path.resolve() not in grouped_paths]
+            solo_originals = compute_solo_originals(records, groups)
             self._solo_originals = solo_originals
 
             from scan_state import save_results, state_path as _sp

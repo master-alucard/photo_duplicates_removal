@@ -85,6 +85,24 @@ def reclassify_compare_groups(groups: list, main_folder: Path,
     return cross_groups, within_check_groups
 
 
+def compute_solo_originals(records: list, groups: list) -> list:
+    """Return the records that landed in no duplicate group.
+
+    These are the "unique" files the review screen shows separately: scanned,
+    hashed, and matched against everything else without finding a partner.
+
+    Comparison is on resolved paths, so a record reached via a different but
+    equivalent path (junction, trailing separator, case difference on Windows)
+    is still recognised as grouped and is not reported as unique.
+    """
+    grouped = {
+        Path(r.path).resolve()
+        for g in groups
+        for r in list(g.originals) + list(g.previews)
+    }
+    return [r for r in records if Path(r.path).resolve() not in grouped]
+
+
 def collect_folder_records(
     folder: Path,
     skip_paths: "set[Path]",

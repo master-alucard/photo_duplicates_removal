@@ -300,3 +300,53 @@ class TestReclassifyCompareGroups:
         assert "a_copy.jpg" in names_o and "a_copy.jpg" in names_p, (
             "current behavior: the nested file appears on both sides"
         )
+
+
+# ── solo originals (files that matched nothing) ───────────────────────────────
+
+class TestComputeSoloOriginals:
+
+    def test_records_in_no_group_are_returned(self, tmp_path):
+        from scan_pipeline import compute_solo_originals
+        a, b, lone = _Rec(tmp_path / "a.jpg"), _Rec(tmp_path / "b.jpg"), _Rec(tmp_path / "lone.jpg")
+        groups = [_Grp([a], [b])]
+
+        solo = compute_solo_originals([a, b, lone], groups)
+
+        assert [r.path.name for r in solo] == ["lone.jpg"]
+
+    def test_no_groups_means_everything_is_solo(self, tmp_path):
+        from scan_pipeline import compute_solo_originals
+        recs = [_Rec(tmp_path / f"{n}.jpg") for n in ("a", "b")]
+        assert compute_solo_originals(recs, []) == recs
+
+    def test_all_grouped_means_nothing_is_solo(self, tmp_path):
+        from scan_pipeline import compute_solo_originals
+        a, b = _Rec(tmp_path / "a.jpg"), _Rec(tmp_path / "b.jpg")
+        assert compute_solo_originals([a, b], [_Grp([a], [b])]) == []
+
+    def test_previews_count_as_grouped(self, tmp_path):
+        """A record only ever listed as a preview is still grouped -- reporting
+        it as unique would show the same file in two places in the UI."""
+        from scan_pipeline import compute_solo_originals
+        a, b = _Rec(tmp_path / "a.jpg"), _Rec(tmp_path / "b.jpg")
+        solo = compute_solo_originals([a, b], [_Grp([a], [b])])
+        assert b not in solo
+
+    def test_equivalent_paths_are_recognised_as_grouped(self, tmp_path):
+        """Grouping is compared on resolved paths, so a record reached by a
+        different-but-equivalent path is not double-reported as unique."""
+        from scan_pipeline import compute_solo_originals
+        real = tmp_path / "a.jpg"
+        real.write_bytes(b"x")
+        grouped = _Rec(real)
+        same_via_dotdot = _Rec(tmp_path / "sub" / ".." / "a.jpg")
+        (tmp_path / "sub").mkdir()
+
+        solo = compute_solo_originals([same_via_dotdot], [_Grp([grouped], [])])
+
+        assert solo == [], "the same file by another path must count as grouped"
+
+    def test_empty_records(self):
+        from scan_pipeline import compute_solo_originals
+        assert compute_solo_originals([], []) == []
