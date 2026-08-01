@@ -61,7 +61,7 @@ from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates, scan_skip_paths)
 from scan_request import ScanRequest
-from scan_pipeline import collect_folder_records
+from scan_pipeline import collect_folder_records, reclassify_compare_groups
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -3180,33 +3180,8 @@ class App:
                 return
 
             # Reclassify: main = originals (never moved), check = duplicates (candidates for trash)
-            main_res  = main_path.resolve()
-            check_res = check_path.resolve()
-
-            def _in_folder(p: Path, folder: Path) -> bool:
-                try:
-                    p.resolve().relative_to(folder)
-                    return True
-                except ValueError:
-                    return False
-
-            cross_groups = []
-            within_check_groups = []
-            for g in all_groups:
-                all_members = g.originals + g.previews
-                from_main  = [r for r in all_members if _in_folder(r.path, main_res)]
-                from_check = [r for r in all_members if _in_folder(r.path, check_res)]
-
-                if from_main and from_check:
-                    # Cross-folder match: main files = originals, check files = duplicates
-                    g.originals = from_main
-                    g.previews  = from_check
-                    cross_groups.append(g)
-                elif not from_main and len(from_check) > 1:
-                    # Within-check duplicates — keep the best, mark rest as previews
-                    g.originals = from_check[:1]
-                    g.previews  = from_check[1:]
-                    within_check_groups.append(g)
+            cross_groups, within_check_groups = reclassify_compare_groups(
+                all_groups, main_path, check_path)
 
             combined_groups = cross_groups + within_check_groups
             n_cross = sum(len(g.previews) for g in cross_groups)
@@ -3249,18 +3224,9 @@ class App:
                         # check → previews.  Drop main-only or check-only-singleton.
                         _video_cross: list = []
                         _video_within_check: list = []
-                        for vg in _video_groups_raw:
-                            vmembers = vg.originals + vg.previews
-                            v_from_main  = [r for r in vmembers if _in_folder(r.path, main_res)]
-                            v_from_check = [r for r in vmembers if _in_folder(r.path, check_res)]
-                            if v_from_main and v_from_check:
-                                vg.originals = v_from_main
-                                vg.previews  = v_from_check
-                                _video_cross.append(vg)
-                            elif not v_from_main and len(v_from_check) > 1:
-                                vg.originals = v_from_check[:1]
-                                vg.previews  = v_from_check[1:]
-                                _video_within_check.append(vg)
+                        _video_cross, _video_within_check = (
+                            reclassify_compare_groups(
+                                _video_groups_raw, main_path, check_path))
 
                         combined_groups = combined_groups + _video_cross + _video_within_check
                         _vn_cross = sum(len(g.previews) for g in _video_cross)

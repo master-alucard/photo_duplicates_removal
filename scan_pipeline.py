@@ -25,6 +25,66 @@ from library import (
 from scanner import collect_images
 
 
+def _in_folder(path: Path, resolved_folder: Path) -> bool:
+    """True when *path* lies inside *resolved_folder* (which must already be
+    resolved)."""
+    try:
+        Path(path).resolve().relative_to(resolved_folder)
+        return True
+    except ValueError:
+        return False
+
+
+def reclassify_compare_groups(groups: list, main_folder: Path,
+                              check_folder: Path) -> "tuple[list, list]":
+    """Re-split Compare Scan groups into (cross_folder, within_check).
+
+    THIS IS THE COMPARE SCAN DATA-SAFETY BOUNDARY. Group members are relabeled
+    so that:
+
+      * files from the Main (reference) folder become ``originals`` -- the UI
+        never offers originals for trashing;
+      * files from the Check folder become ``previews`` -- the trash candidates.
+
+    Groups with no Check-folder member are dropped entirely: a duplicate pair
+    living only inside Main is not something a Compare Scan may act on.
+
+    Mutates the passed groups in place (as the original inline code did) and
+    returns the two buckets so callers can count them separately.
+
+    Note: a Check folder nested inside Main makes a file match both sides. The
+    pre-existing behavior -- preserved here deliberately -- is that such a file
+    lands in BOTH lists for its group. See test_nested_check_folder_* in
+    tests/test_scan_pipeline.py, which documents it rather than asserting it is
+    correct.
+    """
+    main_res = Path(main_folder).resolve()
+    check_res = Path(check_folder).resolve()
+
+    cross_groups: list = []
+    within_check_groups: list = []
+
+    for g in groups:
+        members = list(g.originals) + list(g.previews)
+        from_main = [r for r in members if _in_folder(r.path, main_res)]
+        from_check = [r for r in members if _in_folder(r.path, check_res)]
+
+        if from_main and from_check:
+            # Cross-folder match: Main copies are the keepers.
+            g.originals = from_main
+            g.previews = from_check
+            cross_groups.append(g)
+        elif not from_main and len(from_check) > 1:
+            # Duplicates that exist only inside Check: keep the first, offer
+            # the rest for trashing.
+            g.originals = from_check[:1]
+            g.previews = from_check[1:]
+            within_check_groups.append(g)
+        # else: Main-only (or a lone Check file) -- not a Compare Scan result.
+
+    return cross_groups, within_check_groups
+
+
 def collect_folder_records(
     folder: Path,
     skip_paths: "set[Path]",

@@ -164,3 +164,139 @@ class TestTrustAndResume:
                                        resume_records=records)
         cache = m.call_args.kwargs["library_cache"]
         assert cache and len(cache) == len(records)
+
+
+# ── compare-scan reclassification (the data-safety boundary) ──────────────────
+
+class _Rec:
+    """Minimal stand-in for an ImageRecord: only .path is consulted."""
+
+    def __init__(self, path):
+        self.path = Path(path)
+
+    def __repr__(self):
+        return f"<{self.path.name}>"
+
+
+class _Grp:
+    def __init__(self, originals, previews):
+        self.originals = list(originals)
+        self.previews = list(previews)
+
+
+def _folders(tmp_path):
+    main = tmp_path / "main"
+    check = tmp_path / "check"
+    main.mkdir()
+    check.mkdir()
+    return main, check
+
+
+class TestReclassifyCompareGroups:
+    """Main-folder files must never end up as trash candidates."""
+
+    def test_cross_folder_group_puts_main_in_originals(self, tmp_path):
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        g = _Grp([_Rec(main / "a.jpg")], [_Rec(check / "a_copy.jpg")])
+
+        cross, within = reclassify_compare_groups([g], main, check)
+
+        assert len(cross) == 1 and not within
+        assert [r.path.name for r in cross[0].originals] == ["a.jpg"]
+        assert [r.path.name for r in cross[0].previews] == ["a_copy.jpg"]
+
+    def test_main_side_wins_regardless_of_input_labelling(self, tmp_path):
+        """Even if the grouper labelled the Check copy as the original, the
+        Main copy must be promoted -- otherwise the reference file is trashed."""
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        g = _Grp([_Rec(check / "a_copy.jpg")], [_Rec(main / "a.jpg")])
+
+        cross, _ = reclassify_compare_groups([g], main, check)
+
+        assert [r.path.name for r in cross[0].originals] == ["a.jpg"]
+        assert [r.path.name for r in cross[0].previews] == ["a_copy.jpg"]
+
+    def test_main_only_group_is_dropped(self, tmp_path):
+        """Duplicates living only inside Main are not a Compare Scan result."""
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        g = _Grp([_Rec(main / "a.jpg")], [_Rec(main / "a_dupe.jpg")])
+
+        cross, within = reclassify_compare_groups([g], main, check)
+
+        assert not cross and not within
+
+    def test_within_check_group_keeps_first_as_original(self, tmp_path):
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        g = _Grp([_Rec(check / "x.jpg")], [_Rec(check / "x_copy.jpg")])
+
+        cross, within = reclassify_compare_groups([g], main, check)
+
+        assert not cross and len(within) == 1
+        assert len(within[0].originals) == 1
+        assert len(within[0].previews) == 1
+
+    def test_lone_check_file_is_dropped(self, tmp_path):
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        g = _Grp([_Rec(check / "solo.jpg")], [])
+
+        cross, within = reclassify_compare_groups([g], main, check)
+
+        assert not cross and not within
+
+    def test_no_main_file_ever_becomes_a_preview(self, tmp_path):
+        """The invariant, over a mixed batch: nothing under Main may be offered
+        for trashing."""
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        groups = [
+            _Grp([_Rec(main / "a.jpg")], [_Rec(check / "a2.jpg")]),
+            _Grp([_Rec(check / "b.jpg")], [_Rec(check / "b2.jpg")]),
+            _Grp([_Rec(main / "c.jpg")], [_Rec(main / "c2.jpg")]),
+            _Grp([_Rec(check / "d.jpg")], [_Rec(main / "d2.jpg")]),
+        ]
+
+        cross, within = reclassify_compare_groups(groups, main, check)
+
+        main_res = main.resolve()
+        for g in cross + within:
+            for rec in g.previews:
+                assert not str(rec.path.resolve()).startswith(str(main_res)), (
+                    f"Main-folder file offered for trashing: {rec.path}"
+                )
+
+    def test_empty_input(self, tmp_path):
+        from scan_pipeline import reclassify_compare_groups
+        main, check = _folders(tmp_path)
+        assert reclassify_compare_groups([], main, check) == ([], [])
+
+    def test_nested_check_folder_puts_file_in_both_lists(self, tmp_path):
+        """DOCUMENTS PRE-EXISTING BEHAVIOR -- not an endorsement.
+
+        When Check is nested inside Main, a Check file matches both folders, so
+        it is placed in BOTH originals and previews: simultaneously a keeper and
+        a trash candidate. _start_custom_scan rejects Main == Check but does not
+        reject nesting, so this is reachable (Main=E:\Photos, Check=E:\Photos\2024).
+
+        Preserved verbatim through the Stage 4b extraction. Filed separately
+        rather than fixed inside a behavior-preserving refactor; if the fix lands,
+        update this test to assert the corrected behavior.
+        """
+        from scan_pipeline import reclassify_compare_groups
+        main = tmp_path / "main"
+        check = main / "sub"
+        check.mkdir(parents=True)
+        nested = _Rec(check / "a_copy.jpg")
+        g = _Grp([_Rec(main / "a.jpg")], [nested])
+
+        cross, _ = reclassify_compare_groups([g], main, check)
+
+        names_o = [r.path.name for r in cross[0].originals]
+        names_p = [r.path.name for r in cross[0].previews]
+        assert "a_copy.jpg" in names_o and "a_copy.jpg" in names_p, (
+            "current behavior: the nested file appears on both sides"
+        )
