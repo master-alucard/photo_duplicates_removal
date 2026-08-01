@@ -274,32 +274,107 @@ class TestReclassifyCompareGroups:
         main, check = _folders(tmp_path)
         assert reclassify_compare_groups([], main, check) == ([], [])
 
-    def test_nested_check_folder_puts_file_in_both_lists(self, tmp_path):
-        """DOCUMENTS PRE-EXISTING BEHAVIOR -- not an endorsement.
+    def test_nested_check_folder_classifies_exclusively(self, tmp_path):
+        """#2298 FIXED. Was: a Check folder nested inside Main put the same file
+        in BOTH originals and previews -- shown as the keeper while also being
+        offered for trashing.
 
-        When Check is nested inside Main, a Check file matches both folders, so
-        it is placed in BOTH originals and previews: simultaneously a keeper and
-        a trash candidate. _start_custom_scan rejects Main == Check but does not
-        reject nesting, so this is reachable (Main=E:\Photos, Check=E:\Photos\2024).
-
-        Preserved verbatim through the Stage 4b extraction. Filed separately
-        rather than fixed inside a behavior-preserving refactor; if the fix lands,
-        update this test to assert the corrected behavior.
+        Now classification is exclusive and the deeper folder wins: files under
+        Check are Check files, so they stay trashable and never appear as
+        originals.
         """
         from scan_pipeline import reclassify_compare_groups
         main = tmp_path / "main"
         check = main / "sub"
         check.mkdir(parents=True)
-        nested = _Rec(check / "a_copy.jpg")
-        g = _Grp([_Rec(main / "a.jpg")], [nested])
+        g = _Grp([_Rec(main / "a.jpg")], [_Rec(check / "a_copy.jpg")])
 
         cross, _ = reclassify_compare_groups([g], main, check)
 
         names_o = [r.path.name for r in cross[0].originals]
         names_p = [r.path.name for r in cross[0].previews]
-        assert "a_copy.jpg" in names_o and "a_copy.jpg" in names_p, (
-            "current behavior: the nested file appears on both sides"
+        assert names_o == ["a.jpg"], "only the outer-folder file is the keeper"
+        assert names_p == ["a_copy.jpg"], "the nested file is the candidate"
+        assert not set(names_o) & set(names_p), (
+            "no file may be an original and a trash candidate at once"
         )
+
+    def test_nested_main_folder_protects_the_inner_reference(self, tmp_path):
+        """The other nesting direction (#2298). Main inside Check means the
+        inner folder is the REFERENCE, so the deeper-folder-wins rule must
+        protect it rather than offer it for trashing."""
+        from scan_pipeline import reclassify_compare_groups
+        check = tmp_path / "library"
+        main = check / "reference"
+        main.mkdir(parents=True)
+        g = _Grp([_Rec(main / "keep.jpg")], [_Rec(check / "dupe.jpg")])
+
+        cross, _ = reclassify_compare_groups([g], main, check)
+
+        names_o = [r.path.name for r in cross[0].originals]
+        names_p = [r.path.name for r in cross[0].previews]
+        assert names_o == ["keep.jpg"], "the inner Main file must stay protected"
+        assert names_p == ["dupe.jpg"]
+        assert not set(names_o) & set(names_p)
+
+    def test_nested_never_yields_a_file_on_both_sides(self, tmp_path):
+        """The #2298 invariant over a batch of groups."""
+        from scan_pipeline import reclassify_compare_groups
+        main = tmp_path / "photos"
+        check = main / "2024"
+        check.mkdir(parents=True)
+        groups = [
+            _Grp([_Rec(main / "a.jpg")], [_Rec(check / "a2.jpg")]),
+            _Grp([_Rec(check / "b.jpg")], [_Rec(check / "b2.jpg")]),
+            _Grp([_Rec(main / "c.jpg")], [_Rec(main / "c2.jpg")]),
+        ]
+
+        cross, within = reclassify_compare_groups(groups, main, check)
+
+        for g in cross + within:
+            o = {id(r) for r in g.originals}
+            p = {id(r) for r in g.previews}
+            assert not (o & p), "a record appeared as both keeper and candidate"
+
+
+class TestFolderNesting:
+
+    def test_detects_child_inside_parent(self, tmp_path):
+        from scan_pipeline import folders_are_nested
+        parent = tmp_path / "p"
+        child = parent / "c"
+        child.mkdir(parents=True)
+        assert folders_are_nested(parent, child) is True
+        assert folders_are_nested(child, parent) is True, "direction-agnostic"
+
+    def test_siblings_are_not_nested(self, tmp_path):
+        from scan_pipeline import folders_are_nested
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        assert folders_are_nested(a, b) is False
+
+    def test_identical_folders_are_not_nested(self, tmp_path):
+        """Main == Check is rejected by its own check with a clearer message;
+        reporting it as "nested" would show the wrong warning."""
+        from scan_pipeline import folders_are_nested
+        assert folders_are_nested(tmp_path, tmp_path) is False
+
+    def test_inner_folder_of_returns_the_deeper_one(self, tmp_path):
+        from scan_pipeline import inner_folder_of
+        parent = tmp_path / "p"
+        child = parent / "c"
+        child.mkdir(parents=True)
+        assert inner_folder_of(parent, child) == child.resolve()
+        assert inner_folder_of(child, parent) == child.resolve()
+
+    def test_inner_folder_of_none_for_unrelated(self, tmp_path):
+        from scan_pipeline import inner_folder_of
+        a, b = tmp_path / "a", tmp_path / "b"
+        a.mkdir()
+        b.mkdir()
+        assert inner_folder_of(a, b) is None
+        assert inner_folder_of(tmp_path, tmp_path) is None
 
 
 # ── solo originals (files that matched nothing) ───────────────────────────────

@@ -62,6 +62,7 @@ from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates, scan_skip_paths)
 from scan_request import ScanRequest
 from scan_pipeline import (collect_folder_records, compute_solo_originals,
+                          folders_are_nested, inner_folder_of,
                           reclassify_compare_groups)
 from mover import move_groups, ops_log_path
 from reporter import generate_report
@@ -2910,6 +2911,31 @@ class App:
             error_handler.show_warning(self.root, "Same Folder",
                 "The Main and Check folders must be different.\nPlease select two separate folders.")
             return
+        # Overlapping folders (#2298): a file inside the inner folder belongs to
+        # both roles. The scan handles it -- the deeper folder wins, so nothing
+        # is ever both kept and trashed -- but the result is easy to
+        # misread, so warn before spending the scan.
+        if folders_are_nested(main_path, check_path):
+            _inner_path = inner_folder_of(main_path, check_path)
+            _inner, _outer = (
+                ("Check", "Main") if _inner_path == check_path.resolve()
+                else ("Main", "Check")
+            )
+            if not error_handler.confirm_with_delay(
+                self.root, "Folders Overlap",
+                f"The {_inner} folder is inside the {_outer} folder.\n\n"
+                f"Because every file in {_inner} is also inside {_outer}, each "
+                f"one could count as both a file to keep and a duplicate to "
+                f"remove.\n\n"
+                f"If you continue, files inside the {_inner} folder are treated "
+                f"as {_inner} files only, so nothing is ever kept and deleted "
+                f"at the same time. Results may still be confusing to read.\n\n"
+                f"Recommended: cancel and pick two separate folders that do not "
+                f"contain each other.",
+                confirm_text="Scan anyway",
+                cancel_text="Choose other folders",
+            ):
+                return
 
         self._collect_settings()
         self._scanning = True

@@ -103,6 +103,109 @@ def _show_custom_error(
     _show_custom_note(parent, title, msg, kind="error", copy_button=True)
 
 
+def confirm_with_delay(
+    parent: Optional[tk.Widget],
+    title: str,
+    user_msg: str,
+    *,
+    confirm_text: str = "Continue anyway",
+    cancel_text: str = "Cancel",
+    delay_seconds: int = 3,
+    kind: str = "warning",
+) -> bool:
+    """Theme-aware confirmation whose confirm button unlocks after a delay.
+
+    Used where continuing is legitimate but the consequences are easy to skim
+    past. The confirm button starts disabled and counts down, so the warning
+    cannot be dismissed reflexively; Cancel is available immediately and is the
+    default (Escape and the window's close button both cancel).
+
+    Returns True only if the user explicitly confirms.
+    """
+    pal = _palette()
+    bg = pal.get("CARD_BG", "#FFFFFF")
+    fg = pal.get("TEXT1", "#1B1B1F")
+    accent = pal.get("WARNING", "#E65100") if kind == "warning" else pal.get("ACCENT", "#1565C0")
+    muted = pal.get("TEXT3", "#79747E")
+    surface2 = pal.get("SURFACE2", "#ECEEF2")
+
+    root = parent.winfo_toplevel() if parent else None
+    win = tk.Toplevel(root)
+    win.title(title)
+    win.resizable(False, False)
+    win.configure(bg=bg)
+    win.grab_set()
+
+    result = {"ok": False}
+
+    body = tk.Frame(win, padx=20, pady=16, bg=bg)
+    body.pack(fill=tk.BOTH, expand=True)
+
+    tk.Label(body, text="!", font=("Segoe UI", 18, "bold"), fg="#FFFFFF",
+             bg=accent, width=2, height=1, relief=tk.FLAT).pack(
+        side=tk.LEFT, anchor=tk.N, padx=(0, 14))
+    tk.Label(body, text=user_msg, justify=tk.LEFT, wraplength=460,
+             font=("Segoe UI", 9), anchor=tk.W, bg=bg, fg=fg).pack(
+        side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    btn_bar = tk.Frame(win, pady=10, padx=20, bg=bg)
+    btn_bar.pack(fill=tk.X)
+
+    def _cancel(*_a):
+        result["ok"] = False
+        win.destroy()
+
+    def _confirm(*_a):
+        result["ok"] = True
+        win.destroy()
+
+    cancel_btn = tk.Button(btn_bar, text=cancel_text, command=_cancel,
+                           font=("Segoe UI", 9, "bold"), relief=tk.FLAT, bd=0,
+                           padx=16, pady=4, cursor="hand2")
+    cancel_btn.configure(bg=surface2, fg=fg, activebackground=surface2,
+                         activeforeground=fg)
+    cancel_btn.pack(side=tk.RIGHT)
+
+    confirm_var = tk.StringVar(value=f"{confirm_text}  ({delay_seconds})")
+    confirm_btn = tk.Button(btn_bar, textvariable=confirm_var, command=_confirm,
+                            font=("Segoe UI", 9), relief=tk.FLAT, bd=0,
+                            padx=16, pady=4, state=tk.DISABLED)
+    confirm_btn.configure(bg=surface2, fg=muted, activebackground=accent,
+                          activeforeground="#FFFFFF", disabledforeground=muted)
+    confirm_btn.pack(side=tk.RIGHT, padx=(0, 8))
+
+    # Expose for tests: the gating is the whole point of this dialog.
+    win._confirm_btn = confirm_btn          # type: ignore[attr-defined]
+    win._confirm_var = confirm_var          # type: ignore[attr-defined]
+
+    def _tick(remaining: int) -> None:
+        if not confirm_btn.winfo_exists():
+            return
+        if remaining > 0:
+            confirm_var.set(f"{confirm_text}  ({remaining})")
+            win.after(1000, lambda: _tick(remaining - 1))
+        else:
+            confirm_var.set(confirm_text)
+            confirm_btn.configure(state=tk.NORMAL, cursor="hand2",
+                                  bg=accent, fg="#FFFFFF")
+
+    _tick(delay_seconds)
+
+    # Cancel is the safe default: Escape and the window close button both cancel.
+    win.bind("<Escape>", _cancel)
+    win.protocol("WM_DELETE_WINDOW", _cancel)
+    cancel_btn.focus_set()
+
+    win.update_idletasks()
+    if root:
+        px = root.winfo_x() + root.winfo_width() // 2 - win.winfo_width() // 2
+        py = root.winfo_y() + root.winfo_height() // 2 - win.winfo_height() // 2
+        win.geometry(f"+{px}+{py}")
+
+    win.wait_window()
+    return result["ok"]
+
+
 def _show_custom_note(
     parent: Optional[tk.Widget],
     title: str,

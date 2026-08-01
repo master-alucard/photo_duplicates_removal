@@ -339,3 +339,68 @@ class TestVideoFrameCacheLRU(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfirmWithDelay(unittest.TestCase):
+    """error_handler.confirm_with_delay gates its confirm button behind a
+    countdown so a warning cannot be dismissed reflexively (#2298)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = _get_root()
+
+    def _run_dialog(self, act, delay_seconds=3):
+        """Open the dialog, run *act(win)* once it exists, return the result."""
+        import error_handler
+        box = {}
+
+        def _poll():
+            for w in self.root.winfo_children():
+                if isinstance(w, tk.Toplevel) and w.title() == "T":
+                    act(w)
+                    return
+            self.root.after(10, _poll)
+
+        self.root.after(10, _poll)
+        box["result"] = error_handler.confirm_with_delay(
+            self.root, "T", "msg", delay_seconds=delay_seconds)
+        return box["result"]
+
+    def test_confirm_button_starts_disabled(self):
+        seen = {}
+
+        def _act(win):
+            seen["state"] = str(win._confirm_btn.cget("state"))
+            seen["label"] = win._confirm_var.get()
+            win.destroy()
+
+        self._run_dialog(_act)
+        self.assertEqual(seen["state"], "disabled",
+                         "confirm must be locked while the countdown runs")
+        self.assertIn("(3)", seen["label"], "countdown should be visible")
+
+    def test_confirm_button_unlocks_after_the_delay(self):
+        seen = {}
+
+        def _act(win):
+            # 0-second delay: the unlock tick runs immediately.
+            self.root.update()
+            seen["state"] = str(win._confirm_btn.cget("state"))
+            seen["label"] = win._confirm_var.get()
+            win.destroy()
+
+        self._run_dialog(_act, delay_seconds=0)
+        self.assertEqual(seen["state"], "normal")
+        self.assertNotIn("(", seen["label"], "countdown text should be gone")
+
+    def test_closing_without_confirming_returns_false(self):
+        """Cancel is the safe default: dismissing must never mean 'proceed'."""
+        result = self._run_dialog(lambda win: win.destroy())
+        self.assertIs(result, False)
+
+    def test_explicit_confirm_returns_true(self):
+        def _act(win):
+            self.root.update()
+            win._confirm_btn.invoke()
+
+        self.assertIs(self._run_dialog(_act, delay_seconds=0), True)

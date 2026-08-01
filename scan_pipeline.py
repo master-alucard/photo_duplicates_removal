@@ -35,6 +35,36 @@ def _in_folder(path: Path, resolved_folder: Path) -> bool:
         return False
 
 
+def folders_are_nested(a: Path, b: Path) -> bool:
+    """True when one folder contains the other (either direction).
+
+    Compare Scan classifies files by folder membership, so overlapping folders
+    make a file belong to both roles. Callers warn the user before scanning;
+    see reclassify_compare_groups for how the overlap is then resolved.
+    Identical folders are not "nested" -- that case is rejected separately.
+    """
+    a_res, b_res = Path(a).resolve(), Path(b).resolve()
+    if a_res == b_res:
+        return False
+    return _in_folder(a_res, b_res) or _in_folder(b_res, a_res)
+
+
+def inner_folder_of(a: Path, b: Path) -> "Optional[Path]":
+    """Return whichever of *a* / *b* is nested inside the other, else None.
+
+    The inner folder is the more specific one, which is the side that wins when
+    a file belongs to both (see reclassify_compare_groups).
+    """
+    a_res, b_res = Path(a).resolve(), Path(b).resolve()
+    if a_res == b_res:
+        return None
+    if _in_folder(a_res, b_res):
+        return a_res
+    if _in_folder(b_res, a_res):
+        return b_res
+    return None
+
+
 def reclassify_compare_groups(groups: list, main_folder: Path,
                               check_folder: Path) -> "tuple[list, list]":
     """Re-split Compare Scan groups into (cross_folder, within_check).
@@ -52,22 +82,46 @@ def reclassify_compare_groups(groups: list, main_folder: Path,
     Mutates the passed groups in place (as the original inline code did) and
     returns the two buckets so callers can count them separately.
 
-    Note: a Check folder nested inside Main makes a file match both sides. The
-    pre-existing behavior -- preserved here deliberately -- is that such a file
-    lands in BOTH lists for its group. See test_nested_check_folder_* in
-    tests/test_scan_pipeline.py, which documents it rather than asserting it is
-    correct.
+    NESTED FOLDERS (#2298). When one folder contains the other, a file under
+    the inner folder is inside both, and previously landed in BOTH lists --
+    shown as the surviving original while also being offered for trashing.
+    Classification is now exclusive: **the more deeply nested folder wins**,
+    because it is the more specific statement of intent. That matches what the
+    user means in both directions:
+
+      * Check inside Main  (Main=Photos, Check=Photos/2024): files under 2024
+        are the candidates to clean -> Check wins, they stay trashable.
+      * Main inside Check  (Main=Photos/2024, Check=Photos): files under 2024
+        are the reference -> Main wins, they stay protected.
+
+    Either way no file can be an original and a trash candidate at once.
     """
     main_res = Path(main_folder).resolve()
     check_res = Path(check_folder).resolve()
+
+    # Resolve the overlap once per call rather than per member.
+    check_inside_main = _in_folder(check_res, main_res) and check_res != main_res
+    main_inside_check = _in_folder(main_res, check_res) and check_res != main_res
+
+    def _roles(record) -> "tuple[bool, bool]":
+        in_main = _in_folder(record.path, main_res)
+        in_check = _in_folder(record.path, check_res)
+        if in_main and in_check:
+            # Overlap: award the file to the deeper (more specific) folder.
+            if check_inside_main:
+                in_main = False
+            elif main_inside_check:
+                in_check = False
+        return in_main, in_check
 
     cross_groups: list = []
     within_check_groups: list = []
 
     for g in groups:
         members = list(g.originals) + list(g.previews)
-        from_main = [r for r in members if _in_folder(r.path, main_res)]
-        from_check = [r for r in members if _in_folder(r.path, check_res)]
+        roles = [(r, *_roles(r)) for r in members]
+        from_main = [r for r, in_m, _ in roles if in_m]
+        from_check = [r for r, _, in_c in roles if in_c]
 
         if from_main and from_check:
             # Cross-folder match: Main copies are the keepers.
