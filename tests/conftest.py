@@ -261,3 +261,20 @@ def pytest_collection_modifyitems(config, items):
     its ``_ROOT`` module-global exists."""
     if _MASTER_ROOT is not None:
         _publish_master_root(_MASTER_ROOT)
+
+
+def pytest_configure(config):
+    """Register custom markers.
+
+    This repo has no pytest.ini / pyproject.toml / setup.cfg, so markers are
+    declared here to avoid PytestUnknownMarkWarning.
+
+    ``slow`` — tests that run the real scan pipeline over the large calibration
+    corpora on E:\MEDIA\test\ (see tests/test_calibration_golden.py). They
+    skip automatically when that data is absent. Exclude them with:
+        python -m pytest tests/ -m "not slow"
+    """
+    config.addinivalue_line(
+        "markers",
+        "slow: runs the real pipeline over the calibration corpora (minutes)",
+    )
