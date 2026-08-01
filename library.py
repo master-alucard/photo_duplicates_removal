@@ -686,6 +686,81 @@ class Library:
             return False
 
 
+# ── scan-worker cache helpers ─────────────────────────────────────────────────
+# Shared by the regular scan and the Compare Scan. Both previously carried their
+# own copy of this logic (one inline, one as nested defs), which is how the same
+# defect ended up needing fixing twice (#159/#161, then #2149). All three are
+# best-effort by design: the library is a cache, so a failure here must degrade
+# to "re-hash the files", never abort a scan.
+
+def load_scan_cache(folder: "str | Path") -> "tuple[Optional[dict], Optional[Library]]":
+    """Load merged cached hashes for *folder*.
+
+    Returns ``(cache, library)``, or ``(None, None)`` when the library is
+    unavailable. The cache is loaded unconditionally: staleness is verified
+    per-file (mtime + size) by the hasher unless the caller passes
+    ``trust_library=True``, so serving it is always safe.
+    """
+    try:
+        lib = Library.load(get_library_dir())
+        return lib.load_cache_merged(str(Path(folder).resolve())), lib
+    except Exception:
+        return None, None
+
+
+def inject_records_into_cache(cache: "Optional[dict]", records: list) -> dict:
+    """Return *cache* with *records* added as trusted entries.
+
+    Used when resuming a paused scan: records already hashed in the interrupted
+    run are injected so they are not re-hashed. Accepts ``None`` and returns a
+    usable dict either way.
+    """
+    if cache is None:
+        cache = {}
+    for rec in records:
+        try:
+            cache[str(rec.path.resolve())] = FileRecord.from_image_record(rec)
+        except Exception:
+            pass   # a single unconvertible record must not lose the whole cache
+    return cache
+
+
+def writeback_scan_results(folder: "str | Path", records: list) -> None:
+    """Persist freshly hashed *records* for *folder* so later scans skip them.
+
+    Best-effort and silent on failure -- the scan has already succeeded by the
+    time this runs, and a cache-write problem must not surface as a scan error.
+    """
+    if not records:
+        return
+    try:
+        folder = Path(folder)
+        lib = Library.load(get_library_dir())
+        cache: dict = {}
+        for rec in records:
+            try:
+                st = rec.path.stat()
+                cache[str(rec.path)] = FileRecord.from_image_record(
+                    rec, st_mtime=st.st_mtime)
+            except Exception:
+                # File vanished between hashing and writeback -- store without
+                # the mtime; the staleness check will re-hash it next time.
+                cache[str(rec.path)] = FileRecord.from_image_record(rec)
+        folder_str = str(folder.resolve())
+        lib.save_cache(folder_str, cache)
+        drive = get_drive_info(folder)
+        lib.set_folder(FolderEntry(
+            path               = folder_str,
+            drive_type         = drive.drive_type,
+            volume_serial      = drive.volume_serial,
+            folder_fingerprint = compute_folder_fingerprint(folder),
+            last_updated       = datetime.now().isoformat(),
+            file_count         = len(cache),
+        ))
+    except Exception:
+        pass   # library write-back is best-effort
+
+
 # ── update_folder ──────────────────────────────────────────────────────────────
 
 def update_folder(

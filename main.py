@@ -3023,61 +3023,22 @@ class App:
         def cb(msg, done, total, phase):
             self._custom_progress_cb(msg, done, total, phase)
 
+        # Library-cache helpers are shared with the regular scan worker; see
+        # library.load_scan_cache / inject_records_into_cache /
+        # writeback_scan_results.  The `use` argument is intentionally absent:
+        # both workers load the cache unconditionally and let per-file staleness
+        # checks (or trust_library) decide whether an entry is honored.
         def _load_lib_cache(folder: Path, use: bool):
-            """Load cached hashes for *folder* from the library."""
-            try:
-                from library import Library, get_library_dir
-                _lib = Library.load(get_library_dir())
-                return _lib.load_cache_merged(str(folder.resolve())), _lib
-            except Exception:
-                return None, None
+            from library import load_scan_cache
+            return load_scan_cache(folder)
 
         def _inject_records_into_cache(records_list, lib_cache):
-            """Inject already-hashed records into the in-memory cache."""
-            if lib_cache is None:
-                lib_cache = {}
-            try:
-                from library import FileRecord as _FR
-                for _r in records_list:
-                    try:
-                        lib_cache[str(_r.path.resolve())] = _FR.from_image_record(_r)
-                    except Exception:
-                        pass
-            except ImportError:
-                pass
-            return lib_cache
+            from library import inject_records_into_cache
+            return inject_records_into_cache(lib_cache, records_list)
 
         def _writeback_to_library(folder: Path, records: list) -> None:
-            """Write scan results back to the library (best-effort)."""
-            if not records:
-                return
-            try:
-                from library import (Library, get_library_dir, FileRecord,
-                                     FolderEntry, get_drive_info,
-                                     compute_folder_fingerprint)
-                from datetime import datetime as _dt
-                _lib_wb = Library.load(get_library_dir())
-                _wb_cache: dict = {}
-                for _r in records:
-                    try:
-                        _st = _r.path.stat()
-                        _wb_cache[str(_r.path)] = FileRecord.from_image_record(
-                            _r, st_mtime=_st.st_mtime)
-                    except Exception:
-                        _wb_cache[str(_r.path)] = FileRecord.from_image_record(_r)
-                _folder_str = str(folder.resolve())
-                _lib_wb.save_cache(_folder_str, _wb_cache)
-                _di = get_drive_info(folder)
-                _lib_wb.set_folder(FolderEntry(
-                    path               = _folder_str,
-                    drive_type         = _di.drive_type,
-                    volume_serial      = _di.volume_serial,
-                    folder_fingerprint = compute_folder_fingerprint(folder),
-                    last_updated       = _dt.now().isoformat(),
-                    file_count         = len(_wb_cache),
-                ))
-            except Exception:
-                pass   # library write-back is best-effort
+            from library import writeback_scan_results
+            writeback_scan_results(folder, records)
 
         def _save_custom_pause(phase, main_records, check_records,
                                compare_i=0, union_parent=None):
@@ -5991,28 +5952,14 @@ class App:
                 cb(f"Resuming — {len(_already)} files already hashed.", 0, 0, "Hashing")
                 failed: list = []
 
-                # Build a merged cache: library + already-hashed records
-                _lib_cache = None
-                try:
-                    from library import Library, get_library_dir
-                    cb("Loading cached hashes…", 0, 1, "Discovery")
-                    _lib = Library.load(get_library_dir())
-                    _lib_cache = _lib.load_cache_merged(str(src.resolve()))
-                except Exception:
-                    _lib_cache = None
-                if _lib_cache is None:
-                    _lib_cache = {}
-                # Add saved records into the in-memory cache so they won't
-                # be re-hashed.  Trust them — they were just computed.
-                try:
-                    from library import FileRecord as _FR
-                    for _r in _already:
-                        try:
-                            _lib_cache[str(_r.path.resolve())] = _FR.from_image_record(_r)
-                        except Exception:
-                            pass
-                except ImportError:
-                    pass
+                # Build a merged cache: library + already-hashed records.
+                # The saved records are injected so they are not re-hashed;
+                # trust_library=True below honors them without a staleness check
+                # because they were just computed in the interrupted run.
+                from library import load_scan_cache, inject_records_into_cache
+                cb("Loading cached hashes…", 0, 1, "Discovery")
+                _lib_cache, _ = load_scan_cache(src)
+                _lib_cache = inject_records_into_cache(_lib_cache, _already)
 
                 records = collect_images(
                     src, skip_paths, settings,
@@ -6032,14 +5979,9 @@ class App:
                 # Always load cached hashes for this folder if available.
                 # Staleness is verified per-file (mtime + size) unless the
                 # user explicitly enabled "Trust library" in Library mode.
-                _lib_cache = None
-                try:
-                    from library import Library, get_library_dir
-                    cb("Loading cached hashes…", 0, 1, "Discovery")
-                    _lib = Library.load(get_library_dir())
-                    _lib_cache = _lib.load_cache_merged(str(src.resolve()))
-                except Exception:
-                    _lib_cache = None
+                from library import load_scan_cache
+                cb("Loading cached hashes…", 0, 1, "Discovery")
+                _lib_cache, _ = load_scan_cache(src)
                 # trust_library (skip staleness check) only applies when the
                 # user explicitly chose Library mode *and* enabled that option.
                 _effective_trust = trust_library and use_library
@@ -6056,34 +5998,8 @@ class App:
                 # Write scan results back to the library cache so future
                 # scans skip re-hashing unchanged files (staleness check via
                 # mtime+size guards against serving stale hashes).
-                if records:
-                    try:
-                        from library import (Library, get_library_dir, FileRecord,
-                                             FolderEntry, get_drive_info,
-                                             compute_folder_fingerprint)
-                        from datetime import datetime as _dt
-                        _lib_wb = Library.load(get_library_dir())
-                        _wb_cache: dict = {}
-                        for _r in records:
-                            try:
-                                _st = _r.path.stat()
-                                _wb_cache[str(_r.path)] = FileRecord.from_image_record(
-                                    _r, st_mtime=_st.st_mtime)
-                            except Exception:
-                                _wb_cache[str(_r.path)] = FileRecord.from_image_record(_r)
-                        _src_str = str(src.resolve())
-                        _lib_wb.save_cache(_src_str, _wb_cache)
-                        _di = get_drive_info(src)
-                        _lib_wb.set_folder(FolderEntry(
-                            path               = _src_str,
-                            drive_type         = _di.drive_type,
-                            volume_serial      = _di.volume_serial,
-                            folder_fingerprint = compute_folder_fingerprint(src),
-                            last_updated       = _dt.now().isoformat(),
-                            file_count         = len(_wb_cache),
-                        ))
-                    except Exception:
-                        pass   # library write-back is best-effort
+                from library import writeback_scan_results
+                writeback_scan_results(src, records)
                 self._broken_files = failed
 
             if self._stop_flag[0]:

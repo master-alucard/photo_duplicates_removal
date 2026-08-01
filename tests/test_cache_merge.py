@@ -429,58 +429,78 @@ class TestBrowseModeAlwaysUsesCache:
 
     def test_worker_loads_cache_without_use_library_gate(self):
         """
-        _worker must call load_cache_merged unconditionally — the cache load
-        must NOT be inside an `if use_library:` (or similar) guard.
+        The cache load must be unconditional — never inside an `if use_library:`
+        (or similar) guard, or browse mode would silently re-hash everything.
+
+        Since the Stage 2 refactor the load lives in library.load_scan_cache, so
+        this walks both sides of that boundary: _worker must call the helper
+        ungated, and the helper itself must load ungated.
         """
         import ast, inspect
         import main as _main
+        import library as _library
 
-        src  = textwrap.dedent(inspect.getsource(_main.App._worker))
-        tree = ast.parse(src)
+        def _calls_named(tree, name):
+            found = []
 
-        load_cache_calls: list[ast.Call] = []
+            class _V(ast.NodeVisitor):
+                def visit_Call(self, node):
+                    fn = node.func
+                    if ((isinstance(fn, ast.Attribute) and fn.attr == name)
+                            or (isinstance(fn, ast.Name) and fn.id == name)):
+                        found.append(node)
+                    self.generic_visit(node)
 
-        class _Visitor(ast.NodeVisitor):
-            def visit_Call(self, node):
-                # Look for .load_cache_merged(...) call
-                if (isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "load_cache_merged"):
-                    load_cache_calls.append(node)
-                self.generic_visit(node)
+            _V().visit(tree)
+            return found
 
-        _Visitor().visit(tree)
-        assert len(load_cache_calls) >= 1, \
-            "_worker must call load_cache_merged at least once"
+        def _gated_by_use_library(tree, name):
+            gated = []
 
-        # Verify none of those calls are nested inside an `if use_library` test
-        # by checking their parent nodes.  We walk again and track If-node ancestry.
+            class _G(ast.NodeVisitor):
+                def __init__(self):
+                    self._inside = False
 
-        gated_calls: list[ast.Call] = []
+                def visit_If(self, node):
+                    was = self._inside
+                    if "use_library" in ast.unparse(node.test):
+                        self._inside = True
+                    self.generic_visit(node)
+                    self._inside = was
 
-        class _GateChecker(ast.NodeVisitor):
-            def __init__(self):
-                self._in_use_library_if = False
+                def visit_Call(self, node):
+                    fn = node.func
+                    if self._inside and (
+                            (isinstance(fn, ast.Attribute) and fn.attr == name)
+                            or (isinstance(fn, ast.Name) and fn.id == name)):
+                        gated.append(node)
+                    self.generic_visit(node)
 
-            def visit_If(self, node):
-                # Detect `if use_library` or `if ... use_library ...`
-                src_fragment = ast.unparse(node.test)
-                was = self._in_use_library_if
-                if "use_library" in src_fragment:
-                    self._in_use_library_if = True
-                self.generic_visit(node)
-                self._in_use_library_if = was
+            _G().visit(tree)
+            return gated
 
-            def visit_Call(self, node):
-                if (isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "load_cache_merged"
-                        and self._in_use_library_if):
-                    gated_calls.append(node)
-                self.generic_visit(node)
+        # ── 1. _worker reaches the cache, ungated ─────────────────────────
+        worker_tree = ast.parse(textwrap.dedent(inspect.getsource(_main.App._worker)))
+        loads = _calls_named(worker_tree, "load_scan_cache")
+        assert len(loads) >= 1, (
+            "_worker must load the library cache (via library.load_scan_cache)"
+        )
+        gated = _gated_by_use_library(worker_tree, "load_scan_cache")
+        assert not gated, (
+            "the cache load must not be gated behind `if use_library`; "
+            f"found {len(gated)} gated call(s)"
+        )
 
-        _GateChecker().visit(tree)
-        assert len(gated_calls) == 0, \
-            "load_cache_merged must not be gated behind `if use_library`; " \
-            f"found {len(gated_calls)} gated call(s)"
+        # ── 2. the helper itself loads unconditionally ────────────────────
+        helper_tree = ast.parse(
+            textwrap.dedent(inspect.getsource(_library.load_scan_cache)))
+        merged = _calls_named(helper_tree, "load_cache_merged")
+        assert len(merged) >= 1, (
+            "library.load_scan_cache must call load_cache_merged"
+        )
+        assert not _gated_by_use_library(helper_tree, "load_cache_merged"), (
+            "load_scan_cache must not re-introduce a use_library gate"
+        )
 
     def test_effective_trust_requires_both_flags(self):
         """
