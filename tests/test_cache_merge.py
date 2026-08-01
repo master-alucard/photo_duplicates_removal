@@ -422,42 +422,81 @@ class TestSubfolderCacheReuse:
 
 class TestBrowseModeAlwaysUsesCache:
     """
-    Verify that the cache-loading path in main._worker is unconditional.
-    We test this by inspecting the source code of main._worker rather than
-    launching a real App (which requires a display and threading).
+    Browse mode (use_library=False) must still READ the library cache -- only
+    the staleness check is affected by Library mode, never whether the cache is
+    consulted at all. Otherwise every browse scan re-hashes from scratch.
+
+    Asserted behaviorally. Earlier versions of this test inspected the AST of
+    main.App._worker for a literal cache call, which broke three times as the
+    2026-07 refactor moved that call (inline -> library.load_scan_cache ->
+    scan_pipeline.collect_folder_records) without ever changing the behavior it
+    was guarding. Driving the real code path is both stronger and stable.
     """
 
-    def test_worker_loads_cache_without_use_library_gate(self):
-        """
-        The cache load must be unconditional — never inside an `if use_library:`
-        (or similar) guard, or browse mode would silently re-hash everything.
+    def _seed_cache_and_collect(self, tmp_path, monkeypatch, **collect_kwargs):
+        """Seed a library cache for a folder, then run the collect phase and
+        return the library_cache actually handed to the scanner."""
+        import library
+        import scan_pipeline
+        from PIL import Image
+        from scan_pipeline import collect_folder_records
 
-        Since the Stage 2 refactor the load lives in library.load_scan_cache, so
-        this walks both sides of that boundary: _worker must call the helper
-        ungated, and the helper itself must load ungated.
-        """
+        lib_dir = tmp_path / "_library"
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        monkeypatch.setattr(library, "get_library_dir", lambda: lib_dir)
+
+        src = tmp_path / "src"
+        src.mkdir()
+        for i in range(2):
+            Image.new("RGB", (64, 48), (i * 60, 90, 200)).save(
+                src / f"img_{i}.jpg", "JPEG", quality=90)
+
+        # First pass populates the cache via writeback.
+        collect_folder_records(src, set(), Settings(recursive=False))
+
+        seen = {}
+        real_collect = scan_pipeline.collect_images
+
+        def _spy(*a, **kw):
+            seen["library_cache"] = kw.get("library_cache")
+            seen["trust_library"] = kw.get("trust_library")
+            return real_collect(*a, **kw)
+
+        monkeypatch.setattr(scan_pipeline, "collect_images", _spy)
+        collect_folder_records(src, set(), Settings(recursive=False),
+                               **collect_kwargs)
+        return seen
+
+    def test_browse_mode_still_reads_the_cache(self, tmp_path, monkeypatch):
+        """trust=False (browse mode) must still pass the populated cache."""
+        seen = self._seed_cache_and_collect(tmp_path, monkeypatch, trust=False)
+        assert seen["library_cache"], (
+            "browse mode must still consult the library cache; an empty/None "
+            "cache here means every browse scan re-hashes from scratch"
+        )
+
+    def test_browse_mode_does_not_trust_the_cache(self, tmp_path, monkeypatch):
+        """...but it must NOT skip staleness checks."""
+        seen = self._seed_cache_and_collect(tmp_path, monkeypatch, trust=False)
+        assert seen["trust_library"] is False
+
+    def test_library_mode_trusts_the_cache(self, tmp_path, monkeypatch):
+        seen = self._seed_cache_and_collect(tmp_path, monkeypatch, trust=True)
+        assert seen["library_cache"]
+        assert seen["trust_library"] is True
+
+    def test_workers_reach_the_collect_phase_ungated(self):
+        """Both scan paths must route through the shared collect phase, and
+        never behind an `if use_library` guard."""
         import ast, inspect
         import main as _main
-        import library as _library
 
-        def _calls_named(tree, name):
-            found = []
+        for fname, fn in (("_worker", _main.App._worker),
+                          ("_custom_worker", _main.App._custom_worker)):
+            tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
+            calls, gated = [], []
 
             class _V(ast.NodeVisitor):
-                def visit_Call(self, node):
-                    fn = node.func
-                    if ((isinstance(fn, ast.Attribute) and fn.attr == name)
-                            or (isinstance(fn, ast.Name) and fn.id == name)):
-                        found.append(node)
-                    self.generic_visit(node)
-
-            _V().visit(tree)
-            return found
-
-        def _gated_by_use_library(tree, name):
-            gated = []
-
-            class _G(ast.NodeVisitor):
                 def __init__(self):
                     self._inside = False
 
@@ -469,38 +508,20 @@ class TestBrowseModeAlwaysUsesCache:
                     self._inside = was
 
                 def visit_Call(self, node):
-                    fn = node.func
-                    if self._inside and (
-                            (isinstance(fn, ast.Attribute) and fn.attr == name)
-                            or (isinstance(fn, ast.Name) and fn.id == name)):
-                        gated.append(node)
+                    f = node.func
+                    if ((isinstance(f, ast.Name) and f.id == "collect_folder_records")
+                            or (isinstance(f, ast.Attribute)
+                                and f.attr == "collect_folder_records")):
+                        calls.append(node)
+                        if self._inside:
+                            gated.append(node)
                     self.generic_visit(node)
 
-            _G().visit(tree)
-            return gated
-
-        # ── 1. _worker reaches the cache, ungated ─────────────────────────
-        worker_tree = ast.parse(textwrap.dedent(inspect.getsource(_main.App._worker)))
-        loads = _calls_named(worker_tree, "load_scan_cache")
-        assert len(loads) >= 1, (
-            "_worker must load the library cache (via library.load_scan_cache)"
-        )
-        gated = _gated_by_use_library(worker_tree, "load_scan_cache")
-        assert not gated, (
-            "the cache load must not be gated behind `if use_library`; "
-            f"found {len(gated)} gated call(s)"
-        )
-
-        # ── 2. the helper itself loads unconditionally ────────────────────
-        helper_tree = ast.parse(
-            textwrap.dedent(inspect.getsource(_library.load_scan_cache)))
-        merged = _calls_named(helper_tree, "load_cache_merged")
-        assert len(merged) >= 1, (
-            "library.load_scan_cache must call load_cache_merged"
-        )
-        assert not _gated_by_use_library(helper_tree, "load_cache_merged"), (
-            "load_scan_cache must not re-introduce a use_library gate"
-        )
+            _V().visit(tree)
+            assert calls, f"{fname} must use the shared collect phase"
+            assert not gated, (
+                f"{fname}: collect must not be gated behind `if use_library`"
+            )
 
     def test_effective_trust_requires_both_flags(self):
         """

@@ -61,6 +61,7 @@ from progress_tracker import PhaseTracker
 from scanner import (collect_images, find_groups, IMAGE_EXTENSIONS,
                      collect_videos, find_video_duplicates, scan_skip_paths)
 from scan_request import ScanRequest
+from scan_pipeline import collect_folder_records
 from mover import move_groups, ops_log_path
 from reporter import generate_report
 from report_viewer import ReportViewer
@@ -3031,23 +3032,6 @@ class App:
         def cb(msg, done, total, phase):
             self._custom_progress_cb(msg, done, total, phase)
 
-        # Library-cache helpers are shared with the regular scan worker; see
-        # library.load_scan_cache / inject_records_into_cache /
-        # writeback_scan_results.  The `use` argument is intentionally absent:
-        # both workers load the cache unconditionally and let per-file staleness
-        # checks (or trust_library) decide whether an entry is honored.
-        def _load_lib_cache(folder: Path, use: bool):
-            from library import load_scan_cache
-            return load_scan_cache(folder)
-
-        def _inject_records_into_cache(records_list, lib_cache):
-            from library import inject_records_into_cache
-            return inject_records_into_cache(lib_cache, records_list)
-
-        def _writeback_to_library(folder: Path, records: list) -> None:
-            from library import writeback_scan_results
-            writeback_scan_results(folder, records)
-
         def _save_custom_pause(phase, main_records, check_records,
                                compare_i=0, union_parent=None):
             """Persist the custom scan state so it can be resumed."""
@@ -3104,51 +3088,40 @@ class App:
                     # Partially hashed main folder — inject into cache
                     _partial_main = [deserialize_record(r) for r in resume_state.main_records]
                     cb(f"Resuming main folder — {len(_partial_main)} already hashed.", 0, 0, "Main folder")
-                    _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
-                    _main_cache = _inject_records_into_cache(_partial_main, _main_cache)
-                    main_records = collect_images(
+                    main_records = collect_folder_records(
                         main_path, skip_paths, settings,
                         progress_cb=cb,
                         stop_flag=self._custom_stop_flag,
                         pause_flag=self._custom_pause_flag,
                         failed_paths=main_failed,
-                        library_cache=_main_cache,
-                        trust_library=True,
+                        resume_records=_partial_main,
                     )
-                    _writeback_to_library(main_path, main_records)
                     _skip_main = True   # already done
                 if rp == "check_hashing":
                     # Partially hashed check folder — inject into cache
                     _partial_check = [deserialize_record(r) for r in resume_state.check_records]
                     cb(f"Resuming check folder — {len(_partial_check)} already hashed.", 0, 0, "Check folder")
-                    _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
-                    _check_cache = _inject_records_into_cache(_partial_check, _check_cache)
-                    check_records = collect_images(
+                    check_records = collect_folder_records(
                         check_path, skip_paths, settings,
                         progress_cb=cb,
                         stop_flag=self._custom_stop_flag,
                         pause_flag=self._custom_pause_flag,
                         failed_paths=check_failed,
-                        library_cache=_check_cache,
-                        trust_library=True,
+                        resume_records=_partial_check,
                     )
-                    _writeback_to_library(check_path, check_records)
                     _skip_check = True
 
             # ── Phase 1 — hash main folder ────────────────────────────────
             if not _skip_main:
                 cb("Scanning main folder…", 0, 1, "Main folder")
-                _main_cache, _ = _load_lib_cache(main_path, use_lib_main)
-                main_records = collect_images(
+                main_records = collect_folder_records(
                     main_path, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._custom_stop_flag,
                     pause_flag=self._custom_pause_flag,
                     failed_paths=main_failed,
-                    library_cache=_main_cache,
-                    trust_library=request.primary_library.effective_trust,
+                    trust=request.primary_library.effective_trust,
                 )
-                _writeback_to_library(main_path, main_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
@@ -3162,17 +3135,14 @@ class App:
             # ── Phase 2 — hash check folder ───────────────────────────────
             if not _skip_check:
                 cb("Scanning check folder…", 0, 1, "Check folder")
-                _check_cache, _ = _load_lib_cache(check_path, use_lib_check)
-                check_records = collect_images(
+                check_records = collect_folder_records(
                     check_path, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._custom_stop_flag,
                     pause_flag=self._custom_pause_flag,
                     failed_paths=check_failed,
-                    library_cache=_check_cache,
-                    trust_library=request.check_library.effective_trust,
+                    trust=request.check_library.effective_trust,
                 )
-                _writeback_to_library(check_path, check_records)
 
             if self._custom_stop_flag[0]:
                 self.root.after(0, lambda: self._on_custom_done("Stopped.", success=False))
@@ -5973,19 +5943,18 @@ class App:
                 # The saved records are injected so they are not re-hashed;
                 # trust_library=True below honors them without a staleness check
                 # because they were just computed in the interrupted run.
-                from library import load_scan_cache, inject_records_into_cache
                 cb("Loading cached hashes…", 0, 1, "Discovery")
-                _lib_cache, _ = load_scan_cache(src)
-                _lib_cache = inject_records_into_cache(_lib_cache, _already)
-
-                records = collect_images(
+                records = collect_folder_records(
                     src, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._stop_flag,
                     pause_flag=self._pause_flag,
                     failed_paths=failed,
-                    library_cache=_lib_cache,
-                    trust_library=True,      # trust injected records
+                    resume_records=_already,
+                    # NOTE: the compare-scan resume paths DO write back here.
+                    # Preserved as-is rather than normalized so Stage 4a stays
+                    # behavior-preserving; asymmetry recorded in the commit.
+                    writeback=False,
                 )
                 self._broken_files = failed
             else:
@@ -5996,27 +5965,18 @@ class App:
                 # Always load cached hashes for this folder if available.
                 # Staleness is verified per-file (mtime + size) unless the
                 # user explicitly enabled "Trust library" in Library mode.
-                from library import load_scan_cache
                 cb("Loading cached hashes…", 0, 1, "Discovery")
-                _lib_cache, _ = load_scan_cache(src)
                 # trust_library (skip staleness check) only applies when the
                 # user explicitly chose Library mode *and* enabled that option.
                 _effective_trust = request.primary_library.effective_trust
-
-                records = collect_images(
+                records = collect_folder_records(
                     src, skip_paths, settings,
                     progress_cb=cb,
                     stop_flag=self._stop_flag,
                     pause_flag=self._pause_flag,
                     failed_paths=failed,
-                    library_cache=_lib_cache,
-                    trust_library=_effective_trust,
+                    trust=_effective_trust,
                 )
-                # Write scan results back to the library cache so future
-                # scans skip re-hashing unchanged files (staleness check via
-                # mtime+size guards against serving stale hashes).
-                from library import writeback_scan_results
-                writeback_scan_results(src, records)
                 self._broken_files = failed
 
             if self._stop_flag[0]:
