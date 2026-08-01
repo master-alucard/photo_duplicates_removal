@@ -140,11 +140,11 @@ jobs:
           body: |
             ## What's new in ${{ steps.version.outputs.VERSION }}
 
-            ### Fixed: app could become unresponsive on very large scans
-            - **Scanning 10,000+ files or running for over an hour no longer risks the app freezing up.** Memory usage during hashing is now capped by processing files in bounded batches with cleanup in between, instead of holding every result in memory at once.
-            - **Lower memory use when reviewing video-heavy results.** Extracted video preview frames are now capped to a bounded number in memory instead of accumulating for the entire review session.
+            ### Fixed: Compare Scan with overlapping folders
+            - **A file can no longer be shown as a keeper and offered for deletion at the same time.** If the Check folder was inside the Main folder (for example Main = `D:\Photos` and Check = `D:\Photos\2024`), every file in the inner folder counted as belonging to both, so the same photo could appear as the copy to keep *and* as a duplicate to remove.
+            - **Overlapping folders now warn you before the scan starts**, explaining what will happen and letting you pick different folders instead. If you choose to continue, files in the inner folder are treated as belonging to that folder only, so nothing is ever kept and deleted at once.
 
-            > Builds on v1.2.2 (compare-scan trash-path fix, safer CLI, more accurate video-scan progress, dark-mode dialogs).
+            > Builds on v1.2.3 (large-scan memory fix) and v1.2.2 (compare-scan trash-path fix, safer CLI, dark-mode dialogs).
 
             ---
 
