@@ -1,0 +1,92 @@
+name: Linux Build (spike)
+
+# Spike only: proves whether Image Deduper builds and imports on Linux.
+# Deliberately NOT wired to tags -- the release pipeline in build.yml is
+# untouched. Triggers on spike branches, plus manual dispatch once this file
+# reaches the default branch.
+on:
+  push:
+    branches:
+      - "spike/**"
+      - "linux/**"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # Tk is the one dependency that is present by default on Windows and not
+      # on a Linux runner. Without it `import tkinter` fails at build time and
+      # PyInstaller produces a binary that cannot start.
+      - name: Install system Tk
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-tk tk-dev
+
+      - name: Verify tkinter is importable
+        run: python -c "import tkinter; print('tkinter OK', tkinter.TkVersion)"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pyinstaller
+
+      - name: Verify core imports
+        run: |
+          python -c "from PIL import Image; import imagehash, piexif, pywt, numpy, scipy; print('core deps OK')"
+          python -c "import rawpy; print('rawpy OK', rawpy.__version__)" || echo "rawpy UNAVAILABLE (RAW support would be degraded)"
+          python -c "import imageio_ffmpeg; print('ffmpeg:', imageio_ffmpeg.get_ffmpeg_exe())" || echo "imageio-ffmpeg UNAVAILABLE (video scanning would be degraded)"
+
+      # The suite is headless-Tk heavy; xvfb gives it a display so GUI tests
+      # exercise the real widgets instead of being skipped.
+      - name: Run test suite
+        run: |
+          pip install pytest
+          xvfb-run -a python -m pytest tests/ -q -p no:warnings --tb=short
+        continue-on-error: true
+
+      - name: Build with PyInstaller
+        run: pyinstaller image_deduper.spec --noconfirm
+
+      - name: Check the binary exists and is executable
+        run: |
+          test -x dist/ImageDeduper/ImageDeduper || { echo "binary missing or not executable"; ls -la dist/ImageDeduper | head; exit 1; }
+          echo "size: $(du -sh dist/ImageDeduper | cut -f1)"
+
+      # Launch under a virtual display and confirm the process stays alive.
+      # A GUI app that dies on import exits immediately; this catches that.
+      - name: Smoke test (launch under xvfb)
+        run: |
+          xvfb-run -a ./dist/ImageDeduper/ImageDeduper &
+          APP_PID=$!
+          sleep 15
+          if kill -0 "$APP_PID" 2>/dev/null; then
+            echo "app is running after 15s"
+            kill "$APP_PID" 2>/dev/null || true
+          else
+            echo "app exited early -- it failed to start"
+            exit 1
+          fi
+
+      - name: Package as tar.gz
+        run: |
+          cd dist && tar -czf ImageDeduper-linux-x86_64.tar.gz ImageDeduper
+          ls -la ImageDeduper-linux-x86_64.tar.gz
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ImageDeduper-linux-x86_64
+          path: dist/ImageDeduper-linux-x86_64.tar.gz
+          retention-days: 14

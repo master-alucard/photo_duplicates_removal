@@ -4,7 +4,15 @@
 # Requires Python 3.11 or 3.12 (PyInstaller does not support 3.13+ yet)
 # ─────────────────────────────────────────────────────────────────────────────
 
+import sys
+
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs
+
+# ── platform bits ─────────────────────────────────────────────────────────────
+# Only the icon is Windows-specific: PyInstaller expects .ico on Windows and
+# warns-then-ignores it elsewhere. Kept as one spec rather than a per-OS fork so
+# the two cannot drift (hidden imports and bundled data must stay identical).
+_ICON = 'assets/app.ico' if sys.platform == 'win32' else None
 
 # ── rawpy: collect the LibRaw DLL that ships inside the rawpy wheel ───────────
 try:
@@ -91,7 +99,7 @@ exe = EXE(
     [],
     exclude_binaries=True,
     name='ImageDeduper',
-    icon='assets/app.ico',
+    icon=_ICON,
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
